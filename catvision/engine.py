@@ -85,6 +85,10 @@ class Engine:
         chosen = [m for m in self._monitors if m.id in self.displays]
         return chosen or self._monitors  # nothing (still) connected: use all
 
+    def target_monitors(self) -> list[Monitor]:
+        """The displays CatVision changes (all of them if none are chosen)."""
+        return self._targets()
+
     def all_displays_selected(self) -> bool:
         return len(self._targets()) == len(self._monitors)
 

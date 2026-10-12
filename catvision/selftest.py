@@ -156,9 +156,14 @@ def _test_pattern_check(root, app, report_path: str) -> dict:
         def inside(win) -> bool:
             x, y = win.winfo_rootx(), win.winfo_rooty()
             return area[0] <= x < area[2] and area[1] <= y < area[3]
+        # The hotkey popup goes on every display CatVision is changing.
+        targets = app._toast_areas()
         app.toast.show("CatVision test", ms=400)
         root.update()
-        out["toast_on_app_monitor"] = inside(app.toast.win)
+        shown = [(w.winfo_rootx(), w.winfo_rooty()) for w in app.toast.wins[:len(targets)]]
+        out["toast_targets"] = [list(t) for t in targets]
+        out["toast_on_each_target"] = len(shown) == len(targets) and all(
+            a[0] <= x < a[2] and a[1] <= y < a[3] for (x, y), a in zip(shown, targets))
         app.toast.hide()
         tp = open_test_pattern(app)
         root.update()

@@ -9,6 +9,7 @@ import sys
 import time
 import tkinter as tk
 from tkinter import ttk
+from typing import Callable
 
 from . import __version__, curves, dialogs, filters, winutil
 from . import config as config_mod
@@ -86,43 +87,51 @@ def display_chip_text(m, index: int) -> str:
 
 
 class Toast:
-    """Tiny click-through popup used to confirm hotkey presses.
+    """Tiny click-through popup used to confirm hotkey presses, shown at the
+    top of every display CatVision is changing.
 
-    It is created once and then only made visible/invisible, so it never
-    takes keyboard focus away from the game.
+    Its windows are created once and then only made visible/invisible, so it
+    never takes keyboard focus away from the game.
     """
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, areas: Callable[[], list[tuple[int, int, int, int]]]):
         self.root = root
-        self.win = tk.Toplevel(root)
-        self.win.overrideredirect(True)
-        self.win.attributes("-topmost", True)
-        self.win.configure(bg=ACCENT)  # shows as an amber stripe on the left
-        self.label = tk.Label(self.win, text="", bg=PANEL, fg=FG, padx=18, pady=10,
-                              font=("Segoe UI", 16, "bold"))
-        self.label.pack(padx=(6, 0))
+        self.areas = areas            # (left, top, right, bottom) of each display to use
+        self.wins: list[tk.Toplevel] = []
+        self.labels: list[tk.Label] = []
         self._hide_job = None
-        self._set_alpha(0.0)
-        self._offscreen()
-        self.win.update_idletasks()
-        self._make_click_through()
+        self._add_window()
 
-    def _set_alpha(self, value: float) -> None:
+    def _add_window(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=ACCENT)  # shows as an amber stripe on the left
+        label = tk.Label(win, text="", bg=PANEL, fg=FG, padx=18, pady=10,
+                         font=("Segoe UI", 16, "bold"))
+        label.pack(padx=(6, 0))
+        self._set_alpha(win, 0.0)
+        win.geometry("+-10000+-10000")
+        win.update_idletasks()
+        self._make_click_through(win)
+        self.wins.append(win)
+        self.labels.append(label)
+
+    @staticmethod
+    def _set_alpha(win: tk.Toplevel, value: float) -> None:
         try:
-            self.win.attributes("-alpha", value)
+            win.attributes("-alpha", value)
         except tk.TclError:
             pass
 
-    def _offscreen(self) -> None:
-        self.win.geometry("+-10000+-10000")
-
-    def _make_click_through(self) -> None:
+    @staticmethod
+    def _make_click_through(win: tk.Toplevel) -> None:
         if not IS_WINDOWS:
             return
         try:
             import ctypes
             user32 = ctypes.windll.user32
-            hwnd = user32.GetParent(self.win.winfo_id()) or self.win.winfo_id()
+            hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
             GWL_EXSTYLE = -20
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             # layered | transparent (click-through) | tool window | no-activate
@@ -132,21 +141,31 @@ class Toast:
             pass
 
     def show(self, text: str, ms: int = 1300) -> None:
-        self.label.configure(text=text)
-        self.win.update_idletasks()
-        w = self.win.winfo_reqwidth()
-        # Top middle of the monitor CatVision's window is on.
-        left, top, right, _bottom = winutil.window_work_area(self.root)
-        self.win.geometry(f"+{left + (right - left - w) // 2}+{top + 40}")
-        self._set_alpha(0.92)
+        areas = self.areas() or [winutil.window_work_area(self.root)]
+        while len(self.wins) < len(areas):
+            self._add_window()
+        for i, win in enumerate(self.wins):
+            if i >= len(areas):
+                self._hide_one(win)
+                continue
+            self.labels[i].configure(text=text)
+            win.update_idletasks()
+            w = win.winfo_reqwidth()
+            left, top, right, _bottom = areas[i]   # top middle of that display
+            win.geometry(f"+{left + (right - left - w) // 2}+{top + 40}")
+            self._set_alpha(win, 0.92)
         if self._hide_job:
             self.root.after_cancel(self._hide_job)
         self._hide_job = self.root.after(ms, self.hide)
 
+    def _hide_one(self, win: tk.Toplevel) -> None:
+        self._set_alpha(win, 0.0)
+        win.geometry("+-10000+-10000")
+
     def hide(self) -> None:
         self._hide_job = None
-        self._set_alpha(0.0)
-        self._offscreen()
+        for win in self.wins:
+            self._hide_one(win)
 
 
 class CatVisionApp:
@@ -191,7 +210,7 @@ class CatVisionApp:
         self.tray = Tray(self._actions.put, on_force_quit=self.engine.restore_now)
         self._build()
 
-        self.toast = Toast(root)
+        self.toast = Toast(root, self._toast_areas)
         self.tray.start()
         self.reload_hotkeys()
 
@@ -1108,6 +1127,14 @@ class CatVisionApp:
             self.quit()
         if msg and self.cfg.options.hotkey_popup:
             self.toast.show(msg)
+
+    def _toast_areas(self) -> list[tuple[int, int, int, int]]:
+        """Where the hotkey popup goes: every display CatVision is changing.
+        (Unlike other pop-ups, which open on the app's own display.)"""
+        rects = [m.rect for m in self.engine.target_monitors()]
+        if not rects or any(r is None for r in rects):
+            return [winutil.window_work_area(self.root)]
+        return rects
 
     def _boost_key(self) -> str:
         """The boost hotkeys adjust Exposure when the look uses it (night
