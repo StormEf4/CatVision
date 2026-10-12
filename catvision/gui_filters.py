@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import colorchooser, messagebox, simpledialog, ttk
+from tkinter import colorchooser, ttk
 
-from . import curves, filters
+from . import curves, dialogs, filters
 from .curves import COLOR_FILTERS
 from .filters import CustomFilter
 from .theme import PANEL, SliderRow, listbox
@@ -253,13 +253,12 @@ class FiltersTab:
     # -------------------------------------------------------------- actions
 
     def _ask_name(self, title: str, initial: str = "") -> str | None:
-        name = simpledialog.askstring(title, "Filter name:", parent=self.frame,
-                                      initialvalue=initial)
+        name = dialogs.ask_string(self.app.root, title, "Filter name:", initial)
         name = filters.clean_name(name or "")
         if not name:
             return None
         if name in self.cfg.custom_filters:
-            messagebox.showinfo("CatVision", "You already have a filter with that name.")
+            dialogs.show_info(self.app.root, "CatVision", "You already have a filter with that name.")
             return None
         return name
 
@@ -310,7 +309,7 @@ class FiltersTab:
         name = self._custom_name()
         if name is None:
             return
-        if not messagebox.askyesno("CatVision", f"Delete your filter '{name}'?"):
+        if not dialogs.ask_yes_no(self.app.root, "CatVision", f"Delete your filter '{name}'?"):
             return
         del self.cfg.custom_filters[name]
         if self.app.filter_key == filters.key_for(name):

@@ -184,6 +184,31 @@ def _test_pattern_check(root, app, report_path: str) -> dict:
     return out
 
 
+def _dialog_check(root) -> dict:
+    """Open a yes/no dialog and check it appears over the app's window."""
+    from . import dialogs
+    out: dict = {}
+
+    def answer():
+        found = [w for w in root.winfo_children() if isinstance(w, dialogs.Modal)]
+        if not found:
+            out["opened"] = False
+            return
+        d = found[0]
+        d.update()
+        x, y = d.winfo_rootx(), d.winfo_rooty()
+        out.update(opened=True, position=[x, y],
+                   over_app=root.winfo_rootx() <= x <= root.winfo_rootx() + root.winfo_width()
+                   and root.winfo_rooty() <= y <= root.winfo_rooty() + root.winfo_height())
+        d.event_generate("<Return>")
+    try:
+        root.after(400, answer)
+        out["answer"] = dialogs.ask_yes_no(root, "CatVision", "Self-test question")
+    except Exception as exc:
+        out["error"] = repr(exc)
+    return out
+
+
 def run(report_path: str) -> int:
     report: dict = {"platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
                     "checks": {}, "errors": []}
@@ -278,6 +303,7 @@ def run(report_path: str) -> int:
         def popup_check_then_quit():  # after the steps, so their toasts are gone
             info["warning_popup"] = _warning_popup_check(root, app, report_path)
             info["test_pattern"] = _test_pattern_check(root, app, report_path)
+            info["dialog"] = _dialog_check(root)
             app.quit()
         root.after(300 + 150 * len(steps) + 1800, popup_check_then_quit)
         root.mainloop()

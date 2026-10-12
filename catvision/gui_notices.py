@@ -10,6 +10,7 @@ from tkinter import ttk
 from typing import Callable
 
 from .theme import ACCENT, FG, MUTED, PANEL, Fonts
+from .winutil import window_work_area
 
 INFO = "#5aa9ff"
 LEVELS = {
@@ -202,7 +203,11 @@ class WarningButton:
         w = self.popup.winfo_reqwidth()
         x = self.root.winfo_rootx() + self.root.winfo_width() - w - self.px(12)
         y = self.icon.winfo_rooty() + self.icon.winfo_height() + self.px(6)
-        self.popup.geometry(f"+{max(0, x)}+{y}")
+        # Kept inside the monitor the app is on (which may sit left of or
+        # above the main one, at negative coordinates).
+        left, _top, right, _bottom = window_work_area(self.root)
+        x = max(left, min(x, right - w))
+        self.popup.geometry(f"+{x}+{y}")
 
     def _on_root_change(self, e) -> None:
         if e.widget is self.root:

@@ -8,9 +8,9 @@ import re
 import sys
 import time
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import ttk
 
-from . import __version__, curves, filters, winutil
+from . import __version__, curves, dialogs, filters, winutil
 from . import config as config_mod
 from .curves import LIMITS, Settings
 from .engine import Engine, emergency_reset
@@ -382,7 +382,7 @@ class CatVisionApp:
 
 
     def _unlock_full_strength(self) -> None:
-        if not messagebox.askyesno(
+        if not dialogs.ask_yes_no(self.root, 
                 "Unlock full strength",
                 "Windows limits how much apps can change screen brightness. CatVision will "
                 "ask Windows to lift that limit by changing one setting (GdiIcmGammaRange, "
@@ -398,7 +398,7 @@ class CatVisionApp:
         self.root.after(1500, self._after_strength_change)
 
     def _undo_full_strength(self) -> None:
-        if not messagebox.askyesno("Undo full strength",
+        if not dialogs.ask_yes_no(self.root, "Undo full strength",
                                    "Put Windows' brightness limit back to normal? "
                                    "Windows will ask for permission, then restart your PC."):
             return
@@ -411,7 +411,7 @@ class CatVisionApp:
         self._render_status()
         state = self._strength_state()
         if state == "restart":
-            messagebox.showinfo("CatVision", "Done. Restart your PC to finish unlocking "
+            dialogs.show_info(self.root, "CatVision", "Done. Restart your PC to finish unlocking "
                                              "full strength.")
         elif state == "locked":
             self.set_status("Windows' brightness limit is back to normal after a restart.")
@@ -717,7 +717,7 @@ class CatVisionApp:
         return row is None or row.settings.clamped() != self._read_settings()
 
     def _ask_name(self, title: str, prompt: str, initial: str = "") -> str | None:
-        name = simpledialog.askstring(title, prompt, parent=self.root, initialvalue=initial)
+        name = dialogs.ask_string(self.root, title, prompt, initial)
         name = " ".join((name or "").split())[:60]
         return name or None
 
@@ -742,10 +742,10 @@ class CatVisionApp:
         if not name:
             return
         if builtin_by_name(name):
-            messagebox.showinfo("CatVision", "That name belongs to a built-in preset. "
+            dialogs.show_info(self.root, "CatVision", "That name belongs to a built-in preset. "
                                 "Use Save to change the built-in one, or pick another name.")
             return
-        if name in self.cfg.custom_presets and not messagebox.askyesno(
+        if name in self.cfg.custom_presets and not dialogs.ask_yes_no(self.root, 
                 "CatVision", f"Replace your preset '{name}'?"):
             return
         self.cfg.custom_presets[name] = self._read_settings()
@@ -761,7 +761,7 @@ class CatVisionApp:
 
     def name_is_free(self, name: str) -> bool:
         if builtin_by_name(name) or name in self.cfg.custom_presets:
-            messagebox.showinfo("CatVision", "A preset with that name already exists.")
+            dialogs.show_info(self.root, "CatVision", "A preset with that name already exists.")
             return False
         return True
 
@@ -776,7 +776,7 @@ class CatVisionApp:
     def _rename_preset(self, name: str | None = None) -> None:
         row = self.preset_row(name)
         if row is None or row.builtin:
-            messagebox.showinfo("CatVision", "Built-in presets can't be renamed. "
+            dialogs.show_info(self.root, "CatVision", "Built-in presets can't be renamed. "
                                 "Use Copy to make your own version.")
             return
         new = self._ask_name("Rename preset", "New name:", row.name)
@@ -800,16 +800,16 @@ class CatVisionApp:
             return
         if row.builtin:
             if not row.changed:
-                messagebox.showinfo("CatVision", "This built-in preset is already at its default.")
+                dialogs.show_info(self.root, "CatVision", "This built-in preset is already at its default.")
                 return
-            if messagebox.askyesno("CatVision", f"Put '{row.name}' back to its original settings?"):
+            if dialogs.ask_yes_no(self.root, "CatVision", f"Put '{row.name}' back to its original settings?"):
                 self.cfg.custom_presets.pop(row.name, None)
                 self.refresh_presets()
                 if self.cfg.active_preset == row.name:
                     self._activate_preset(self._preset_index(row.name))
                 self._schedule_save()
             return
-        if not messagebox.askyesno("CatVision", f"Delete your preset '{row.name}'?"):
+        if not dialogs.ask_yes_no(self.root, "CatVision", f"Delete your preset '{row.name}'?"):
             return
         was_active = self.cfg.active_preset == row.name
         del self.cfg.custom_presets[row.name]

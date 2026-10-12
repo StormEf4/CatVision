@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-from tkinter import simpledialog, ttk
+from tkinter import ttk
 
+from . import dialogs
 from .theme import Tooltip, listbox
 
 
@@ -101,8 +102,7 @@ class PresetsTab:
     # -------------------------------------------------------------- actions
 
     def _ask_name(self, title: str, initial: str = "") -> str | None:
-        name = simpledialog.askstring(title, "Preset name:", parent=self.frame,
-                                      initialvalue=initial)
+        name = dialogs.ask_string(self.app.root, title, "Preset name:", initial)
         name = " ".join((name or "").split())[:60]
         if not name or not self.app.name_is_free(name):
             return None

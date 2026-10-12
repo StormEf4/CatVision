@@ -86,6 +86,7 @@ def setup_style(root: tk.Tk, fonts: Fonts) -> None:
     style.configure("Card.TLabel", background=PANEL, foreground=FG)
     style.configure("CardMuted.TLabel", background=PANEL, foreground=MUTED, font=fonts.small)
     style.configure("Warn.TLabel", background=BG, foreground=WARN, font=fonts.small)
+    style.configure("TEntry", fieldbackground=PANEL, foreground=FG, insertcolor=FG)
     style.configure("TCombobox", fieldbackground=PANEL, background=OFF, foreground=FG,
                     arrowcolor=FG)
     style.map("TCombobox", fieldbackground=[("readonly", PANEL)],

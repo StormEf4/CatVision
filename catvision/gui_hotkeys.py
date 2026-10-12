@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
+from . import dialogs
+from .dialogs import Modal
 from .hotkeys import (ACTION_LABELS, MODIFIER_NAMES, TK_MODIFIER_KEYSYMS, action_label,
                       combo_problem, key_name_from_tk, suggested_hotkeys)
 from .theme import ACCENT, BG, FG, MUTED, WARN
@@ -103,7 +105,7 @@ class HotkeysTab:
             return
         for other, other_combo in list(self.cfg.hotkeys.items()):
             if other != action and other_combo == combo:
-                if not messagebox.askyesno(
+                if not dialogs.ask_yes_no(self.app.root, 
                         "CatVision", f"{combo} is already used for '{action_label(other)}'.\n\n"
                                      "Use it for this action instead?"):
                     return
@@ -134,14 +136,14 @@ class HotkeysTab:
             self._change(action)
 
     def _suggested(self) -> None:
-        if messagebox.askyesno(
+        if dialogs.ask_yes_no(self.app.root, 
                 "CatVision", "Use the suggested keys (Ctrl+Alt+V on/off, Ctrl+Alt+1-9 for "
                              "presets, and so on)? This replaces the hotkeys you have now."):
             self.cfg.hotkeys = suggested_hotkeys()
             self._commit()
 
     def _clear_all(self) -> None:
-        if messagebox.askyesno("CatVision", "Remove every hotkey?"):
+        if dialogs.ask_yes_no(self.app.root, "CatVision", "Remove every hotkey?"):
             self.cfg.hotkeys = {}
             self._commit()
 
@@ -152,28 +154,7 @@ class HotkeysTab:
             self.tree.selection_set(select)
 
 
-class _Modal(tk.Toplevel):
-    def __init__(self, root: tk.Misc, title: str):
-        super().__init__(root)
-        self.result = None
-        self.title(title)
-        self.configure(bg=BG, padx=20, pady=16)
-        self.resizable(False, False)
-        self.transient(root)
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
-
-    def run(self) -> None:
-        self.update_idletasks()
-        root = self.master
-        x = root.winfo_rootx() + (root.winfo_width() - self.winfo_reqwidth()) // 2
-        y = root.winfo_rooty() + (root.winfo_height() - self.winfo_reqheight()) // 3
-        self.geometry(f"+{max(0, x)}+{max(0, y)}")
-        self.grab_set()
-        self.focus_force()
-        self.wait_window()
-
-
-class KeyRecorder(_Modal):
+class KeyRecorder(Modal):
     """Waits for the user to press a key combination."""
 
     def __init__(self, root: tk.Misc, what: str, fonts):
@@ -224,7 +205,7 @@ class KeyRecorder(_Modal):
         return "break"
 
 
-class PresetPicker(_Modal):
+class PresetPicker(Modal):
     def __init__(self, root: tk.Misc, names: list[str], fonts):
         super().__init__(root, "Add preset hotkey")
         tk.Label(self, text="Which preset should get a hotkey?", bg=BG, fg=FG,
