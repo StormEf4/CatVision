@@ -289,18 +289,6 @@ class CatVisionApp:
     def _build_home(self, f: ttk.Frame) -> None:
         f.columnconfigure(0, weight=1)
         wrap = self.px_(380)
-        self.welcome = ttk.Frame(f, style="Card.TFrame", padding=10)
-        self.welcome.columnconfigure(0, weight=1)
-        ttk.Label(self.welcome, style="Card.TLabel", justify="left", wraplength=wrap - 90,
-                  text="Welcome! Pick a preset and turn CatVision on with the OFF/ON button at "
-                       "the top. Then open the test pattern in the Tune tab and raise Shadow "
-                       "boost until every dark square shows. Rest the mouse on anything for "
-                       "help.").grid(row=0, column=0, sticky="w")
-        ttk.Button(self.welcome, text="Got it", style="Accent.TButton",
-                   command=self._dismiss_welcome).grid(row=0, column=1, padx=(8, 0))
-        if not self.cfg.options.seen_welcome:
-            self.welcome.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-
         ttk.Label(f, text="Preset", style="Head.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 2))
         prow = ttk.Frame(f)
         prow.grid(row=3, column=0, sticky="ew")
@@ -336,11 +324,6 @@ class CatVisionApp:
 
         self.home_hint = ttk.Label(f, text="", style="Muted.TLabel", justify="left")
         self.home_hint.grid(row=9, column=0, sticky="w", pady=(10, 0))
-
-    def _dismiss_welcome(self) -> None:
-        self.welcome.grid_remove()
-        self.cfg.options.seen_welcome = True
-        self._schedule_save()
 
     def _build_displays(self, f: ttk.Frame, row: int, wrap: int) -> None:
         """Pick which displays CatVision changes (only shown with 2+ displays)."""

@@ -38,7 +38,6 @@ class Options:
     # "color_all_displays", which defaulted to on, so old configs reset.)
     color_everywhere: bool = False
     text_size: str = "Large"        # Normal / Large / Extra large
-    seen_welcome: bool = False
     unlock_requested_at: float = 0.0  # when the user unlocked full strength
 
     @classmethod
