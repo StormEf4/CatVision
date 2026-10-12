@@ -47,6 +47,7 @@ COLOR_FILTERS: dict[str, str] = {
     "night_vision": "Night vision (green)",
     "night_vision_blue": "Night vision (blue)",
     "night_vision_red": "Night vision (red)",
+    "night_vision_grey": "Night vision (grey)",
     "amber": "Amber (warm mono, easy on eyes)",
     "ice": "Ice (cool mono)",
     "deuteranopia": "Red-green assist (deuteranopia)",
@@ -311,6 +312,8 @@ TINT_CURVES: dict[str, TintCurve] = {
     # the highlights so a player in front of a lamp never blends into it.
     "night_vision_blue": ((0.10, 0.45, 1.00), (0.60, 0.85, 1.00), 2.0),
     "night_vision_red": ((1.45, 0.22, 0.10), (1.00, 0.70, 0.55), 2.5),
+    # IR-camera / white-phosphor style: plain grey, the brightest-looking color.
+    "night_vision_grey": ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0), 1.0),
     "amber": ((1.0, 0.72, 0.25), (1.0, 0.72, 0.25), 1.0),
     "ice": ((0.55, 0.85, 1.0), (0.55, 0.85, 1.0), 1.0),
 }
@@ -322,6 +325,7 @@ MONO_TINTS: dict[str, tuple[float, float, float]] = {
     "night_vision": (0.30, 1.0, 0.35),
     "night_vision_blue": (0.25, 0.60, 1.00),
     "night_vision_red": (1.00, 0.35, 0.25),
+    "night_vision_grey": (1.00, 1.00, 1.00),
     "amber": (1.0, 0.72, 0.25),
     "ice": (0.55, 0.85, 1.0),
 }

@@ -145,6 +145,7 @@ all** removes them again. Everything is also in the tray menu.
 | Night Vision | Like night-vision goggles: deep green shadows, pale highlights, no blinding bloom. Best for very dark games |
 | Night Vision (Blue) | Night vision in cool blue, with the same anti-glare protection |
 | Night Vision (Red) | Night vision in red, with the same anti-glare protection |
+| Night Vision (Grey) | Black-and-white like an IR camera: crisp, deep blacks, the most dark detail of any night vision |
 | Horror / Flashlight | Lifts darkness, stops flashlights and lamps from dazzling |
 | Fog & Haze Cutter | Murky, foggy, smoky scenes |
 | Mixed Light | Dark shadows next to bright skies or explosions |
@@ -209,9 +210,10 @@ about 5x the game on its own.
 - Raise or lower **Exposure** (or use your *More / less boost* hotkeys) for darker or
   brighter games. In **Tune**, raise **Anti-glare** if bright areas still
   hide things, or lower it to see more in the darkest corners.
-- Green shows the most detail, because our eyes see fine detail best in
-  green. Blue and Red are tuned to stay as readable as possible (pure blue or
-  red would be too dark), and still show about 4x the game's own dark detail.
+- **Grey (IR camera)** shows the most dark detail, then green: our eyes see
+  fine detail best in neutral and green tones. Blue and Red are tuned to stay
+  as readable as possible (pure blue or red would be too dark), and still
+  show about 4x the game's own dark detail.
 - With only some displays ticked, night vision stays on those displays, but
   as a colored tint rather than full monochrome (Windows limit).
 

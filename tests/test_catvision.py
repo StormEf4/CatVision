@@ -599,7 +599,8 @@ class AntiGlareTests(unittest.TestCase):
     def test_bright_things_stay_apart_in_night_vision(self):
         """A mid-tone player (level 70) in front of a lit window (level 180)
         must not merge into it, and the brightest output must stay capped."""
-        for name in ("Night Vision", "Night Vision (Blue)", "Night Vision (Red)"):
+        for name in ("Night Vision", "Night Vision (Blue)", "Night Vision (Red)",
+                     "Night Vision (Grey)"):
             s = [p for p in BUILTIN_PRESETS if p.name == name][0].settings
             tint, _m = curves.plan_color(s)
             ramp = curves.build_ramp(s, tint)
@@ -638,3 +639,21 @@ class NoDefaultHotkeysTests(unittest.TestCase):
         self.assertEqual(config.Config.from_json({"hotkeys": suggested_hotkeys()}).hotkeys, {})
         custom = dict(suggested_hotkeys(), toggle="Ctrl+Alt+K")
         self.assertEqual(config.Config.from_json({"hotkeys": custom}).hotkeys["toggle"], "Ctrl+Alt+K")
+
+
+class GreyNightVisionTests(unittest.TestCase):
+    def test_grey_is_neutral_and_greyscale_on_all_displays(self):
+        st = [p for p in BUILTIN_PRESETS if p.name == "Night Vision (Grey)"][0].settings
+        tint, m = curves.plan_color(st, all_displays=True)
+        self.assertFalse(curves.is_identity_matrix(m))        # picture made grey first
+        r, g, b = curves.build_ramp(st, tint)
+        self.assertEqual(r, g)
+        self.assertEqual(g, b)
+        green = [p for p in BUILTIN_PRESETS if p.name == "Night Vision"][0].settings
+        gt, _ = curves.plan_color(green)
+        gr = curves.build_ramp(green, gt)
+        luma = lambda ch, i: 0.2126 * ch[0][i] + 0.7152 * ch[1][i] + 0.0722 * ch[2][i]
+        # IR look: deep blacks, but dark tones spread further apart than green's,
+        # i.e. more visible detail in the dark range games live in (levels 6-32).
+        spread = lambda ch: luma(ch, 32) - luma(ch, 6)
+        self.assertGreater(spread((r, g, b)), spread(gr))

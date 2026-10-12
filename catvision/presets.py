@@ -56,6 +56,17 @@ BUILTIN_PRESETS: list[Preset] = [
                  color_filter="night_vision_red"),
     ),
     Preset(
+        "Night Vision (Grey)",
+        "Black-and-white night vision like an IR camera: crisp, deep blacks, the most "
+        "detail of any night vision. Bright lights are held back so they never blind you.",
+        # Grey looks brighter than green at the same level, so its glare limit is
+        # lower to keep the brightest output the same as the green preset's.
+        # Brightness 0.9 stops the extra IR contrast from clipping the brightest
+        # tones together (which would bring back bloom at the very top).
+        Settings(exposure=72, anti_glare=70, contrast=1.25, brightness=0.9, black_floor=0.0,
+                 white_cap=0.80, color_filter="night_vision_grey"),
+    ),
+    Preset(
         "Horror / Flashlight",
         "Lifts darkness but caps the brightest whites so flashlights and "
         "lamps don't dazzle you.",
