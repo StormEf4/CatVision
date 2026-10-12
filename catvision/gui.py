@@ -342,8 +342,6 @@ class CatVisionApp:
 
         self._build_displays(f, row=8, wrap=wrap)
 
-        self.home_hint = ttk.Label(f, text="", style="Muted.TLabel", justify="left")
-        self.home_hint.grid(row=9, column=0, sticky="w", pady=(10, 0))
 
     def _build_displays(self, f: ttk.Frame, row: int, wrap: int) -> None:
         """Pick which displays CatVision changes (only shown with 2+ displays)."""
@@ -1045,15 +1043,6 @@ class CatVisionApp:
             self.hotkeys.stop()
             self.hotkeys.failed = []
         self.hotkeys_tab.refresh()
-        hk = self.cfg.hotkeys
-        parts = []
-        if hk.get("toggle"):
-            parts.append(f"{hk['toggle']}: on / off")
-        if hk.get("off"):
-            parts.append(f"{hk['off']}: panic off")
-        hint = "   ".join(parts)
-        self.home_hint.configure(text=hint + "\nChange keys in the Hotkeys tab." if hint else
-                                 "No hotkeys set yet. Choose your own in the Hotkeys tab.")
         self.refresh_notices()
 
     def pause_hotkeys(self) -> None:
