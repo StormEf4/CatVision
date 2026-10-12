@@ -345,14 +345,19 @@ class CatVisionApp:
                                  highlightthickness=0)
         self.pattern.grid(row=10, column=0, sticky="w")
         self._draw_pattern()
-        ttk.Label(f, text="Raise Shadow boost or Exposure until you can see every dark square.",
-                  style="Muted.TLabel").grid(row=11, column=0, sticky="w")
+        self.pattern_hint = ttk.Label(
+            f, style="Muted.TLabel", justify="left", wraplength=wrap,
+            text="Raise Shadow Boost and Exposure levels to your satisfaction. Above is a full "
+                 "dark range for small testing. Since everyone's monitor is different, my "
+                 "defaults may not be satisfactory.")
+        self.pattern_hint.grid(row=11, column=0, sticky="w")
         self.home_hint = ttk.Label(f, text="", style="Muted.TLabel", justify="left")
         self.home_hint.grid(row=12, column=0, sticky="w", pady=(10, 0))
 
     def _on_home_resize(self, e) -> None:
         width = max(100, e.width - 24)
         self.preset_desc.configure(wraplength=width)
+        self.pattern_hint.configure(wraplength=width)
 
     def _dismiss_welcome(self) -> None:
         self.welcome.grid_remove()
