@@ -269,10 +269,6 @@ class CatVisionApp:
         tk.Label(title_row, text="CatVision", bg=BG, fg=FG, font=self.fonts.big).pack(side="left")
         tk.Label(title_row, text="by StormEf4", bg=BG, fg=ACCENT,
                  font=self.fonts.small).pack(side="left", padx=(6, 0), pady=(6, 0))
-        self.tagline_font = self.fonts.small.copy()
-        self.tagline_font.configure(slant="italic")
-        tk.Label(titles, text="Get the pounce on the prey.", bg=BG, fg=FG,
-                 font=self.tagline_font).pack(anchor="w")
         self.header_sub = tk.Label(titles, text="", bg=BG, fg=MUTED, font=self.fonts.small)
         self.header_sub.pack(anchor="w")
         right = tk.Frame(header, bg=BG)
