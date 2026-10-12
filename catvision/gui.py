@@ -11,7 +11,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
-from . import __version__, curves, dialogs, filters, winutil
+from . import __version__, autolevels, curves, dialogs, filters, winutil
 from . import config as config_mod
 from .curves import LIMITS, Settings
 from .engine import Engine, emergency_reset
@@ -72,6 +72,7 @@ TIPS = {
 
 BOOST_STEP = 10
 KEEP_APPLIED_MS = 2000
+AUTO_TICK_MS = 200      # auto levels (beta) follows the picture this often
 
 
 MONITOR_EMOJI = "\U0001F5A5\uFE0F"   # desktop computer
@@ -206,6 +207,14 @@ class CatVisionApp:
         self.engine.color_all_displays = cfg.options.color_everywhere
 
         self.hotkeys = HotkeyListener(self._actions.put)
+        # Auto levels (beta): measures the ticked displays on its own thread.
+        self.auto_watch = autolevels.Watcher()
+        self._auto_ctrl: dict[str, autolevels.Controller] = {}
+        self._auto_key = ""
+        self._auto_seq = -1
+        self._auto_time = 0.0
+        self._auto_job = None
+        self._auto_latest: dict = {}
         # Force quit runs on the tray thread and only needs to put the screen back.
         self.tray = Tray(self._actions.put, on_force_quit=self.engine.restore_now)
         self._build()
@@ -341,6 +350,7 @@ class CatVisionApp:
                                    "and your own filters (Filters tab).")
 
         self._build_displays(f, row=8, wrap=wrap)
+        self._build_auto_levels(f, row=9, wrap=wrap)
 
 
     def _build_displays(self, f: ttk.Frame, row: int, wrap: int) -> None:
@@ -369,6 +379,162 @@ class CatVisionApp:
                   style="Muted.TLabel").pack(anchor="w")
         if len(monitors) > 1:
             box.grid(row=row, column=0, sticky="ew")
+
+    # ------------------------------------------------- auto levels (beta)
+
+    def _build_auto_levels(self, f: ttk.Frame, row: int, wrap: int) -> None:
+        o = self.cfg.options
+        box = ttk.Frame(f)
+        box.grid(row=row, column=0, sticky="ew", pady=(14, 0))
+        box.columnconfigure(0, weight=1)
+        head = ttk.Frame(box)
+        head.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+        ttk.Label(head, text="Auto levels", style="Head.TLabel").pack(side="left")
+        badge = tk.Label(head, text="BETA", bg=ACCENT, fg="#1a1200", font=self.fonts.small,
+                         padx=5)
+        badge.pack(side="left", padx=(6, 0))
+        Tooltip(badge, "New and still being tested. Tell StormEf4 how it works for you.")
+        self.auto_var = tk.BooleanVar(value=o.auto_levels)
+        chk = ttk.Checkbutton(box, text="Adjust to the game automatically", variable=self.auto_var,
+                              command=lambda: self.set_auto_levels(self.auto_var.get()))
+        chk.grid(row=1, column=0, sticky="w")
+        Tooltip(chk, "Beta. Watches how dark the picture on your ticked displays is and raises "
+                     "Shadow boost (or Exposure) in dark scenes and lowers it in bright ones. "
+                     "It only measures brightness from a tiny copy of the screen, like "
+                     "recording apps do: it never touches the game, and nothing is saved or "
+                     "sent. Works best with games in borderless windowed mode.")
+        sl = ttk.Frame(box)
+        sl.grid(row=2, column=0, sticky="ew", pady=(2, 0))
+        self.auto_vars = {
+            "auto_strength": tk.DoubleVar(value=min(max(o.auto_strength,
+                                                        autolevels.STRENGTH_LIMITS[0]),
+                                                    autolevels.STRENGTH_LIMITS[1])),
+            "auto_target": tk.DoubleVar(value=min(max(o.auto_target, autolevels.TARGET_LIMITS[0]),
+                                                  autolevels.TARGET_LIMITS[1])),
+        }
+        self.auto_rows = [
+            SliderRow(sl, 0, self.auto_vars["auto_strength"], "How much",
+                      *autolevels.STRENGTH_LIMITS, "int", self.fonts, self._on_auto_slider,
+                      tip="Beta. How far auto levels may move Shadow boost (or Exposure) up "
+                          "or down from your preset."),
+            SliderRow(sl, 1, self.auto_vars["auto_target"], "Aim for",
+                      *autolevels.TARGET_LIMITS, "pct", self.fonts, self._on_auto_slider,
+                      tip="Beta. How bright it tries to make scenes. Higher brightens dark "
+                          "scenes more; lower keeps more of the game's own darkness."),
+        ]
+        self.auto_info = ttk.Label(box, text="", style="Muted.TLabel", justify="left",
+                                   wraplength=wrap)
+        self.auto_info.grid(row=3, column=0, sticky="ew", pady=(2, 0))
+        if not self.auto_watch.available:
+            chk.state(["disabled"])
+            for r in self.auto_rows:
+                r.set_enabled(False)
+
+    def _on_auto_slider(self) -> None:
+        for r in self.auto_rows:
+            r.refresh()
+        for key, var in self.auto_vars.items():
+            setattr(self.cfg.options, key, round(var.get(), 3))
+        self._schedule_save()
+
+    def set_auto_levels(self, on: bool) -> None:
+        self.cfg.options.auto_levels = on
+        self.auto_var.set(on)
+        self._schedule_save()
+        self._render_status()
+
+    def _auto_active(self) -> bool:
+        return (self.cfg.options.auto_levels and self.engine.enabled
+                and self.auto_watch.available)
+
+    def _auto_sync(self) -> None:
+        """Start or stop watching to match the toggle, on/off and displays."""
+        if self._auto_active():
+            rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
+            self.auto_watch.watch(rects)
+            for did in list(self._auto_ctrl):
+                if did not in rects:
+                    del self._auto_ctrl[did]
+            if self._auto_job is None and not self._closed:
+                self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
+        else:
+            self.auto_watch.watch({})
+            if self._auto_job is not None:
+                self.root.after_cancel(self._auto_job)
+                self._auto_job = None
+            self._auto_ctrl.clear()
+            self._auto_seq = -1
+            self._auto_latest = {}
+            if self.engine.auto_offsets:
+                self.engine.set_auto_offsets({})
+        self._render_auto_info(self._auto_latest)
+
+    def _auto_tick(self) -> None:
+        """Follow the latest measurements, a few times a second."""
+        self._auto_job = None
+        if self._closed or not self._auto_active():
+            return
+        seq, latest = self.auto_watch.latest()
+        if seq != self._auto_seq:
+            now = time.monotonic()
+            dt = min(1.0, now - self._auto_time) if self._auto_seq >= 0 else autolevels.INTERVAL_S
+            self._auto_seq, self._auto_time = seq, now
+            key = self._auto_setting()
+            if key != self._auto_key:  # the preset switched between Shadow boost and Exposure
+                self._auto_ctrl.clear()
+                self._auto_key = key
+            o = self.cfg.options
+            applied = self.engine.auto_offsets
+            offsets: dict[str, tuple[str, float]] = {}
+            for did, m in latest.items():
+                ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
+                if m is not None:
+                    ctrl.step(m, o.auto_strength, o.auto_target, dt)
+                amount = round(ctrl.offset, 1)
+                old = applied.get(did)
+                if old and old[0] == key and abs(old[1] - amount) < 0.5:
+                    amount = old[1]  # not worth redoing the display for
+                offsets[did] = (key, amount)
+            if offsets != applied:
+                self.engine.set_auto_offsets(offsets)
+            self._auto_latest = latest
+            self._render_auto_info(latest)
+        self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
+
+    def _auto_setting(self) -> str:
+        """Auto levels moves whichever of Shadow boost / Exposure the preset
+        leans on more (Exposure for night vision, Shadow boost otherwise)."""
+        s = self.engine.settings
+        return "exposure" if s.exposure > s.shadow_boost else "shadow_boost"
+
+    def _render_auto_info(self, latest: dict) -> None:
+        if not hasattr(self, "auto_info"):
+            return
+        if not self.auto_watch.available:
+            text = self.auto_watch.reason
+        elif not self.cfg.options.auto_levels:
+            text = "Off."
+        elif not self.engine.enabled:
+            text = "Starts when CatVision is on."
+        elif not latest:
+            text = "Watching..."
+        else:
+            key = self._auto_setting()
+            label = "Exposure" if key == "exposure" else "Shadow boost"
+            names = {m.id: m.short or m.label for m in self.engine.monitors()}
+            lines = []
+            for did, m in latest.items():
+                name = names.get(did, did)
+                if m is None:
+                    lines.append(f"{name}: can't see the picture. Try borderless windowed mode.")
+                    continue
+                base = getattr(self.engine.settings, key)
+                now = getattr(self.engine.settings_for(did), key)
+                held = "  (black screen: holding)" if m.black else ""
+                lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  "
+                             f"{label} {base:.0f} \u2192 {now:.0f}{held}")
+            text = "\n".join(lines)
+        self.auto_info.configure(text=text)
 
     # ------------------------------------------------------- full strength
 
@@ -944,7 +1110,10 @@ class CatVisionApp:
             names = ", ".join(m.short for m in self.engine.monitors()
                               if m.id in self.engine.displays)
             text = f"On for {names} - {self.cfg.active_preset}."
+        if on and self._auto_active():
+            text += " Auto levels (beta) is adjusting."
         self.set_status(text)
+        self._auto_sync()
         self._update_strength_ui()
         self.refresh_notices()
         self._update_title()
@@ -959,6 +1128,8 @@ class CatVisionApp:
         self.tune_title.configure(text=f"Adjusting: {name}{changed}")
         self.root.title(f"{APP_TITLE} - {name}")
         state = "on" if self.engine.enabled else "off"
+        if self.engine.enabled and self._auto_active():
+            state += "  \u00b7  auto (beta)"
         self.header_sub.configure(text=f"{name}{' (changed)' if self._modified else ''}  \u00b7  {state}")
 
     def _sync_tray(self) -> None:
@@ -974,6 +1145,7 @@ class CatVisionApp:
             displays=[(m.id, m.short or m.label) for m in self.engine.monitors()],
             chosen=[d for d in self.engine.displays
                     if d in {m.id for m in self.engine.monitors()}],
+            auto_levels=self.cfg.options.auto_levels,
         ))
 
     # ================================================================ drawing
@@ -1103,6 +1275,11 @@ class CatVisionApp:
                 if key != "none" and not self.engine.enabled:
                     self._set_enabled(True)
                 msg = "Filter: " + self.filter_combo.get()
+        elif action == "auto_levels":
+            self.set_auto_levels(not self.cfg.options.auto_levels)
+            if self.cfg.options.auto_levels and not self.engine.enabled:
+                self._set_enabled(True)
+            msg = f"Auto levels (beta) {'ON' if self.cfg.options.auto_levels else 'OFF'}"
         elif action.startswith("display:"):
             self._set_displays_from_tray(action)
         elif action == "identify":
@@ -1189,6 +1366,7 @@ class CatVisionApp:
         self._save()
         self.hotkeys.stop()
         self.tray.stop()
+        self.auto_watch.stop()
         self.engine.shutdown()
         self.root.destroy()
 

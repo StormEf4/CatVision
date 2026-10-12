@@ -33,7 +33,9 @@ CatVision **never touches your games**:
 
 - It does **not** inject anything, read or write game memory, hook DirectX or
   OpenGL, or attach to any process.
-- It does **not** draw an overlay on the game or capture your screen.
+- It does **not** draw an overlay on the game. It doesn't look at your screen
+  either, unless you turn on **Auto levels (beta)**, which only measures how
+  bright the picture is (see [Auto levels](#auto-levels-beta)).
 - It does **not** use keyboard hooks. Hotkeys use the normal Windows
   `RegisterHotKey` feature, the same one Discord and OBS use.
 
@@ -59,7 +61,7 @@ The window is small and split into tabs:
 
 | Tab | What's there |
 | --- | --- |
-| **Home** | Preset picker (◀ ▶ to flip through), **Shadow boost** and **Exposure**, color filter, and which **displays** to change |
+| **Home** | Preset picker (◀ ▶ to flip through), **Shadow boost** and **Exposure**, color filter, which **displays** to change, and **Auto levels (beta)** |
 | **Tune** | Every slider, and a big **Test pattern** to tune against. **Save** keeps your changes in the current preset (built-in ones too), **Save as new...** makes your own preset |
 | **Presets** | Every preset in one list: **Use it**, **New...** (from your current settings), **Copy...**, **Rename...**, **Delete** |
 | **Filters** | Make and edit your own color filters |
@@ -104,6 +106,7 @@ hotkeys keep working. Click the cat-eye icon to open the window, or
 right-click it for quick controls:
 
 - **CatVision on**: turn it on or off
+- **Auto levels (beta)**: turn auto levels on or off
 - **Preset**, **Color filter**, **Shadow boost** (+10 / -10), **Displays**
 - **Panic: everything off** and **Reset display to normal**
 - **Quit CatVision**: closes normally and saves your settings
@@ -125,6 +128,7 @@ action and press the keys.
 | Next / previous preset | Flip through presets |
 | More / less boost | Shadow boost, or Exposure for night vision |
 | Next color filter | Cycle color filters |
+| Auto levels on / off (beta) | Turns [auto levels](#auto-levels-beta) on or off |
 | Show the CatVision window | Brings the window up |
 | Panic: everything off | Everything back to normal |
 
@@ -140,10 +144,46 @@ all** removes them again. Everything is also in the tray menu.
   would stop working in your games. Use Ctrl or Alt with it, or an F-key.
 - If another program already uses a key combination, the list marks it
   *"taken by another app"*. Pick a different one.
-- A small popup confirms each hotkey. It can't be clicked and never takes
-  focus away from your game, and you can turn it off in Settings.
+- A small popup confirms each hotkey at the top of every ticked display. It
+  can't be clicked and never takes focus away from your game, and you can
+  turn it off in Settings.
 
 <br clear="right">
+
+## Auto levels (beta)
+
+**Beta: new and still being tested.** Tick **Adjust to the game
+automatically** under *Auto levels* on the Home tab (or use its hotkey or the
+tray menu). CatVision then watches how bright the picture is on each ticked
+display and adjusts it live, the way your eyes adapt:
+
+- **Dark scene:** it raises Shadow boost (or Exposure for night vision)
+  gradually, so the picture doesn't jump.
+- **Bright scene, flash or explosion:** it lowers it again quickly, so you're
+  never blinded.
+- Your preset stays as it is. Auto levels moves things up or down from your
+  preset, and goes back to it when you turn auto levels off.
+- **How much** sets how far it may move the slider. **Aim for** sets how
+  bright it tries to make scenes: higher brightens dark scenes more.
+- Each ticked display is adjusted on its own, and the Home tab shows what it
+  is doing (for example *Display 1: 3% bright · Shadow boost 66 → 88*).
+
+**How it stays safe:** five times a second it takes a tiny, low-resolution
+copy of what Windows is already showing (the same screen-capture route
+recording and streaming apps use) and measures only how bright it is. It
+never touches the game, never saves or sends the pictures, and never looks
+for anything in them. It only changes brightness, nothing that would point
+things out to you.
+
+**Things to know:**
+
+- It works best with games in **borderless windowed** mode. Some games in
+  exclusive fullscreen can't be seen; the Home tab then says *can't see the
+  picture* and auto levels leaves your preset alone.
+- A few games and videos block screen capture and show up black. Auto levels
+  holds still on a black screen instead of over-brightening.
+- It's off by default, and it stops watching whenever CatVision or auto
+  levels is turned off.
 
 ## Presets
 

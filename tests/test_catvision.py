@@ -718,3 +718,80 @@ class PresetCleanupTests(unittest.TestCase):
         keys = suggested_hotkeys()
         for p in BUILTIN_PRESETS:
             self.assertIn("preset:" + p.name, keys)
+
+
+def _picture(level: int, pixels: int = 400) -> bytes:
+    """A flat grey 32-bit BGRA picture."""
+    return bytes([level, level, level, 255]) * pixels
+
+
+class AutoLevelsTests(unittest.TestCase):
+    def test_measure_dark_and_bright_pictures(self):
+        from catvision.autolevels import measure
+        dark, bright = measure(_picture(10)), measure(_picture(220))
+        self.assertLess(dark.key, 0.06)
+        self.assertGreater(bright.key, 0.8)
+        self.assertEqual(dark.dark, 1.0)
+        self.assertFalse(dark.black)
+        self.assertTrue(measure(_picture(0)).black)
+
+    def test_target_offset_raises_dark_and_lowers_bright(self):
+        from catvision.autolevels import target_offset
+        self.assertAlmostEqual(target_offset(0.12, 30, 0.12), 0.0)
+        self.assertAlmostEqual(target_offset(0.01, 30, 0.12), 30.0)    # very dark: full
+        self.assertAlmostEqual(target_offset(0.99, 30, 0.12), -30.0)   # very bright: full down
+        self.assertGreater(target_offset(0.05, 30, 0.12), 0)
+        self.assertLess(target_offset(0.3, 30, 0.12), 0)
+
+    def test_controller_brightens_slowly_and_dims_fast(self):
+        from catvision.autolevels import Controller, measure
+        c = Controller()
+        up = c.step(measure(_picture(3)), 30, 0.12, 0.2)
+        self.assertGreater(up, 0)
+        self.assertLess(up, 10)                 # no sudden jump when it gets dark
+        for _ in range(40):
+            c.step(measure(_picture(3)), 30, 0.12, 0.2)
+        self.assertGreater(c.offset, 25)
+        before = c.offset
+        c.step(measure(_picture(250)), 30, 0.12, 0.2)
+        self.assertLess(c.offset, before - 25)  # a flash pulls it back quickly
+        held = c.offset
+        self.assertEqual(c.step(measure(_picture(0)), 30, 0.12, 0.2), held)  # black: hold
+
+    def test_engine_adjusts_each_display_on_its_own(self):
+        with tempfile.TemporaryDirectory() as d:
+            g = FakeGamma()
+            e = Engine(g, NullColorBackend(), Path(d))
+            e.set_settings(Settings(shadow_boost=40))
+            e.set_enabled(True)
+            plain = g.get_ramp("\\\\.\\DISPLAY2")
+            e.set_auto_offsets({"\\\\.\\DISPLAY1": ("shadow_boost", 30.0)})
+            self.assertEqual(g.get_ramp("\\\\.\\DISPLAY2"), plain)      # untouched
+            boosted = g.get_ramp("\\\\.\\DISPLAY1")
+            self.assertGreater(boosted[0][20], plain[0][20])           # brighter darks
+            self.assertEqual(e.settings.shadow_boost, 40)              # preset unchanged
+            self.assertFalse(e.check_and_reapply())                    # not seen as drift
+            e.set_auto_offsets({})
+            self.assertEqual(g.get_ramp("\\\\.\\DISPLAY1"), plain)
+            e.set_enabled(False)
+            self.assertEqual(g.get_ramp("\\\\.\\DISPLAY1"), curves.identity_ramp())
+
+    def test_watcher_measures_with_any_capture(self):
+        import time
+        from catvision.autolevels import Watcher
+        w = Watcher(capture=lambda rect: _picture(30))
+        w.watch({"a": (0, 0, 100, 100), "b": (100, 0, 200, 100)})
+        deadline = time.time() + 3
+        while w.latest()[0] == 0 and time.time() < deadline:
+            time.sleep(0.02)
+        seq, latest = w.latest()
+        w.stop()
+        self.assertGreater(seq, 0)
+        self.assertEqual(set(latest), {"a", "b"})
+        self.assertFalse(w.running)
+
+    def test_auto_levels_options_default_off(self):
+        self.assertFalse(config.Options().auto_levels)
+        o = config.Options.from_dict({"auto_levels": True, "auto_strength": 45.0})
+        self.assertTrue(o.auto_levels)
+        self.assertEqual(o.auto_strength, 45.0)

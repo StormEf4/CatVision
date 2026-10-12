@@ -1,6 +1,6 @@
 [project]
 name = "catvision"
-version = "1.6.1"
+version = "1.7.0"
 description = "Make dark games easier to see using only display-level Windows accessibility APIs."
 readme = "README.md"
 requires-python = ">=3.10"

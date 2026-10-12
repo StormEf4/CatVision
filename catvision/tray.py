@@ -29,6 +29,7 @@ class TrayState:
     boost_label: str = "Shadow boost"
     displays: list[tuple[str, str]] = field(default_factory=list)  # (id, label)
     chosen: list[str] = field(default_factory=list)                # empty = all
+    auto_levels: bool = False
 
 
 class Tray:
@@ -85,6 +86,8 @@ class Tray:
         return ps.Menu(
             ps.MenuItem("Show CatVision", do("show_window"), default=True),
             ps.MenuItem("CatVision on", do("toggle"), checked=lambda _i: st().enabled),
+            ps.MenuItem("Auto levels (beta)", do("auto_levels"),
+                        checked=lambda _i: st().auto_levels),
             ps.Menu.SEPARATOR,
             ps.MenuItem(lambda _i: f"Preset: {st().preset}", ps.Menu(presets)),
             ps.MenuItem("Color filter", ps.Menu(color_filters)),

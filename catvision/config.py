@@ -38,6 +38,10 @@ class Options:
     # "color_all_displays", which defaulted to on, so old configs reset.)
     color_everywhere: bool = False
     text_size: str = "Large"        # Normal / Large / Extra large
+    # Auto levels (beta): adjust Shadow boost / Exposure to the picture.
+    auto_levels: bool = False
+    auto_strength: float = 30.0     # how far it may move the slider (points)
+    auto_target: float = 0.12       # how bright it aims to make scenes (0-1)
     unlock_requested_at: float = 0.0  # when the user unlocked full strength
 
     @classmethod

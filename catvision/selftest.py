@@ -214,6 +214,29 @@ def _dialog_check(root) -> dict:
     return out
 
 
+def _auto_levels_app_check(root, app) -> dict:
+    """Turn on auto levels in the real window for a moment."""
+    import time
+    out: dict = {}
+    try:
+        app.handle_action("auto_levels")
+        out["watching"] = app.auto_watch.running
+        end = time.time() + 2.0
+        while time.time() < end:
+            root.update()
+            time.sleep(0.02)
+        out["offsets"] = {k: list(v) for k, v in app.engine.auto_offsets.items()}
+        out["info"] = app.auto_info.cget("text")
+        out["capture_ms"] = round(app.auto_watch.capture_ms, 1)
+        app.handle_action("auto_levels")
+        app.handle_action("off")
+        root.update()
+        out["stopped"] = not app.auto_watch.running
+    except Exception as exc:
+        out["error"] = repr(exc)
+    return out
+
+
 def run(report_path: str) -> int:
     report: dict = {"platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
                     "checks": {}, "errors": []}
@@ -309,13 +332,50 @@ def run(report_path: str) -> int:
             info["warning_popup"] = _warning_popup_check(root, app, report_path)
             info["test_pattern"] = _test_pattern_check(root, app, report_path)
             info["dialog"] = _dialog_check(root)
+            info["auto_levels"] = _auto_levels_app_check(root, app)
             app.quit()
         root.after(300 + 150 * len(steps) + 1800, popup_check_then_quit)
         root.mainloop()
         info["enabled_after"] = engine.enabled
         return info
 
+    def auto_levels():
+        """Screen capture for auto levels (beta): speed, and whether the
+        captured picture includes CatVision's own brightness change."""
+        import time
+        from .autolevels import Watcher, gdi_capture, measure
+        mons = [m for m in gamma.monitors() if m.rect]
+        if not mons:
+            return {"skipped": "no display positions"}
+        m = mons[0]
+        start = time.perf_counter()
+        pixels = gdi_capture(m.rect)
+        out = {"monitor": m.short, "captured": pixels is not None,
+               "capture_ms": round((time.perf_counter() - start) * 1000, 1)}
+        if pixels is None:
+            return out
+        before = measure(pixels)
+        out["key_before"] = round(before.key, 4)
+        original = gamma.get_ramp(m.id)
+        if original is not None and gamma.set_ramp(
+                m.id, curves.build_ramp(curves.Settings(shadow_boost=100))):
+            time.sleep(0.3)
+            after = gdi_capture(m.rect)
+            gamma.set_ramp(m.id, original)
+            if after:
+                out["key_with_boost"] = round(measure(after).key, 4)
+                out["capture_sees_boost"] = abs(out["key_with_boost"] - out["key_before"]) > 0.02
+        w = Watcher()
+        w.watch({m.id: m.rect})
+        time.sleep(1.0)
+        seq, latest = w.latest()
+        w.stop()
+        out["watcher_measurements"] = seq
+        out["watcher_stopped"] = not w.running
+        return out
+
     check("gamma", gamma_roundtrip)
+    check("auto_levels", auto_levels)
     check("color_filter", color_filter)
     check("hotkeys", hotkeys)
     def full_strength():

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import curves
@@ -59,6 +59,9 @@ class Engine:
         self.color_all_displays = False
         self.custom_filters: dict[str, curves.Matrix] = {}  # "custom:<name>" -> matrix
         self.custom_tints: dict[str, tuple] = {}            # "custom:<name>" -> tint
+        # Auto levels (beta): per display id, (setting, amount) added on top
+        # of the preset, e.g. ("shadow_boost", 12.5).
+        self.auto_offsets: dict[str, tuple[str, float]] = {}
         self._lock = threading.RLock()  # force-quit restores from the tray thread
         self._flag = (state_dir / "display_modified.flag") if state_dir else None
         self._applied: dict[str, list[list[int]]] = {}
@@ -125,14 +128,8 @@ class Engine:
         per_display = not self.all_displays_selected()
         tint, matrix = curves.plan_color(self.settings, self.custom_filters, self.custom_tints,
                                          all_displays=not per_display)
-        ramp = curves.build_ramp(self.settings, tint)
         self._mark_dirty(True)
-        for m in self._targets():
-            result: GammaResult = apply_ramp_with_fallback(self.gamma, m.id, ramp)
-            if result.ok:
-                self._applied[m.id] = self.gamma.get_ramp(m.id) or ramp
-            status.gamma_ok = status.gamma_ok and result.ok
-            status.gamma_limited = status.gamma_limited or result.limited
+        self._apply_gamma(self._targets(), tint, status)
 
         if curves.is_identity_matrix(matrix):
             self.color.reset()
@@ -151,6 +148,40 @@ class Engine:
             status.messages.append(self.gamma.reason)
         self.status = status
         return status
+
+    def set_auto_offsets(self, offsets: dict[str, tuple[str, float]]) -> None:
+        """Auto levels (beta): move Shadow boost / Exposure per display without
+        touching the preset.  Only the brightness tables are redone."""
+        with self._lock:
+            changed = [m for m in self._targets()
+                       if offsets.get(m.id) != self.auto_offsets.get(m.id)]
+            self.auto_offsets = dict(offsets)
+            if not self.enabled or not changed:
+                return
+            tint, _matrix = curves.plan_color(self.settings, self.custom_filters,
+                                              self.custom_tints,
+                                              all_displays=self.all_displays_selected())
+            self._apply_gamma(changed, tint, self.status)
+
+    def settings_for(self, display_id: str) -> Settings:
+        """The settings a display really gets (the preset plus auto levels)."""
+        key, amount = self.auto_offsets.get(display_id, ("", 0.0))
+        if not key or not amount:
+            return self.settings
+        return replace(self.settings, **{key: getattr(self.settings, key) + amount}).clamped()
+
+    def _apply_gamma(self, monitors, tint, status: Status) -> None:
+        ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
+        for m in monitors:
+            which = self.auto_offsets.get(m.id, ("", 0.0))
+            ramp = ramps.get(which)
+            if ramp is None:
+                ramp = ramps[which] = curves.build_ramp(self.settings_for(m.id), tint)
+            result: GammaResult = apply_ramp_with_fallback(self.gamma, m.id, ramp)
+            if result.ok:
+                self._applied[m.id] = self.gamma.get_ramp(m.id) or ramp
+            status.gamma_ok = status.gamma_ok and result.ok
+            status.gamma_limited = status.gamma_limited or result.limited
 
     def check_and_reapply(self) -> bool:
         """Re-apply if a game, driver or Windows reset the gamma ramp.
