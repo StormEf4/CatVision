@@ -47,6 +47,97 @@ def _screenshots(root, app, report_path: str) -> list[str]:
     return saved
 
 
+def _top_window_at(x: int, y: int):
+    """Top-level window handle that is actually visible at screen point x, y."""
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    u.WindowFromPoint.restype = wintypes.HWND
+    u.WindowFromPoint.argtypes = [wintypes.POINT]
+    u.GetAncestor.restype = wintypes.HWND
+    u.GetAncestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+    h = u.WindowFromPoint(wintypes.POINT(x, y))
+    return u.GetAncestor(h, 2) if h else None  # GA_ROOT
+
+
+def _real_click(widget) -> None:
+    """Click the middle of a widget with the real mouse (Windows input path)."""
+    import ctypes
+    import time
+    widget.update()
+    x = widget.winfo_rootx() + widget.winfo_width() // 2
+    y = widget.winfo_rooty() + widget.winfo_height() // 2
+    u = ctypes.windll.user32
+    u.SetCursorPos(x, y)
+    time.sleep(0.05)
+    u.mouse_event(0x0002, 0, 0, 0, 0)   # left down
+    u.mouse_event(0x0004, 0, 0, 0, 0)   # left up
+
+
+def _popup_state(root, popup) -> dict:
+    import ctypes
+    import time
+    for _ in range(8):
+        root.update()
+        time.sleep(0.05)
+    if popup is None or not popup.winfo_exists():
+        return {"exists": False}
+    popup.update_idletasks()
+    cx = popup.winfo_rootx() + popup.winfo_width() // 2
+    cy = popup.winfo_rooty() + popup.winfo_height() // 2
+    ctypes.windll.user32.GetAncestor.restype = ctypes.c_void_p
+    own = ctypes.windll.user32.GetAncestor(ctypes.c_void_p(popup.winfo_id()), 2)
+    return {"exists": True, "viewable": bool(popup.winfo_viewable()),
+            "geometry": popup.winfo_geometry(), "root_geometry": root.winfo_geometry(),
+            "visible_on_top": _top_window_at(cx, cy) == own}
+
+
+def _warning_popup_check(root, app, report_path: str) -> dict:
+    """Show a warning, click the warning icon like a user would, and check the
+    drop-down really appears on top (it didn't on a user's Windows PC)."""
+    out: dict = {}
+    if sys.platform != "win32":
+        return {"skipped": "not Windows"}
+    try:
+        import tkinter as tk
+        app.hotkeys.failed = ["toggle"]          # a harmless warning to show
+        app.refresh_notices()
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+        root.update()
+        out["icon_mapped"] = bool(app.warning.icon.winfo_ismapped())
+        _real_click(app.warning.icon)
+        out["after_click"] = _popup_state(root, app.warning.popup)
+        try:
+            from PIL import ImageGrab
+            path = report_path.rsplit(".", 1)[0] + ".popup.png"
+            ImageGrab.grab(all_screens=True).save(path)
+            out["screenshot"] = path
+        except Exception as exc:
+            out["screenshot"] = f"failed: {exc}"
+        app.warning.close()
+        # The same drop-down made a different way, for comparison.
+        for name, transient, topmost in (("no_transient", False, False),
+                                         ("topmost", False, True),
+                                         ("transient_topmost", True, True)):
+            p = tk.Toplevel(root)
+            p.overrideredirect(True)
+            if transient:
+                p.transient(root)
+            if topmost:
+                p.attributes("-topmost", True)
+            tk.Label(p, text="test drop-down", padx=40, pady=30).pack()
+            p.geometry(f"+{root.winfo_rootx() + 60}+{root.winfo_rooty() + 120}")
+            out[name] = _popup_state(root, p)
+            p.destroy()
+        app.hotkeys.failed = []
+        app.refresh_notices()
+    except Exception as exc:
+        out["error"] = repr(exc)
+    return out
+
+
 def run(report_path: str) -> int:
     report: dict = {"platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
                     "checks": {}, "errors": []}
@@ -137,6 +228,7 @@ def run(report_path: str) -> int:
         info = {"tabs": len(app.notebook.tabs()), "presets": len(app.preset_names()),
                 "tray_running": app.tray.running}
         info["screenshots"] = _screenshots(root, app, report_path)
+        info["warning_popup"] = _warning_popup_check(root, app, report_path)
         root.after(300 + 150 * len(steps) + 300, app.quit)
         root.mainloop()
         info["enabled_after"] = engine.enabled
