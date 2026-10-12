@@ -200,17 +200,67 @@ class EngineTests(unittest.TestCase):
         e.shutdown()
         self.assertTrue(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY1"]))
 
-    def test_single_monitor_choice(self):
+    def test_chosen_displays_only(self):
         g = FakeGamma()
         e = Engine(g, NullColorBackend(), self.dir)
-        e.monitor_choice = "\\\\.\\DISPLAY2"
+        e.displays = ["\\\\.\\DISPLAY2"]
         e.settings = Settings(shadow_boost=50)
         e.set_enabled(True)
         self.assertTrue(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY1"]))
         self.assertFalse(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY2"]))
-        e.set_monitor_choice("\\\\.\\DISPLAY1")
+        self.assertFalse(e.all_displays_selected())
+        e.set_displays(["\\\\.\\DISPLAY1"])
         self.assertFalse(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY1"]))
         self.assertTrue(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY2"]))
+        e.set_displays([])  # empty = all
+        self.assertFalse(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY2"]))
+        self.assertTrue(e.all_displays_selected())
+
+    def test_unplugged_display_falls_back_to_all(self):
+        g = FakeGamma()
+        e = Engine(g, NullColorBackend(), self.dir)
+        e.displays = ["\\\\.\\DISPLAY9"]
+        e.settings = Settings(shadow_boost=50)
+        e.set_enabled(True)
+        self.assertTrue(e.all_displays_selected())
+        self.assertFalse(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY1"]))
+
+    def test_tint_filter_stays_on_chosen_display(self):
+        g = FakeGamma()
+        color = FakeColor()
+        e = Engine(g, color, self.dir)
+        e.displays = ["\\\\.\\DISPLAY1"]
+        e.settings = Settings(color_filter="night_vision")
+        status = e.set_enabled(True)
+        r, gr, b = g.ramps["\\\\.\\DISPLAY1"]
+        self.assertLess(r[200], gr[200])               # green tint via brightness table
+        self.assertTrue(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY2"]))
+        self.assertIsNone(color.last)                   # no screen-wide filter needed
+        self.assertFalse(status.color_all_displays)
+
+    def test_mixing_filter_with_chosen_displays(self):
+        g = FakeGamma()
+        color = FakeColor()
+        e = Engine(g, color, self.dir)
+        e.displays = ["\\\\.\\DISPLAY1"]
+        e.settings = Settings(color_filter="deuteranopia")
+        status = e.set_enabled(True)
+        self.assertTrue(status.color_all_displays)      # allowed by default, but flagged
+        self.assertIsNotNone(color.last)
+        e.color_all_displays = False
+        status = e.apply()
+        self.assertTrue(status.color_skipped)
+        self.assertIsNone(color.last)
+        self.assertIn("every display", status.summary())
+
+    def test_restore_now(self):
+        g = FakeGamma()
+        e = Engine(g, NullColorBackend(), self.dir)
+        e.settings = Settings(shadow_boost=80)
+        e.set_enabled(True)
+        e.restore_now()
+        self.assertTrue(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY1"]))
+        self.assertFalse((self.dir / "display_modified.flag").exists())
 
     def test_unavailable_color_backend_reports_reason(self):
         e = Engine(FakeGamma(), NullColorBackend(), self.dir)
@@ -263,7 +313,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "config.json"
             path.write_text("{not json")
-            self.assertEqual(config.load(path).current, Settings())
+            self.assertEqual(config.load(path).current, config.Config().current)
             path.write_text(json.dumps({"options": {"hotkeys": "yes"}, "custom_presets": []}))
             loaded = config.load(path)
             self.assertTrue(loaded.options.hotkeys)
@@ -433,3 +483,32 @@ class ConfigV2Tests(unittest.TestCase):
                 del os.environ["CATVISION_CONFIG_DIR"]
             else:
                 os.environ["CATVISION_CONFIG_DIR"] = old
+
+
+class DisplayOptionTests(unittest.TestCase):
+    def test_old_single_monitor_setting_migrates(self):
+        o = config.Options.from_dict({"monitor": "\\\\.\\DISPLAY2"})
+        self.assertEqual(o.displays, ["\\\\.\\DISPLAY2"])
+        self.assertEqual(config.Options.from_dict({"monitor": "all"}).displays, [])
+        o = config.Options.from_dict({"displays": ["a", 3, None, "b"]})
+        self.assertEqual(o.displays, ["a", "b"])
+
+    def test_split_for_displays(self):
+        gains, m = curves.split_for_displays(Settings(color_filter="amber", filter_strength=0.5))
+        self.assertTrue(curves.is_identity_matrix(m))
+        self.assertAlmostEqual(gains[2], 1 + (0.25 - 1) * 0.5)
+        gains, m = curves.split_for_displays(Settings(color_filter="grayscale"))
+        self.assertEqual(gains, (1.0, 1.0, 1.0))
+        self.assertFalse(curves.is_identity_matrix(m))
+        gains, m = curves.split_for_displays(
+            Settings(color_filter="custom:Mine"), custom_tints={"custom:Mine": (1.0, 0.5, 0.5)})
+        self.assertEqual(gains, (1.0, 0.5, 0.5))
+
+
+class FirstRunTests(unittest.TestCase):
+    def test_fresh_config_matches_active_preset(self):
+        from catvision.presets import builtin_by_name
+        c = config.Config()
+        self.assertEqual(c.current, builtin_by_name(c.active_preset).settings)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(config.load(Path(d) / "missing.json").current, c.current)

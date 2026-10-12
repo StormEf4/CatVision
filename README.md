@@ -1,4 +1,8 @@
+<img src="catvision/assets/logo_96.png" width="72" align="left" alt="CatVision logo">
+
 # CatVision
+
+<br clear="left">
 
 **See in the dark, in any game.** CatVision is a small accessibility app for
 Windows that brightens dark areas of your screen so caves, night scenes and
@@ -8,7 +12,7 @@ of these.
 
 <p>
 <img src="docs/home.png" width="300" alt="Home tab">
-<img src="docs/tune.png" width="300" alt="Tune tab">
+<img src="docs/displays.png" width="300" alt="Home tab with one display chosen">
 </p>
 
 ## Download
@@ -55,19 +59,49 @@ The window is small and split into tabs:
 
 | Tab | What's there |
 | --- | --- |
-| **Home** | The big **ON/OFF** button, preset picker, **Shadow boost** slider, color filter picker and a test pattern |
+| **Home** | The big **ON/OFF** button, preset picker (◀ ▶ to flip through), **Shadow boost**, color filter, which **displays** to change, and a test pattern |
 | **Tune** | Every slider. **Save** keeps your changes in the current preset (built-in ones too), **Save as new...** makes your own preset |
 | **Filters** | Make and edit your own color filters |
 | **Hotkeys** | Change any hotkey, or give any preset its own hotkey |
-| **Settings** | Start with Windows, tray icon, which display, text size, reset display |
+| **Settings** | Start with Windows, tray icon, text size, reset display, quit |
 
 **Quick start:** pick **Dark Areas**, click **OFF** so it turns green, then
 move **Shadow boost** until the dark squares in the test pattern are all
-visible.
+visible. Not sure what something does? Rest the mouse on it for a short
+explanation.
 
-Closing the window keeps CatVision running in the **system tray** (by the
-clock), so your hotkeys keep working. Right-click the cat-eye icon to switch
-presets or quit. You can turn this off in Settings.
+## Choosing displays (multiple monitors)
+
+With two or more monitors, the Home tab shows a button for each display.
+CatVision only changes the **ticked** displays, so you can brighten the
+game monitor and leave the one with Discord or a browser alone. **Identify**
+shows each display's name on that screen so you know which is which.
+
+- **Brightness, Shadow boost, contrast, glare limit and tints** only change
+  the ticked displays.
+- **Tint filters** (Night vision, Amber, Ice and your own *Monochrome tint*
+  filters) also stay on the ticked displays. There they show as a colored
+  tint rather than full monochrome.
+- **Color-mixing filters** (Grayscale, the color-blind assists, saturation and
+  your own *Channel mixer* filters) are a Windows limit: Windows can only
+  apply those to **every display at once**. CatVision tells you when that
+  happens, and you can choose to use the filter on all displays anyway or
+  leave it off.
+
+## The tray icon (by the clock)
+
+Closing the window keeps CatVision running in the **system tray**, so your
+hotkeys keep working. Click the cat-eye icon to open the window, or
+right-click it for quick controls:
+
+- **CatVision on**: turn it on or off
+- **Preset**, **Color filter**, **Shadow boost** (+10 / -10), **Displays**
+- **Panic: everything off** and **Reset display to normal**
+- **Quit CatVision**: closes normally and saves your settings
+- **Force quit**: closes immediately, even if the window has frozen. Your
+  screen is put back to normal first.
+
+You can make the close button quit instead in Settings.
 
 ## Hotkeys (work while you're in a game)
 
@@ -83,6 +117,8 @@ an action and press the new keys.
 | **Ctrl+Alt+F** | Next color filter |
 | **Ctrl+Alt+C** | Show the CatVision window |
 | **Ctrl+Alt+0** | Panic button: everything back to normal |
+
+You can also give hotkeys to any preset, and use the tray menu for the rest.
 
 <img src="docs/hotkeys.png" width="300" align="right" alt="Hotkeys tab">
 
@@ -115,10 +151,14 @@ an action and press the new keys.
 | Red-Green Assist (Deutan / Protan) | Color correction for red-green color blindness |
 | Blue-Yellow Assist (Tritan) | Color correction for blue-yellow color blindness |
 
+<img src="docs/tune.png" width="300" align="right" alt="Tune tab">
+
 **Changing presets:** pick one, adjust the sliders in **Tune**, and click
 **Save**. An edited built-in preset shows *(edited)*, and **Restore default**
 puts it back. **Save as new...** creates your own preset, which you can
 rename or delete.
+
+<br clear="right">
 
 ### What the sliders do
 
@@ -180,7 +220,8 @@ display-calibration software uses. `windows/undo_full_strength.reg` undoes it.
   CatVision's color filters.
 - **Screen stuck bright or dark?** Quitting CatVision always restores it. If
   it crashed, just start it again; it notices and cleans up. You can also use
-  **Reset display now** in Settings, the panic hotkey **Ctrl+Alt+0**, or run
+  **Reset display now** in Settings, **Reset display to normal** or
+  **Force quit** in the tray menu, the panic hotkey **Ctrl+Alt+0**, or run
   `CatVision.exe --reset`.
 - **Text too small?** Settings → Text size → *Extra large*.
 - **Opened CatVision twice?** The second copy just brings up the first one's

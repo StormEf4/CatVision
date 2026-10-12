@@ -31,8 +31,10 @@ class Options:
     hotkey_popup: bool = True       # small on-screen popup when using hotkeys
     enable_on_start: bool = False
     close_to_tray: bool = True      # closing the window keeps CatVision in the tray
-    monitor: str = "all"            # "all" or a monitor id
+    displays: list = field(default_factory=list)  # chosen display ids; empty = all
+    color_all_displays: bool = True  # allow screen-wide color filters with chosen displays
     text_size: str = "Large"        # Normal / Large / Extra large
+    seen_welcome: bool = False
 
     @classmethod
     def from_dict(cls, data) -> "Options":
@@ -41,13 +43,27 @@ class Options:
             for key, default in asdict(o).items():
                 if key in data and isinstance(data[key], type(default)):
                     setattr(o, key, data[key])
+            o.displays = [d for d in o.displays if isinstance(d, str)][:16]
+            # version 1-2 stored a single "monitor" ("all" or an id)
+            old = data.get("monitor")
+            if "displays" not in data and isinstance(old, str) and old != "all":
+                o.displays = [old]
         return o
+
+
+DEFAULT_PRESET = "Dark Areas"
+
+
+def _default_settings() -> Settings:
+    from .presets import builtin_by_name
+    return builtin_by_name(DEFAULT_PRESET).settings
 
 
 @dataclass
 class Config:
-    current: Settings = field(default_factory=Settings)
-    active_preset: str = "Dark Areas"
+    # A fresh install starts on the default preset's settings.
+    current: Settings = field(default_factory=_default_settings)
+    active_preset: str = DEFAULT_PRESET
     # The user's presets.  A name matching a built-in preset overrides it.
     custom_presets: dict[str, Settings] = field(default_factory=dict)
     custom_filters: dict[str, CustomFilter] = field(default_factory=dict)
@@ -57,7 +73,7 @@ class Config:
 
     def to_json(self) -> dict:
         return {
-            "version": 2,
+            "version": 3,
             "current": self.current.to_dict(),
             "active_preset": self.active_preset,
             "custom_presets": {k: v.to_dict() for k, v in self.custom_presets.items()},
@@ -71,7 +87,8 @@ class Config:
         c = cls()
         if not isinstance(data, dict):
             return c
-        c.current = Settings.from_dict(data.get("current", {}))
+        if "current" in data:
+            c.current = Settings.from_dict(data["current"])
         if isinstance(data.get("active_preset"), str):
             c.active_preset = data["active_preset"]
         customs = data.get("custom_presets", {})

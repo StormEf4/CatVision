@@ -95,3 +95,8 @@ def all_filter_choices(custom: dict[str, CustomFilter]) -> list[tuple[str, str]]
 
 def matrices(custom: dict[str, CustomFilter]) -> dict[str, Matrix]:
     return {key_for(name): f.to_matrix() for name, f in custom.items()}
+
+
+def tints(custom: dict[str, CustomFilter]) -> dict[str, tuple]:
+    """Tint colors of the user's tint-type filters (for per-display use)."""
+    return {key_for(name): tuple(f.tint) for name, f in custom.items() if f.kind == "tint"}

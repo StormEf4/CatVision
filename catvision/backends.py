@@ -29,6 +29,8 @@ class Monitor:
     label: str         # friendly name for the GUI
     primary: bool = False
     original: list[list[int]] | None = None
+    short: str = ""    # e.g. "Display 1 (main)"
+    rect: tuple[int, int, int, int] | None = None  # left, top, right, bottom
 
 
 @dataclass
@@ -53,7 +55,8 @@ class NullGammaBackend:
         self.last: dict[str, list[list[int]]] = {}
 
     def monitors(self) -> list[Monitor]:
-        return [Monitor("preview", "Preview only (no display control)", True)]
+        return [Monitor("preview", "Preview only (no display control)", True,
+                        short="Preview display")]
 
     def set_ramp(self, monitor_id: str, ramp: list[list[int]]) -> bool:
         self.last[monitor_id] = ramp
@@ -106,6 +109,7 @@ class WindowsGammaBackend:
 
     def monitors(self) -> list[Monitor]:
         ctypes = self._ctypes
+        rects = self._monitor_rects()
         result = []
         i = 0
         while True:
@@ -124,10 +128,44 @@ class WindowsGammaBackend:
             if self._user32.EnumDisplayDevicesW(name, 0, ctypes.byref(mon), 0) and mon.DeviceString:
                 friendly = mon.DeviceString
             number = name.replace("\\\\.\\DISPLAY", "")
+            short = f"Display {number}" + (" (main)" if primary else "")
             label = f"Display {number} - {friendly}" + (" (main)" if primary else "")
-            result.append(Monitor(name, label, primary))
+            result.append(Monitor(name, label, primary, short=short, rect=rects.get(name)))
         result.sort(key=lambda m: (not m.primary, m.id))
         return result
+
+    def _monitor_rects(self) -> dict[str, tuple[int, int, int, int]]:
+        """Screen position of every display, by device name."""
+        ctypes = self._ctypes
+        from ctypes import wintypes
+
+        class MONITORINFOEXW(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD),
+                        ("szDevice", wintypes.WCHAR * 32)]
+
+        rects: dict[str, tuple[int, int, int, int]] = {}
+        proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                                       ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+        def callback(hmon, _hdc, _rect, _data):
+            info = MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(info)
+            if self._user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                r = info.rcMonitor
+                rects[info.szDevice] = (r.left, r.top, r.right, r.bottom)
+            return True
+
+        u = self._user32
+        u.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.c_void_p]
+        u.GetMonitorInfoW.restype = wintypes.BOOL
+        u.EnumDisplayMonitors.argtypes = [wintypes.HDC, ctypes.c_void_p, proc_type, wintypes.LPARAM]
+        u.EnumDisplayMonitors.restype = wintypes.BOOL
+        try:
+            u.EnumDisplayMonitors(None, None, proc_type(callback), 0)
+        except OSError:
+            pass
+        return rects
 
     def _with_dc(self, monitor_id: str, fn):
         hdc = self._gdi32.CreateDCW(monitor_id, None, None, None)

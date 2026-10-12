@@ -65,9 +65,29 @@ def run(report_path: str) -> int:
         return {"supported": listener.supported, "failed": failed}
 
     def tray():
-        from .tray import Tray
+        from .tray import Tray, TrayState
         t = Tray(lambda a: None)
-        return {"available": t.available}
+        out = {"available": t.available}
+        if t.available:
+            t.state = TrayState(enabled=True, preset="Dark Areas", presets=["Dark Areas"],
+                                filters=[("none", "None")], displays=[("a", "A"), ("b", "B")])
+            out["menu_items"] = [str(item) for item in t.build_menu().items]
+        return out
+
+    def displays():
+        out = []
+        mons = gamma.monitors()
+        for m in mons:
+            out.append({"id": m.id, "short": m.short, "rect": m.rect})
+        if mons:
+            from .engine import Engine
+            e = Engine(gamma, color, None)
+            e.displays = [mons[0].id]
+            e.settings = curves.Settings(shadow_boost=40, color_filter="night_vision")
+            st = e.set_enabled(True)
+            out.append({"per_display_apply": st.gamma_ok, "screen_wide_color": st.color_all_displays})
+            e.restore_now()
+        return out
 
     def window():
         import tkinter as tk
@@ -92,6 +112,7 @@ def run(report_path: str) -> int:
     check("color_filter", color_filter)
     check("hotkeys", hotkeys)
     check("tray", tray)
+    check("displays", displays)
     check("window", window)
 
     with open(report_path, "w", encoding="utf-8") as f:

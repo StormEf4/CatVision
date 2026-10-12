@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,6 +23,8 @@ class Status:
     gamma_limited: bool = False
     color_ok: bool = True
     color_used: bool = False
+    color_all_displays: bool = False   # a color filter is covering every display
+    color_skipped: bool = False        # a color filter was left off (displays chosen)
     messages: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -36,6 +39,8 @@ class Status:
             parts.append("On.")
         if self.color_used and not self.color_ok:
             parts.append("Color filter could not be applied.")
+        if self.color_skipped:
+            parts.append("The color filter is off because it can only cover every display.")
         parts.extend(self.messages)
         return " ".join(parts)
 
@@ -46,8 +51,13 @@ class Engine:
         self.color = color_backend
         self.settings = Settings()
         self.enabled = False
-        self.monitor_choice = "all"
+        self.displays: list[str] = []      # chosen display ids; empty = all displays
+        # When only some displays are chosen, filters that mix colors can only
+        # be shown on every display (Windows limit).  Allow that?
+        self.color_all_displays = True
         self.custom_filters: dict[str, curves.Matrix] = {}  # "custom:<name>" -> matrix
+        self.custom_tints: dict[str, tuple] = {}            # "custom:<name>" -> tint
+        self._lock = threading.RLock()  # force-quit restores from the tray thread
         self._flag = (state_dir / "display_modified.flag") if state_dir else None
         self._applied: dict[str, list[list[int]]] = {}
         self.status = Status()
@@ -70,10 +80,11 @@ class Engine:
         return list(self._monitors)
 
     def _targets(self) -> list[Monitor]:
-        if self.monitor_choice == "all":
-            return self._monitors
-        chosen = [m for m in self._monitors if m.id == self.monitor_choice]
-        return chosen or self._monitors
+        chosen = [m for m in self._monitors if m.id in self.displays]
+        return chosen or self._monitors  # nothing (still) connected: use all
+
+    def all_displays_selected(self) -> bool:
+        return len(self._targets()) == len(self._monitors)
 
     # -- main API ---------------------------------------------------------------
 
@@ -85,13 +96,19 @@ class Engine:
         self.enabled = enabled
         return self.apply()
 
-    def set_monitor_choice(self, choice: str) -> Status:
-        self.monitor_choice = choice
-        if self.enabled:
-            self._restore_gamma()
-        return self.apply()
+    def set_displays(self, display_ids) -> Status:
+        """Choose which displays CatVision changes (empty = all)."""
+        with self._lock:
+            self.displays = [d for d in display_ids]
+            if self.enabled:
+                self._restore_gamma()
+            return self.apply()
 
     def apply(self) -> Status:
+        with self._lock:
+            return self._apply()
+
+    def _apply(self) -> Status:
         if not self.enabled:
             self._restore_gamma()
             self.color.reset()
@@ -99,7 +116,14 @@ class Engine:
             return self.status
 
         status = Status(enabled=True)
-        ramp = curves.build_ramp(self.settings)
+        per_display = not self.all_displays_selected()
+        if per_display:
+            tint, matrix = curves.split_for_displays(
+                self.settings, self.custom_filters, self.custom_tints)
+        else:
+            tint = (1.0, 1.0, 1.0)
+            matrix = curves.color_matrix(self.settings, self.custom_filters)
+        ramp = curves.build_ramp(self.settings, tint)
         self._mark_dirty(True)
         for m in self._targets():
             result: GammaResult = apply_ramp_with_fallback(self.gamma, m.id, ramp)
@@ -108,10 +132,13 @@ class Engine:
             status.gamma_ok = status.gamma_ok and result.ok
             status.gamma_limited = status.gamma_limited or result.limited
 
-        matrix = curves.color_matrix(self.settings, self.custom_filters)
         if curves.is_identity_matrix(matrix):
             self.color.reset()
+        elif per_display and not self.color_all_displays:
+            self.color.reset()
+            status.color_skipped = True
         else:
+            status.color_all_displays = per_display
             status.color_used = True
             if not self.color.available:
                 status.color_ok = False
@@ -130,6 +157,10 @@ class Engine:
         """
         if not self.enabled or not self.gamma.available:
             return False
+        with self._lock:
+            return self._check_and_reapply()
+
+    def _check_and_reapply(self) -> bool:
         for m in self._targets():
             want = self._applied.get(m.id)
             have = self.gamma.get_ramp(m.id)
@@ -141,15 +172,32 @@ class Engine:
                 for a, b in zip(cw, ch)
             )
             if drifted:
-                self.apply()
+                self._apply()
                 return True
         return False
 
     def shutdown(self) -> None:
-        self.enabled = False
-        self._restore_gamma()
-        self.color.close()
-        self.gamma.close()
+        with self._lock:
+            self.enabled = False
+            self._restore_gamma()
+            self.color.close()
+            self.gamma.close()
+
+    def restore_now(self) -> None:
+        """Put the displays back immediately (safe to call from any thread).
+
+        Used by Force quit, which must work even if the window is frozen.
+        Color filters end by themselves when the process exits.
+        """
+        if self._lock.acquire(timeout=1.0):
+            try:
+                self._restore_gamma()
+            finally:
+                self._lock.release()
+        else:  # something is stuck holding the lock: restore without it
+            for m in self._monitors:
+                self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())
+            self._mark_dirty(False)
 
     # -- internals ----------------------------------------------------------
 

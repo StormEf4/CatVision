@@ -147,12 +147,16 @@ def tone_curve(x: float, s: Settings) -> float:
     return y
 
 
-def build_ramp(s: Settings) -> list[list[int]]:
-    """Return ``[red, green, blue]`` 256-entry tables of 16-bit values."""
+def build_ramp(s: Settings, tint: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> list[list[int]]:
+    """Return ``[red, green, blue]`` 256-entry tables of 16-bit values.
+
+    ``tint`` is an extra per-channel gain (used to show tint-style color
+    filters on chosen displays only).
+    """
     s = s.clamped()
     tone = [tone_curve(i / (RAMP_SIZE - 1), s) for i in range(RAMP_SIZE)]
     ramp = []
-    for gain in (s.red, s.green, s.blue):
+    for gain in (s.red * tint[0], s.green * tint[1], s.blue * tint[2]):
         channel = []
         prev = 0
         for y in tone:
@@ -299,6 +303,39 @@ def color_matrix(s: Settings, custom: dict[str, Matrix] | None = None) -> Matrix
         f = mat_lerp(IDENTITY3, filter_matrix(s.color_filter, custom), s.filter_strength)
         m = mat_mul(f, m)
     return m
+
+
+def filter_tint(key: str, custom_tints: dict[str, tuple] | None = None):
+    """The tint color of a tint-style filter, or None for other filters.
+
+    Tint filters can be approximated per display with the brightness table
+    (as a colored tint, without turning the picture grey).  Filters that mix
+    colors (grayscale, color-blind assist, channel mixers) can't.
+    """
+    if key.startswith(CUSTOM_PREFIX):
+        tint = (custom_tints or {}).get(key)
+    else:
+        tint = MONO_TINTS.get(key)
+    if tint is None or all(abs(t - 1.0) < 1e-6 for t in tint):
+        return None
+    return tuple(tint)
+
+
+def split_for_displays(s: Settings, custom: dict[str, Matrix] | None = None,
+                       custom_tints: dict[str, tuple] | None = None):
+    """Split settings for when only some displays are chosen.
+
+    Returns ``(tint_gains, matrix)``: tint filters become per-display channel
+    gains; whatever is left must go through the screen-wide color matrix.
+    """
+    s = s.clamped()
+    tint = filter_tint(s.color_filter, custom_tints)
+    if tint is None or s.filter_strength <= 0:
+        return (1.0, 1.0, 1.0), color_matrix(s, custom)
+    k = s.filter_strength
+    gains = tuple(1.0 + (t - 1.0) * k for t in tint)
+    rest = Settings(**{**s.to_dict(), "color_filter": "none"})
+    return gains, color_matrix(rest, custom)
 
 
 def is_identity_matrix(m: Matrix, tolerance: float = 1e-6) -> bool:

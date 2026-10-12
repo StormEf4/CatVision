@@ -16,9 +16,9 @@ from .gui_filters import FiltersTab
 from .gui_hotkeys import HotkeysTab
 from .hotkeys import HotkeyListener, action_label, bindings_from_config
 from .presets import all_presets, builtin_by_name
-from .theme import (BG, FG, GRID, OFF, ON, PANEL, TEXT_SIZES, WARN, Fonts, SliderRow,
-                    setup_style)
-from .tray import Tray
+from .theme import (ACCENT, BG, FG, GRID, MUTED, OFF, ON, PANEL, TEXT_SIZES, WARN, Fonts,
+                    SliderRow, Tooltip, setup_style)
+from .tray import Tray, TrayState
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -38,6 +38,22 @@ COLOR_SLIDERS = [
     ("blue", "Blue", "pct"),
 ]
 
+TIPS = {
+    "shadow_boost": "The main control. Brightens dark areas a lot and bright areas barely "
+                    "at all, so the sky doesn't turn white.",
+    "gamma": "Brightens (higher) or darkens (lower) the middle tones.",
+    "black_floor": "Lifts pure black to dark grey, so nothing is completely black.",
+    "brightness": "Overall brightness.",
+    "contrast": "Difference between dark and light. Higher cuts through fog and haze.",
+    "white_cap": "Limits the brightest whites. Lower it if flashes, lamps or snow are "
+                 "too bright.",
+    "saturation": "Color strength. 0% is black and white, 200% is very vivid.",
+    "filter_strength": "How strongly the color filter is applied.",
+    "red": "Tint: more or less red.",
+    "green": "Tint: more or less green.",
+    "blue": "Tint: less blue is easier on tired eyes at night.",
+}
+
 BOOST_STEP = 10
 KEEP_APPLIED_MS = 2000
 
@@ -54,10 +70,10 @@ class Toast:
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.configure(bg=PANEL)
+        self.win.configure(bg=ACCENT)  # shows as an amber stripe on the left
         self.label = tk.Label(self.win, text="", bg=PANEL, fg=FG, padx=18, pady=10,
                               font=("Segoe UI", 16, "bold"))
-        self.label.pack()
+        self.label.pack(padx=(6, 0))
         self._hide_job = None
         self._set_alpha(0.0)
         self._offscreen()
@@ -138,10 +154,13 @@ class CatVisionApp:
         for key in LIMITS:
             self.vars[key] = tk.DoubleVar(value=getattr(Settings(), key))
         self.engine.custom_filters = filters.matrices(cfg.custom_filters)
-        self.engine.monitor_choice = cfg.options.monitor
+        self.engine.custom_tints = filters.tints(cfg.custom_filters)
+        self.engine.displays = list(cfg.options.displays)
+        self.engine.color_all_displays = cfg.options.color_all_displays
 
         self.hotkeys = HotkeyListener(self._actions.put)
-        self.tray = Tray(self._actions.put)
+        # Force quit runs on the tray thread and only needs to put the screen back.
+        self.tray = Tray(self._actions.put, on_force_quit=self.engine.restore_now)
         self._build()
 
         self.toast = Toast(root)
@@ -189,6 +208,7 @@ class CatVisionApp:
         self.status.bind("<Configure>",
                          lambda e: self.status.configure(wraplength=max(100, e.width - 20)))
 
+        self._build_header(root)
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill="both", expand=True, padx=8, pady=(8, 6))
         home = ttk.Frame(self.notebook, padding=10)
@@ -205,41 +225,203 @@ class CatVisionApp:
         self.notebook.add(settings, text="Settings")
         self._build_settings(settings)
 
+    def _build_header(self, root: tk.Tk) -> None:
+        header = tk.Frame(root, bg=BG)
+        header.pack(fill="x", padx=12, pady=(10, 0))
+        try:
+            name = "logo_96.png" if self.px >= 1.5 else "logo_48.png"
+            self._logo_img = tk.PhotoImage(file=str(winutil.asset(name)))
+            tk.Label(header, image=self._logo_img, bg=BG).pack(side="left")
+        except tk.TclError:
+            pass
+        titles = tk.Frame(header, bg=BG)
+        titles.pack(side="left", padx=10)
+        tk.Label(titles, text="CatVision", bg=BG, fg=FG, font=self.fonts.big).pack(anchor="w")
+        self.header_sub = tk.Label(titles, text="", bg=BG, fg=MUTED, font=self.fonts.small)
+        self.header_sub.pack(anchor="w")
+        self.pill = tk.Label(header, text="OFF", bg=OFF, fg=FG, font=self.fonts.bold,
+                             padx=16, pady=5, cursor="hand2")
+        self.pill.pack(side="right")
+        self.pill.bind("<Button-1>", lambda e: self._toggle())
+        Tooltip(self.pill, "Click to turn CatVision on or off.")
+
     def _build_home(self, f: ttk.Frame) -> None:
         f.columnconfigure(0, weight=1)
+        wrap = self.px_(380)
         self.toggle_btn = tk.Button(f, command=self._toggle, font=self.fonts.big, relief="flat",
                                     bd=0, pady=8, cursor="hand2", activeforeground=FG)
         self.toggle_btn.grid(row=0, column=0, sticky="ew")
 
-        ttk.Label(f, text="Preset", style="Head.TLabel").grid(row=1, column=0, sticky="w", pady=(12, 2))
-        self.preset_combo = ttk.Combobox(f, state="readonly", font=self.fonts.normal, height=20)
-        self.preset_combo.grid(row=2, column=0, sticky="ew")
+        self.welcome = ttk.Frame(f, style="Card.TFrame", padding=10)
+        self.welcome.columnconfigure(0, weight=1)
+        ttk.Label(self.welcome, style="Card.TLabel", justify="left", wraplength=wrap - 90,
+                  text="Welcome! Pick a preset, turn CatVision on, then raise Shadow boost "
+                       "until every dark square in the test pattern shows. Rest the mouse on "
+                       "anything for help.").grid(row=0, column=0, sticky="w")
+        ttk.Button(self.welcome, text="Got it", style="Accent.TButton",
+                   command=self._dismiss_welcome).grid(row=0, column=1, padx=(8, 0))
+        if not self.cfg.options.seen_welcome:
+            self.welcome.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+
+        ttk.Label(f, text="Preset", style="Head.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 2))
+        prow = ttk.Frame(f)
+        prow.grid(row=3, column=0, sticky="ew")
+        prow.columnconfigure(1, weight=1)
+        prev = ttk.Button(prow, text="\u25c0", width=3, command=lambda: self._step_preset(-1))
+        prev.grid(row=0, column=0, padx=(0, 4))
+        Tooltip(prev, "Previous preset")
+        self.preset_combo = ttk.Combobox(prow, state="readonly", font=self.fonts.normal, height=20)
+        self.preset_combo.grid(row=0, column=1, sticky="ew")
         self.preset_combo.bind("<<ComboboxSelected>>",
                                lambda e: self._activate_preset(self.preset_combo.current()))
+        nxt = ttk.Button(prow, text="\u25b6", width=3, command=lambda: self._step_preset(1))
+        nxt.grid(row=0, column=2, padx=(4, 0))
+        Tooltip(nxt, "Next preset")
         self.preset_desc = ttk.Label(f, text="", style="Muted.TLabel", justify="left",
-                                     wraplength=self.px_(380))
-        self.preset_desc.grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        f.bind("<Configure>", lambda e: self.preset_desc.configure(wraplength=max(100, e.width - 24)))
+                                     wraplength=wrap)
+        self.preset_desc.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        f.bind("<Configure>", self._on_home_resize)
 
         boost = ttk.Frame(f)
-        boost.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        boost.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         self.sliders.append(SliderRow(boost, 0, self.vars["shadow_boost"], "Shadow boost",
-                                      *LIMITS["shadow_boost"], "int", self.fonts, self._on_change))
+                                      *LIMITS["shadow_boost"], "int", self.fonts, self._on_change,
+                                      tip=TIPS["shadow_boost"]))
 
-        ttk.Label(f, text="Color filter", style="Head.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 2))
+        ttk.Label(f, text="Color filter", style="Head.TLabel").grid(row=6, column=0, sticky="w", pady=(10, 2))
         self.filter_combo = ttk.Combobox(f, state="readonly", font=self.fonts.normal, height=20)
-        self.filter_combo.grid(row=6, column=0, sticky="ew")
+        self.filter_combo.grid(row=7, column=0, sticky="ew")
         self.filter_combo.bind("<<ComboboxSelected>>", self._on_filter_combo)
+        Tooltip(self.filter_combo, "Color looks: night vision, grayscale, color-blind assist "
+                                   "and your own filters (Filters tab).")
 
-        ttk.Label(f, text="Test pattern", style="Head.TLabel").grid(row=7, column=0, sticky="w", pady=(12, 2))
+        self._build_displays(f, row=8, wrap=wrap)
+
+        ttk.Label(f, text="Test pattern", style="Head.TLabel").grid(row=9, column=0, sticky="w", pady=(12, 2))
         self.pattern = tk.Canvas(f, width=self.px_(300), height=self.px_(84), bg="#000000",
                                  highlightthickness=0)
-        self.pattern.grid(row=8, column=0, sticky="w")
+        self.pattern.grid(row=10, column=0, sticky="w")
         self._draw_pattern()
         ttk.Label(f, text="Raise Shadow boost until you can see every dark square.",
-                  style="Muted.TLabel").grid(row=9, column=0, sticky="w")
+                  style="Muted.TLabel").grid(row=11, column=0, sticky="w")
         self.home_hint = ttk.Label(f, text="", style="Muted.TLabel", justify="left")
-        self.home_hint.grid(row=10, column=0, sticky="w", pady=(10, 0))
+        self.home_hint.grid(row=12, column=0, sticky="w", pady=(10, 0))
+
+    def _on_home_resize(self, e) -> None:
+        width = max(100, e.width - 24)
+        self.preset_desc.configure(wraplength=width)
+        self.display_note.configure(wraplength=width)
+
+    def _dismiss_welcome(self) -> None:
+        self.welcome.grid_remove()
+        self.cfg.options.seen_welcome = True
+        self._schedule_save()
+
+    def _build_displays(self, f: ttk.Frame, row: int, wrap: int) -> None:
+        """Pick which displays CatVision changes (only shown with 2+ displays)."""
+        box = ttk.Frame(f)
+        monitors = self.engine.monitors()
+        chosen = set(self.engine.displays) & {m.id for m in monitors}
+        self.display_vars: dict[str, tk.BooleanVar] = {}
+        head = ttk.Frame(box)
+        head.pack(fill="x", pady=(10, 2))
+        ttk.Label(head, text="Displays", style="Head.TLabel").pack(side="left")
+        ident = ttk.Button(head, text="Identify", command=self.identify_displays)
+        ident.pack(side="right")
+        Tooltip(ident, "Shows each display's name on that screen for a moment.")
+        chips = ttk.Frame(box)
+        chips.pack(fill="x")
+        for i, m in enumerate(monitors):
+            var = tk.BooleanVar(value=not chosen or m.id in chosen)
+            self.display_vars[m.id] = var
+            chip = ttk.Checkbutton(chips, text=m.short or m.label, variable=var,
+                                   style="Chip.TCheckbutton",
+                                   command=lambda d=m.id: self._on_display_chip(d))
+            chip.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 6), pady=2)
+            Tooltip(chip, m.label)
+        ttk.Label(box, text="CatVision only changes the ticked displays.",
+                  style="Muted.TLabel").pack(anchor="w")
+        self.display_note = ttk.Label(box, text="", style="Warn.TLabel", justify="left",
+                                      wraplength=wrap)
+        self.color_all_var = tk.BooleanVar(value=self.cfg.options.color_all_displays)
+        self.color_all_check = ttk.Checkbutton(
+            box, text="Use this color filter on all displays anyway",
+            variable=self.color_all_var, command=self._on_color_all)
+        if len(monitors) > 1:
+            box.grid(row=row, column=0, sticky="ew")
+
+    def _chosen_displays(self) -> list[str]:
+        ids = [d for d, v in self.display_vars.items() if v.get()]
+        return [] if len(ids) == len(self.display_vars) else ids
+
+    def _on_display_chip(self, display_id: str | None = None) -> None:
+        if not any(v.get() for v in self.display_vars.values()):
+            if display_id in self.display_vars:
+                self.display_vars[display_id].set(True)
+            self.set_status("At least one display has to stay ticked.", True)
+            return
+        self.cfg.options.displays = self._chosen_displays()
+        self.engine.set_displays(self.cfg.options.displays)
+        self._render_status()
+        self._schedule_save()
+
+    def _set_displays_from_tray(self, action: str) -> None:
+        target = action[len("display:"):]
+        if target == "all":
+            for v in self.display_vars.values():
+                v.set(True)
+            self._on_display_chip()
+        elif target in self.display_vars:
+            var = self.display_vars[target]
+            if not self.cfg.options.displays:  # was "all": pick just this one
+                for d, v in self.display_vars.items():
+                    v.set(d == target)
+            else:
+                var.set(not var.get())
+            self._on_display_chip(target)
+
+    def _on_color_all(self) -> None:
+        self.cfg.options.color_all_displays = self.color_all_var.get()
+        self.engine.color_all_displays = self.cfg.options.color_all_displays
+        self.engine.apply()
+        self._render_status()
+        self._schedule_save()
+
+    def _update_display_note(self) -> None:
+        """Explain what happens to color filters when only some displays are ticked."""
+        partial = bool(self.display_vars) and not self.engine.all_displays_selected()
+        _tint, matrix = curves.split_for_displays(
+            self._read_settings(), self.engine.custom_filters, self.engine.custom_tints)
+        if partial and not curves.is_identity_matrix(matrix):
+            self.display_note.configure(
+                text="This color filter mixes colors, which Windows can only do on every "
+                     "display at once. Brightness still only changes the ticked displays.")
+            self.display_note.pack(anchor="w", pady=(4, 0))
+            self.color_all_check.pack(anchor="w")
+        else:
+            self.display_note.pack_forget()
+            self.color_all_check.pack_forget()
+
+    def identify_displays(self) -> None:
+        """Show each display's name in big letters on that display."""
+        big = self.fonts.big.copy()
+        big.configure(size=self.fonts.base * 4)
+        for m in self.engine.monitors():
+            win = tk.Toplevel(self.root)
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.configure(bg=ACCENT)
+            tk.Label(win, text=m.short or m.label, bg=ACCENT, fg="#1a1200", font=big,
+                     padx=30, pady=16).pack()
+            win.update_idletasks()
+            w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+            if m.rect:
+                left, top, right, bottom = m.rect
+            else:
+                left, top = 0, 0
+                right, bottom = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            win.geometry(f"+{(left + right - w) // 2}+{(top + bottom - h) // 2}")
+            win.after(2200, win.destroy)
 
     def _build_tune(self, f: ttk.Frame) -> None:
         f.columnconfigure(0, weight=1)
@@ -256,7 +438,7 @@ class CatVisionApp:
                 ttk.Separator(sl).grid(row=row, column=0, columnspan=3, sticky="ew", pady=6)
                 row += 1
             self.sliders.append(SliderRow(sl, row, self.vars[key], label, *LIMITS[key], kind,
-                                          self.fonts, self._on_change))
+                                          self.fonts, self._on_change, tip=TIPS.get(key, "")))
             row += 1
 
         bottom = ttk.Frame(f)
@@ -307,21 +489,11 @@ class CatVisionApp:
             cb.state(["disabled"])
         row += 1
 
-        ttk.Label(f, text="Display").grid(row=row, column=0, sticky="w", pady=(12, 2))
-        self._monitor_ids = ["all"] + [m.id for m in self.engine.monitors()]
-        labels = ["All displays"] + [m.label for m in self.engine.monitors()]
-        self.monitor_combo = ttk.Combobox(f, values=labels, state="readonly", font=self.fonts.normal)
-        choice = o.monitor if o.monitor in self._monitor_ids else "all"
-        self.monitor_combo.current(self._monitor_ids.index(choice))
-        self.monitor_combo.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(12, 2))
-        self.monitor_combo.bind("<<ComboboxSelected>>", self._on_monitor)
-        row += 1
-
-        ttk.Label(f, text="Text size").grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Label(f, text="Text size").grid(row=row, column=0, sticky="w", pady=(12, 2))
         self.size_combo = ttk.Combobox(f, values=list(TEXT_SIZES), state="readonly",
                                        font=self.fonts.normal)
         self.size_combo.set(o.text_size if o.text_size in TEXT_SIZES else "Large")
-        self.size_combo.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=2)
+        self.size_combo.grid(row=row, column=1, sticky="ew", padx=(8, 0), pady=(12, 2))
         self.size_combo.bind("<<ComboboxSelected>>", self._on_text_size)
         row += 1
 
@@ -329,6 +501,7 @@ class CatVisionApp:
         btns.grid(row=row, column=0, columnspan=2, sticky="w", pady=(14, 0))
         ttk.Button(btns, text="Reset display now", command=self._reset_display).pack(side="left")
         ttk.Button(btns, text="Open settings folder", command=self._open_folder).pack(side="left", padx=6)
+        ttk.Button(btns, text="Quit CatVision", command=self.quit).pack(side="left")
         row += 1
 
         about = ttk.Label(f, text=(f"CatVision {__version__}\n"
@@ -541,6 +714,7 @@ class CatVisionApp:
     def custom_filters_changed(self) -> None:
         """Called by the Filters tab after any edit."""
         self.engine.custom_filters = filters.matrices(self.cfg.custom_filters)
+        self.engine.custom_tints = filters.tints(self.cfg.custom_filters)
         self.refresh_filter_choices()
         self._schedule_apply()
         self._schedule_save()
@@ -573,10 +747,18 @@ class CatVisionApp:
         self.toggle_btn.configure(
             text="ON  -  click to turn off" if on else "OFF  -  click to turn on",
             bg=ON if on else OFF, activebackground=ON if on else OFF, fg=FG)
+        self.pill.configure(text="ON" if on else "OFF", bg=ON if on else OFF)
         st = self.engine.status
         warn = on and (not st.gamma_ok or st.gamma_limited or (st.color_used and not st.color_ok)
-                       or bool(st.messages))
-        self.set_status(st.summary(), warn)
+                       or st.color_skipped or bool(st.messages))
+        text = st.summary()
+        if on and not self.engine.all_displays_selected():
+            names = ", ".join(m.short for m in self.engine.monitors()
+                              if m.id in self.engine.displays)
+            text = text.replace("On.", f"On for {names}.", 1)
+        self.set_status(text, warn)
+        self._update_display_note()
+        self._update_title()
         self._sync_tray()
 
     def set_status(self, text: str, warn: bool = False) -> None:
@@ -590,9 +772,22 @@ class CatVisionApp:
         self.delete_btn.configure(
             text="Restore default" if row is not None and row.builtin else "Delete")
         self.root.title(f"CatVision - {name}")
+        state = "on" if self.engine.enabled else "off"
+        self.header_sub.configure(text=f"{name}{' (changed)' if self._modified else ''}  \u00b7  {state}")
 
     def _sync_tray(self) -> None:
-        self.tray.update(self.engine.enabled, self.cfg.active_preset, self.preset_names())
+        choices = filters.all_filter_choices(self.cfg.custom_filters)
+        self.tray.update(TrayState(
+            enabled=self.engine.enabled,
+            preset=self.cfg.active_preset,
+            presets=self.preset_names(),
+            filter_key=self.filter_key,
+            filters=choices,
+            boost=int(round(self.vars["shadow_boost"].get())),
+            displays=[(m.id, m.short or m.label) for m in self.engine.monitors()],
+            chosen=[d for d in self.engine.displays
+                    if d in {m.id for m in self.engine.monitors()}],
+        ))
 
     # ================================================================ drawing
 
@@ -645,13 +840,6 @@ class CatVisionApp:
         if not winutil.set_autostart(want):
             self.autostart_var.set(not want)
             self.set_status("Couldn't change the Windows startup setting.", True)
-
-    def _on_monitor(self, _event=None) -> None:
-        choice = self._monitor_ids[self.monitor_combo.current()]
-        self.cfg.options.monitor = choice
-        self.engine.set_monitor_choice(choice)
-        self._render_status()
-        self._schedule_save()
 
     def _on_text_size(self, _event=None) -> None:
         self.cfg.options.text_size = self.size_combo.get()
@@ -721,10 +909,7 @@ class CatVisionApp:
                 self._set_enabled(True)
                 msg = name
         elif action in ("next", "prev"):
-            cur = self._preset_index(self.cfg.active_preset)
-            cur = -1 if cur is None else cur
-            idx = (cur + (1 if action == "next" else -1)) % len(self._rows)
-            self._activate_preset(idx)
+            self._step_preset(1 if action == "next" else -1)
             self._set_enabled(True)
             msg = self.cfg.active_preset
         elif action in ("boost_up", "boost_down"):
@@ -742,12 +927,31 @@ class CatVisionApp:
             if not self.engine.enabled:
                 self._set_enabled(True)
             msg = "Filter: " + self.filter_combo.get()
+        elif action.startswith("filter:"):
+            key = action[len("filter:"):]
+            if key in self._filter_keys:
+                self.set_filter(key)
+                if key != "none" and not self.engine.enabled:
+                    self._set_enabled(True)
+                msg = "Filter: " + self.filter_combo.get()
+        elif action.startswith("display:"):
+            self._set_displays_from_tray(action)
+        elif action == "identify":
+            self.identify_displays()
+        elif action == "reset_display":
+            self._reset_display()
+            msg = "Display reset to normal"
         elif action == "show_window":
             self.show_window()
         elif action == "quit":
             self.quit()
         if msg and self.cfg.options.hotkey_popup:
             self.toast.show(msg)
+
+    def _step_preset(self, step: int) -> None:
+        cur = self._preset_index(self.cfg.active_preset)
+        cur = -1 if cur is None else cur
+        self._activate_preset((cur + step) % len(self._rows))
 
     def show_window(self) -> None:
         self.root.deiconify()
