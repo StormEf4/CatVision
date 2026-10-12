@@ -149,8 +149,20 @@ def _test_pattern_check(root, app, report_path: str) -> dict:
     from .gui_testpattern import open_test_pattern
     out: dict = {}
     try:
+        from .winutil import window_work_area
+        area = window_work_area(root)
+        out["work_area"] = list(area)
+
+        def inside(win) -> bool:
+            x, y = win.winfo_rootx(), win.winfo_rooty()
+            return area[0] <= x < area[2] and area[1] <= y < area[3]
+        app.toast.show("CatVision test", ms=400)
+        root.update()
+        out["toast_on_app_monitor"] = inside(app.toast.win)
+        app.toast.hide()
         tp = open_test_pattern(app)
         root.update()
+        out["pattern_on_app_monitor"] = inside(tp.win)
         out["size"] = [tp.win.winfo_width(), tp.win.winfo_height()]
         out["items_drawn"] = len(tp.canvas.find_all())
         try:

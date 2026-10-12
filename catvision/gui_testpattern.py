@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from .theme import BG
+from .winutil import window_work_area
 
 HINT = ("Raise Shadow Boost and Exposure levels to your satisfaction. Above is a full dark "
         "range for small testing. Since everyone's monitor is different, my defaults may not "
@@ -51,10 +52,13 @@ class TestPattern:
         bottom.bind("<Configure>", lambda e: self.hint.configure(
             wraplength=max(120, e.width - btns.winfo_width() - 40)))
 
-        sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
+        # Centered on the monitor CatVision's window is on.
+        left, top, right, bottom = window_work_area(root)
+        sw, sh = right - left, bottom - top
         width = int(min(sw * 0.8, app.px_(1100)))
         height = int(min(sh * 0.8, width * 0.7))
-        w.geometry(f"{width}x{height}+{(sw - width) // 2}+{max(0, (sh - height) // 3)}")
+        w.geometry(f"{width}x{height}+{left + (sw - width) // 2}"
+                   f"+{top + max(0, (sh - height) // 3)}")
         self.canvas.bind("<Configure>", lambda e: self.draw())
         w.bind("<Escape>", lambda e: self.toggle_full() if self.full else self.close())
         w.bind("<F11>", lambda e: self.toggle_full())

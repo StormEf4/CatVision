@@ -118,6 +118,52 @@ def enable_dpi_awareness() -> None:
             pass
 
 
+def window_work_area(window) -> tuple[int, int, int, int]:
+    """(left, top, right, bottom) of the usable area (without the taskbar) of
+    the monitor a Tk window is on, so pop-ups open on the same monitor as the
+    app.  Uses the window's normal position, so it also works while the app
+    is minimized or hidden in the tray."""
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class WINDOWPLACEMENT(ctypes.Structure):
+                _fields_ = [("length", wintypes.UINT), ("flags", wintypes.UINT),
+                            ("showCmd", wintypes.UINT), ("ptMinPosition", wintypes.POINT),
+                            ("ptMaxPosition", wintypes.POINT),
+                            ("rcNormalPosition", wintypes.RECT)]
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+            u = ctypes.windll.user32
+            u.GetParent.restype = wintypes.HWND
+            u.MonitorFromPoint.restype = wintypes.HMONITOR
+            u.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
+            u.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(MONITORINFO)]
+            u.GetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWPLACEMENT)]
+            hwnd = u.GetParent(window.winfo_id()) or window.winfo_id()
+            wp = WINDOWPLACEMENT()
+            wp.length = ctypes.sizeof(wp)
+            if u.GetWindowPlacement(hwnd, ctypes.byref(wp)):
+                r = wp.rcNormalPosition
+                center = wintypes.POINT((r.left + r.right) // 2, (r.top + r.bottom) // 2)
+            else:
+                center = wintypes.POINT(window.winfo_rootx() + window.winfo_width() // 2,
+                                        window.winfo_rooty() + window.winfo_height() // 2)
+            mon = u.MonitorFromPoint(center, 2)  # MONITOR_DEFAULTTONEAREST
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(info)
+            if mon and u.GetMonitorInfoW(mon, ctypes.byref(info)):
+                w = info.rcWork
+                return w.left, w.top, w.right, w.bottom
+        except Exception:
+            pass
+    return 0, 0, window.winfo_screenwidth(), window.winfo_screenheight()
+
+
 def message_box(text: str, title: str = "CatVision") -> None:
     if IS_WINDOWS:
         import ctypes

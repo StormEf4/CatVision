@@ -135,8 +135,9 @@ class Toast:
         self.label.configure(text=text)
         self.win.update_idletasks()
         w = self.win.winfo_reqwidth()
-        x = (self.root.winfo_screenwidth() - w) // 2
-        self.win.geometry(f"+{x}+40")
+        # Top middle of the monitor CatVision's window is on.
+        left, top, right, _bottom = winutil.window_work_area(self.root)
+        self.win.geometry(f"+{left + (right - left - w) // 2}+{top + 40}")
         self._set_alpha(0.92)
         if self._hide_job:
             self.root.after_cancel(self._hide_job)
