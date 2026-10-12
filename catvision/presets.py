@@ -44,10 +44,16 @@ BUILTIN_PRESETS: list[Preset] = [
                  color_filter="night_vision"),
     ),
     Preset(
-        "Night Vision (Blue/Red)",
-        "Night vision in blue and red: blue shadows, purple mid-tones, red highlights.",
-        Settings(exposure=75, anti_glare=70, contrast=1.1, black_floor=0.015, white_cap=0.88,
-                 color_filter="night_vision_br"),
+        "Night Vision (Blue)",
+        "Night vision in cool blue. Bright lights are held back, like the green one.",
+        Settings(exposure=80, anti_glare=70, contrast=1.1, black_floor=0.015, white_cap=0.88,
+                 color_filter="night_vision_blue"),
+    ),
+    Preset(
+        "Night Vision (Red)",
+        "Night vision in red. Bright lights are held back, like the green one.",
+        Settings(exposure=80, anti_glare=70, contrast=1.1, black_floor=0.015, white_cap=0.88,
+                 color_filter="night_vision_red"),
     ),
     Preset(
         "Horror / Flashlight",

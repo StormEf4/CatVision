@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .curves import Settings
 from .filters import CustomFilter, clean_name
-from .hotkeys import default_hotkeys, normalize_combo
+from .hotkeys import default_hotkeys, normalize_combo, suggested_hotkeys
 
 
 def app_dir() -> Path:
@@ -39,6 +39,7 @@ class Options:
     color_everywhere: bool = False
     text_size: str = "Large"        # Normal / Large / Extra large
     seen_welcome: bool = False
+    unlock_requested_at: float = 0.0  # when the user unlocked full strength
 
     @classmethod
     def from_dict(cls, data) -> "Options":
@@ -56,6 +57,9 @@ class Options:
 
 
 DEFAULT_PRESET = "Dark Areas"
+
+# Built-in presets that were renamed or replaced: old name -> new name.
+LEGACY_PRESETS = {"Night Vision (Blue/Red)": "Night Vision (Blue)"}
 
 
 def _default_settings() -> Settings:
@@ -114,7 +118,26 @@ class Config:
                     continue
                 c.hotkeys[action] = (normalize_combo(combo) or "") if combo else ""
         c.options = Options.from_dict(data.get("options"))
+        # Versions 1.1-1.3 came with hotkeys already set.  If they were never
+        # changed, clear them: the user now chooses their own.
+        if c.hotkeys == suggested_hotkeys():
+            c.hotkeys = default_hotkeys()
+        _migrate_preset_names(c)
         return c
+
+
+def _migrate_preset_names(c: Config) -> None:
+    for old, new in LEGACY_PRESETS.items():
+        if c.active_preset == old:
+            c.active_preset = new
+        if old in c.custom_presets:
+            saved = c.custom_presets.pop(old)
+            c.custom_presets.setdefault(new, saved)
+        old_action, new_action = "preset:" + old, "preset:" + new
+        if old_action in c.hotkeys:
+            combo = c.hotkeys.pop(old_action)
+            if combo and not c.hotkeys.get(new_action):
+                c.hotkeys[new_action] = combo
 
 
 def load(path: Path | None = None) -> Config:

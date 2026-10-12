@@ -105,20 +105,23 @@ You can make the close button quit instead in Settings.
 
 ## Hotkeys (work while you're in a game)
 
-These are the defaults. Change any of them in the **Hotkeys** tab: double-click
-an action and press the new keys.
+CatVision starts with **no hotkeys**, so it never takes a key you use for
+something else. Set the ones you want in the **Hotkeys** tab: double-click an
+action and press the keys.
 
-| Keys | What it does |
+| Action | What it does |
 | --- | --- |
-| **Ctrl+Alt+V** | Turn CatVision on / off |
-| **Ctrl+Alt+1 … 9** | Jump to a preset (Gentle Boost … Warm Low-Light) |
-| **Ctrl+Alt+Page Down / Page Up** | Next / previous preset |
-| **Ctrl+Alt+=** / **Ctrl+Alt+-** | More / less boost (Shadow boost, or Exposure for night vision) |
-| **Ctrl+Alt+F** | Next color filter |
-| **Ctrl+Alt+C** | Show the CatVision window |
-| **Ctrl+Alt+0** | Panic button: everything back to normal |
+| Turn CatVision on / off | On or off with the current preset |
+| **Preset: (any preset)** | Toggles that preset: turns it on, press again to turn it off |
+| Next / previous preset | Flip through presets |
+| More / less boost | Shadow boost, or Exposure for night vision |
+| Next color filter | Cycle color filters |
+| Show the CatVision window | Brings the window up |
+| Panic: everything off | Everything back to normal |
 
-You can also give hotkeys to any preset, and use the tray menu for the rest.
+Want a ready-made set? **Use suggested keys** fills in Ctrl+Alt+V for on/off,
+Ctrl+Alt+1-9 for nine presets, Ctrl+Alt+0 for panic and a few more. **Clear
+all** removes them again. Everything is also in the tray menu.
 
 <img src="docs/hotkeys.png" width="300" align="right" alt="Hotkeys tab">
 
@@ -140,7 +143,8 @@ You can also give hotkeys to any preset, and use the tray menu for the rest.
 | Dark Areas | Everyday choice: dark rooms, caves, night |
 | Pitch Black | Nearly black areas (looks washed out, but you'll see) |
 | Night Vision | Like night-vision goggles: deep green shadows, pale highlights, no blinding bloom. Best for very dark games |
-| Night Vision (Blue/Red) | Night vision in blue and red: blue shadows, purple mid-tones, red highlights |
+| Night Vision (Blue) | Night vision in cool blue, with the same anti-glare protection |
+| Night Vision (Red) | Night vision in red, with the same anti-glare protection |
 | Horror / Flashlight | Lifts darkness, stops flashlights and lamps from dazzling |
 | Fog & Haze Cutter | Murky, foggy, smoky scenes |
 | Mixed Light | Dark shadows next to bright skies or explosions |
@@ -202,11 +206,12 @@ about 5x the game on its own.
 
 ![Night vision before and after](docs/night_vision_before_after.png)
 
-- Raise or lower **Exposure** (or press **Ctrl+Alt+= / -**) for darker or
+- Raise or lower **Exposure** (or use your *More / less boost* hotkeys) for darker or
   brighter games. In **Tune**, raise **Anti-glare** if bright areas still
   hide things, or lower it to see more in the darkest corners.
 - Green shows the most detail, because our eyes see fine detail best in
-  green. Blue/Red is more of a style choice.
+  green. Blue and Red are tuned to stay as readable as possible (pure blue or
+  red would be too dark), and still show about 4x the game's own dark detail.
 - With only some displays ticked, night vision stays on those displays, but
   as a colored tint rather than full monochrome (Windows limit).
 
@@ -227,22 +232,28 @@ click **Copy...** to start from it). There are two kinds:
 Your filter is used straight away so you can see changes live (turn
 CatVision on first), and the preview shows colors before and after. Your
 filters appear in the **Color filter** list on the Home tab, can be saved
-into any preset, and can be cycled with **Ctrl+Alt+F**.
+into any preset, and can be cycled with the *Next color filter* hotkey.
 
 <br clear="right">
 
-## Get the full strength (recommended)
+## Get the full strength
 
-By default Windows only lets programs change brightness a limited amount.
-CatVision works within that limit, and the status bar says *"Windows limited
-the strength"* when it applies. To lift the limit:
+By default Windows only lets apps change brightness a limited amount, which
+weakens strong looks like night vision. When that happens, CatVision shows a
+yellow bar: *"Windows is holding back the strength of this look"* with an
+**Unlock full strength...** button.
 
-1. Download [`windows/enable_full_strength.reg`](windows/enable_full_strength.reg),
-   double-click it and click *Yes*.
-2. Sign out and back in (or restart).
+1. Click **Unlock full strength...** and confirm. Windows asks for permission.
+2. Restart your PC.
 
-This sets one documented registry value (`GdiIcmGammaRange`), the same one
-display-calibration software uses. `windows/undo_full_strength.reg` undoes it.
+This changes one documented Windows setting (`GdiIcmGammaRange`), the same
+one display-calibration software uses. **Settings → Full strength** shows
+whether it's unlocked and has an **Undo** button. If the bar still appears
+after the restart, your graphics driver has its own limit, and CatVision is
+already as strong as your PC allows.
+
+(Running from source instead? `windows/enable_full_strength.reg` and
+`windows/undo_full_strength.reg` do the same thing.)
 
 ## Tips and troubleshooting
 
@@ -259,7 +270,7 @@ display-calibration software uses. `windows/undo_full_strength.reg` undoes it.
 - **Screen stuck bright or dark?** Quitting CatVision always restores it. If
   it crashed, just start it again; it notices and cleans up. You can also use
   **Reset display now** in Settings, **Reset display to normal** or
-  **Force quit** in the tray menu, the panic hotkey **Ctrl+Alt+0**, or run
+  **Force quit** in the tray menu, your *Panic* hotkey if you set one, or run
   `CatVision.exe --reset`.
 - **Text too small?** Settings → Text size → *Extra large*.
 - **Opened CatVision twice?** The second copy just brings up the first one's

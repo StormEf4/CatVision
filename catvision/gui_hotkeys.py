@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from .hotkeys import (ACTION_LABELS, MODIFIER_NAMES, TK_MODIFIER_KEYSYMS, action_label,
-                      combo_problem, default_hotkeys, key_name_from_tk)
+                      combo_problem, key_name_from_tk, suggested_hotkeys)
 from .theme import ACCENT, BG, FG, MUTED, WARN
 
 
@@ -18,8 +18,10 @@ class HotkeysTab:
         f.columnconfigure(0, weight=1)
         f.rowconfigure(1, weight=1)
 
-        hint = ttk.Label(f, text="Double-click an action (or select it and click Change) and "
-                                 "press the new keys.", style="Muted.TLabel", justify="left",
+        hint = ttk.Label(f, text="No hotkeys are set until you choose them. Double-click an "
+                                 "action (or select it and click Change) and press the keys "
+                                 "you want. Preset hotkeys turn that preset on and off.",
+                         style="Muted.TLabel", justify="left",
                          wraplength=app.px_(380))
         hint.grid(row=0, column=0, sticky="w", pady=(0, 6))
         f.bind("<Configure>", lambda e: hint.configure(wraplength=max(100, e.width - 24)))
@@ -46,8 +48,10 @@ class HotkeysTab:
             row=0, column=1, sticky="ew", padx=(3, 0))
         ttk.Button(btns, text="Add preset hotkey...", command=self._add_preset).grid(
             row=1, column=0, sticky="ew", padx=(0, 3), pady=(6, 0))
-        ttk.Button(btns, text="Reset to defaults", command=self._defaults).grid(
+        ttk.Button(btns, text="Use suggested keys", command=self._suggested).grid(
             row=1, column=1, sticky="ew", padx=(3, 0), pady=(6, 0))
+        ttk.Button(btns, text="Clear all", command=self._clear_all).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
     def _actions_in_order(self) -> list[str]:
         actions = list(ACTION_LABELS)
@@ -67,7 +71,7 @@ class HotkeysTab:
             combo = self.cfg.hotkeys.get(action, "")
             label = action_label(action)
             tags = ()
-            keys = combo or "-"
+            keys = combo or "not set"
             if action.startswith("preset:") and action[7:] not in presets:
                 label += "  (preset missing)"
                 tags = ("warn",)
@@ -125,9 +129,16 @@ class HotkeysTab:
             self.tree.see(action)
             self._change(action)
 
-    def _defaults(self) -> None:
-        if messagebox.askyesno("CatVision", "Put every hotkey back to the original keys?"):
-            self.cfg.hotkeys = default_hotkeys()
+    def _suggested(self) -> None:
+        if messagebox.askyesno(
+                "CatVision", "Use the suggested keys (Ctrl+Alt+V on/off, Ctrl+Alt+1-9 for "
+                             "presets, and so on)? This replaces the hotkeys you have now."):
+            self.cfg.hotkeys = suggested_hotkeys()
+            self._commit()
+
+    def _clear_all(self) -> None:
+        if messagebox.askyesno("CatVision", "Remove every hotkey?"):
+            self.cfg.hotkeys = {}
             self._commit()
 
     def _commit(self, select: str | None = None) -> None:

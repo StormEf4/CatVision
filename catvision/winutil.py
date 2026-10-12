@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -123,3 +124,59 @@ def message_box(text: str, title: str = "CatVision") -> None:
         ctypes.windll.user32.MessageBoxW(None, text, title, 0x40)
     elif sys.stderr:
         print(text, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Full strength: Windows' gamma-range limit
+# ---------------------------------------------------------------------------
+# By default Windows refuses brightness tables that stray far from a straight
+# line, which weakens strong looks such as night vision.  One documented
+# setting lifts that limit (display-calibration tools use the same one).  It
+# lives under HKEY_LOCAL_MACHINE, so changing it needs administrator approval,
+# and Windows only reads it at sign-in.
+
+_ICM_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM"
+_ICM_VALUE = "GdiIcmGammaRange"
+FULL_RANGE = 256
+
+
+def full_strength_unlocked() -> bool | None:
+    """True if the limit is lifted, False if not, None if unknown/not Windows."""
+    if not IS_WINDOWS:
+        return None
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _ICM_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, _ICM_VALUE)
+            return int(value) >= FULL_RANGE
+    except (OSError, ValueError):
+        return False
+
+
+def request_full_strength(enable: bool = True) -> bool:
+    """Ask Windows (with its normal admin prompt) to lift or restore the limit.
+
+    Returns False if the user declined the prompt or it couldn't start.
+    The change is made by Windows' own ``reg.exe``; nothing else runs elevated.
+    """
+    if not IS_WINDOWS:
+        return False
+    import ctypes
+    key = "HKLM\\" + _ICM_KEY
+    if enable:
+        params = f'add "{key}" /v {_ICM_VALUE} /t REG_DWORD /d {FULL_RANGE} /f'
+    else:
+        params = f'delete "{key}" /v {_ICM_VALUE} /f'
+    shell32 = ctypes.windll.shell32
+    shell32.ShellExecuteW.restype = ctypes.c_void_p
+    result = shell32.ShellExecuteW(None, "runas", "reg.exe", params, None, 0)
+    return (result or 0) > 32
+
+
+def boot_time() -> float:
+    """When Windows last started (seconds since the epoch)."""
+    if IS_WINDOWS:
+        import ctypes
+        ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+        return time.time() - ctypes.windll.kernel32.GetTickCount64() / 1000.0
+    return 0.0

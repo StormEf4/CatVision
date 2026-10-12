@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import queue
 import sys
+import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
@@ -215,6 +216,7 @@ class CatVisionApp:
         self.status = tk.Label(root, text="", anchor="w", justify="left", bg=PANEL, fg=FG,
                                padx=10, pady=5, font=self.fonts.small, wraplength=self.px_(380))
         self.status.pack(fill="x", side="bottom")
+        self._build_strength_banner(root)
         self.status.bind("<Configure>",
                          lambda e: self.status.configure(wraplength=max(100, e.width - 20)))
 
@@ -366,6 +368,96 @@ class CatVisionApp:
             variable=self.color_all_var, command=self._on_color_all)
         if len(monitors) > 1:
             box.grid(row=row, column=0, sticky="ew")
+
+    # ------------------------------------------------------- full strength
+
+    def _build_strength_banner(self, root: tk.Tk) -> None:
+        """Shown when Windows is weakening the current look, with the fix."""
+        self.strength_banner = tk.Frame(root, bg="#3a2f12", padx=10, pady=6)
+        self.strength_text = tk.Label(self.strength_banner, text="", bg="#3a2f12", fg=WARN,
+                                      justify="left", anchor="w", font=self.fonts.small,
+                                      wraplength=self.px_(300))
+        self.strength_text.pack(side="left", fill="x", expand=True)
+        self.strength_btn = ttk.Button(self.strength_banner, text="Unlock full strength...",
+                                       style="Accent.TButton",
+                                       command=self._unlock_full_strength)
+
+    def _strength_state(self) -> str:
+        """'locked', 'restart', 'unlocked' or 'unknown' (not Windows)."""
+        unlocked = winutil.full_strength_unlocked()
+        if unlocked is None:
+            return "unknown"
+        if not unlocked:
+            return "locked"
+        if self.cfg.options.unlock_requested_at > winutil.boot_time():
+            return "restart"
+        return "unlocked"
+
+    def _update_strength_ui(self) -> None:
+        state = self._strength_state()
+        settings_text = {
+            "locked": "Windows limits how strongly CatVision can change brightness, which "
+                      "weakens strong looks like night vision. Unlocking changes one Windows "
+                      "setting (Windows will ask for permission) and needs a restart.",
+            "restart": "Unlocked. Restart your PC to finish.",
+            "unlocked": "Unlocked. CatVision can use its full strength.",
+            "unknown": "Only available on Windows.",
+        }[state]
+        self.strength_label.configure(text=settings_text)
+        self.unlock_btn.state(["!disabled"] if state == "locked" else ["disabled"])
+        self.relock_btn.state(["!disabled"] if state in ("restart", "unlocked") else ["disabled"])
+
+        st = self.engine.status
+        if not (self.engine.enabled and st.gamma_limited) or state == "unknown":
+            self.strength_banner.pack_forget()
+            return
+        if state == "locked":
+            text = "Windows is holding back the strength of this look."
+            self.strength_btn.pack(side="right", padx=(8, 0))
+        elif state == "restart":
+            text = "Almost there: restart your PC to unlock full strength."
+            self.strength_btn.pack_forget()
+        else:
+            text = ("Your graphics driver limits brightness changes, so this is as strong "
+                    "as your PC allows.")
+            self.strength_btn.pack_forget()
+        self.strength_text.configure(text=text)
+        self.strength_banner.pack(fill="x", side="bottom", after=self.status)
+
+    def _unlock_full_strength(self) -> None:
+        if not messagebox.askyesno(
+                "Unlock full strength",
+                "Windows limits how much apps can change screen brightness. CatVision will "
+                "ask Windows to lift that limit by changing one setting (GdiIcmGammaRange, "
+                "the same one display-calibration tools use).\n\n"
+                "Windows will ask for permission. You'll need to restart your PC afterwards."
+                "\n\nYou can undo this any time in Settings. Continue?"):
+            return
+        if not winutil.request_full_strength(True):
+            self.set_status("Windows didn't allow the change, so nothing was changed.", True)
+            return
+        self.cfg.options.unlock_requested_at = time.time()
+        self._schedule_save()
+        self.root.after(1500, self._after_strength_change)
+
+    def _undo_full_strength(self) -> None:
+        if not messagebox.askyesno("Undo full strength",
+                                   "Put Windows' brightness limit back to normal? "
+                                   "Windows will ask for permission, then restart your PC."):
+            return
+        if winutil.request_full_strength(False):
+            self.cfg.options.unlock_requested_at = 0.0
+            self._schedule_save()
+            self.root.after(1500, self._after_strength_change)
+
+    def _after_strength_change(self) -> None:
+        self._update_strength_ui()
+        state = self._strength_state()
+        if state == "restart":
+            messagebox.showinfo("CatVision", "Done. Restart your PC to finish unlocking "
+                                             "full strength.")
+        elif state == "locked":
+            self.set_status("Windows' brightness limit is back to normal after a restart.")
 
     def _chosen_displays(self) -> list[str]:
         ids = [d for d, v in self.display_vars.items() if v.get()]
@@ -532,6 +624,21 @@ class CatVisionApp:
         ttk.Button(btns, text="Reset display now", command=self._reset_display).pack(side="left")
         ttk.Button(btns, text="Open settings folder", command=self._open_folder).pack(side="left", padx=6)
         ttk.Button(btns, text="Quit CatVision", command=self.quit).pack(side="left")
+        row += 1
+
+        strength = ttk.Frame(f)
+        strength.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        ttk.Label(strength, text="Full strength", style="Head.TLabel").pack(anchor="w")
+        self.strength_label = ttk.Label(strength, text="", style="Muted.TLabel", justify="left",
+                                        wraplength=self.px_(380))
+        self.strength_label.pack(anchor="w")
+        sbtns = ttk.Frame(strength)
+        sbtns.pack(anchor="w", pady=(4, 0))
+        self.unlock_btn = ttk.Button(sbtns, text="Unlock full strength...",
+                                     command=self._unlock_full_strength)
+        self.unlock_btn.pack(side="left")
+        self.relock_btn = ttk.Button(sbtns, text="Undo", command=self._undo_full_strength)
+        self.relock_btn.pack(side="left", padx=6)
         row += 1
 
         about = ttk.Label(f, text=(f"{APP_TITLE}  -  version {__version__}\n"
@@ -786,7 +893,13 @@ class CatVisionApp:
             names = ", ".join(m.short for m in self.engine.monitors()
                               if m.id in self.engine.displays)
             text = text.replace("On.", f"On for {names}.", 1)
+        if (on and st.gamma_limited and st.gamma_ok and not st.messages
+                and self._strength_state() != "unknown"):
+            # The banner above explains it (with the fix), so keep this short.
+            text = text.replace("On, but Windows is holding back the strength of this look.", "On.")
+            warn = st.color_skipped or (st.color_used and not st.color_ok)
         self.set_status(text, warn)
+        self._update_strength_ui()
         self._update_display_note()
         self._update_title()
         self._sync_tray()
@@ -908,7 +1021,8 @@ class CatVisionApp:
         if hk.get("off"):
             parts.append(f"{hk['off']}: panic off")
         hint = "   ".join(parts)
-        self.home_hint.configure(text=hint + ("\nChange keys in the Hotkeys tab." if hint else ""))
+        self.home_hint.configure(text=hint + "\nChange keys in the Hotkeys tab." if hint else
+                                 "No hotkeys set yet. Choose your own in the Hotkeys tab.")
         if self.hotkeys.failed:
             self.set_status("Some hotkeys are taken by another program: "
                             + ", ".join(action_label(a) for a in self.hotkeys.failed), True)
@@ -935,10 +1049,15 @@ class CatVisionApp:
             self._set_enabled(False)
             msg = "CatVision OFF"
         elif action.startswith("preset:"):
+            # Preset hotkeys toggle: the running preset turns off, any other
+            # preset is switched to and turned on.
             name = action[len("preset:"):]
-            if self.activate_preset_by_name(name):
+            if self.engine.enabled and self.cfg.active_preset == name:
+                self._set_enabled(False)
+                msg = f"{name}  OFF"
+            elif self.activate_preset_by_name(name):
                 self._set_enabled(True)
-                msg = name
+                msg = f"{name}  ON"
         elif action in ("next", "prev"):
             self._step_preset(1 if action == "next" else -1)
             self._set_enabled(True)

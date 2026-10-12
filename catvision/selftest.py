@@ -111,7 +111,14 @@ def run(report_path: str) -> int:
     check("gamma", gamma_roundtrip)
     check("color_filter", color_filter)
     check("hotkeys", hotkeys)
+    def full_strength():
+        from . import winutil
+        # Read-only: never asks for elevation during the self-test.
+        return {"unlocked": winutil.full_strength_unlocked(),
+                "boot_time_ok": winutil.boot_time() > 0 if winutil.IS_WINDOWS else None}
+
     check("tray", tray)
+    check("full_strength", full_strength)
     check("displays", displays)
     check("window", window)
 

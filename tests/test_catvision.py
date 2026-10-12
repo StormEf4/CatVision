@@ -393,7 +393,8 @@ class HotkeyParsingTests(unittest.TestCase):
 
     def test_defaults_are_valid_and_unique(self):
         from catvision import hotkeys as hk
-        d = hk.default_hotkeys()
+        self.assertEqual(hk.default_hotkeys(), {})          # the user sets their own
+        d = hk.suggested_hotkeys()
         self.assertEqual(len(set(d.values())), len(d))
         for combo in d.values():
             self.assertIsNone(hk.combo_problem(combo), combo)
@@ -473,10 +474,9 @@ class PresetOverrideTests(unittest.TestCase):
 
 
 class ConfigV2Tests(unittest.TestCase):
-    def test_v1_file_gets_default_hotkeys(self):
-        from catvision.hotkeys import default_hotkeys
+    def test_v1_file_gets_no_hotkeys(self):
         c = config.Config.from_json({"version": 1, "current": {"shadow_boost": 40}})
-        self.assertEqual(c.hotkeys, default_hotkeys())
+        self.assertEqual(c.hotkeys, {})
         self.assertEqual(c.custom_filters, {})
 
     def test_round_trip_filters_and_hotkeys(self):
@@ -560,14 +560,18 @@ class NightVisionTests(unittest.TestCase):
         self.assertLess(r[8], g[8] / 2)                    # deep green shadows
         self.assertGreater(r[250] / g[250], 0.5)           # paler phosphor highlights
 
-    def test_blue_red_goes_blue_to_red(self):
-        s = [p for p in BUILTIN_PRESETS if p.name == "Night Vision (Blue/Red)"][0].settings
-        tint, _m = curves.plan_color(s)
-        r, g, b = curves.build_ramp(s, tint)
-        self.assertGreater(b[8], 2 * r[8])                 # dark = blue
-        self.assertGreater(r[250], b[250])                 # bright = red
-        for ch in (r, g, b):
-            self.assertTrue(all(x <= y for x, y in zip(ch, ch[1:])), "ramps must not decrease")
+    def test_blue_and_red_night_vision(self):
+        def ramp_for(name):
+            st = [p for p in BUILTIN_PRESETS if p.name == name][0].settings
+            tint, _m = curves.plan_color(st)
+            return curves.build_ramp(st, tint)
+        r, g, b = ramp_for("Night Vision (Blue)")
+        self.assertGreater(b[8], r[8] * 2)                 # blue shadows
+        self.assertGreater(b[180], r[180])                 # still blue in brights
+        r, g, b = ramp_for("Night Vision (Red)")
+        self.assertGreater(r[8], g[8] * 2)                 # red shadows
+        self.assertGreater(r[8], b[8] * 2)
+        self.assertGreater(r[180], b[180])
 
     def test_every_preset_ramp_is_valid_with_its_tint(self):
         for p in BUILTIN_PRESETS:
@@ -595,7 +599,7 @@ class AntiGlareTests(unittest.TestCase):
     def test_bright_things_stay_apart_in_night_vision(self):
         """A mid-tone player (level 70) in front of a lit window (level 180)
         must not merge into it, and the brightest output must stay capped."""
-        for name in ("Night Vision", "Night Vision (Blue/Red)"):
+        for name in ("Night Vision", "Night Vision (Blue)", "Night Vision (Red)"):
             s = [p for p in BUILTIN_PRESETS if p.name == name][0].settings
             tint, _m = curves.plan_color(s)
             ramp = curves.build_ramp(s, tint)
@@ -605,3 +609,32 @@ class AntiGlareTests(unittest.TestCase):
             self.assertLessEqual(max(max(ch) for ch in ramp), 0.89 * 65535, name)
             # dark game detail still strongly lifted
             self.assertGreater(luma[16], 0.25 * 65535, name)
+
+
+class LegacyBlueRedTests(unittest.TestCase):
+    def test_old_blue_red_settings_and_names_migrate(self):
+        c = config.Config.from_json({
+            "current": {"color_filter": "night_vision_br", "exposure": 75},
+            "active_preset": "Night Vision (Blue/Red)",
+            "custom_presets": {"Night Vision (Blue/Red)": {"color_filter": "night_vision_br"}},
+            "hotkeys": {"preset:Night Vision (Blue/Red)": "Ctrl+Alt+B"},
+        })
+        self.assertEqual(c.current.color_filter, "night_vision_blue")
+        self.assertEqual(c.active_preset, "Night Vision (Blue)")
+        self.assertEqual(c.custom_presets["Night Vision (Blue)"].color_filter, "night_vision_blue")
+        self.assertNotIn("Night Vision (Blue/Red)", c.custom_presets)
+        self.assertEqual(c.hotkeys.get("preset:Night Vision (Blue)"), "Ctrl+Alt+B")
+        self.assertNotIn("preset:Night Vision (Blue/Red)", c.hotkeys)
+
+
+class NoDefaultHotkeysTests(unittest.TestCase):
+    def test_fresh_config_has_no_hotkeys(self):
+        self.assertEqual(config.Config().hotkeys, {})
+        from catvision.hotkeys import bindings_from_config
+        self.assertEqual(bindings_from_config(config.Config().hotkeys), [])
+
+    def test_untouched_old_defaults_are_cleared_but_custom_keys_kept(self):
+        from catvision.hotkeys import suggested_hotkeys
+        self.assertEqual(config.Config.from_json({"hotkeys": suggested_hotkeys()}).hotkeys, {})
+        custom = dict(suggested_hotkeys(), toggle="Ctrl+Alt+K")
+        self.assertEqual(config.Config.from_json({"hotkeys": custom}).hotkeys["toggle"], "Ctrl+Alt+K")

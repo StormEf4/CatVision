@@ -45,13 +45,17 @@ COLOR_FILTERS: dict[str, str] = {
     "none": "None",
     "grayscale": "Grayscale (high contrast mono)",
     "night_vision": "Night vision (green)",
-    "night_vision_br": "Night vision (blue / red)",
+    "night_vision_blue": "Night vision (blue)",
+    "night_vision_red": "Night vision (red)",
     "amber": "Amber (warm mono, easy on eyes)",
     "ice": "Ice (cool mono)",
     "deuteranopia": "Red-green assist (deuteranopia)",
     "protanopia": "Red-green assist (protanopia)",
     "tritanopia": "Blue-yellow assist (tritanopia)",
 }
+
+# Filters that were renamed or replaced, so old saved settings still load.
+LEGACY_FILTERS = {"night_vision_br": "night_vision_blue"}
 
 # Custom (user-made) filters are referenced as "custom:<name>".
 CUSTOM_PREFIX = "custom:"
@@ -90,6 +94,7 @@ class Settings:
                 continue
             value = data[f.name]
             if f.name == "color_filter":
+                value = LEGACY_FILTERS.get(value, value) if isinstance(value, str) else value
                 if isinstance(value, str) and is_valid_filter_key(value):
                     s.color_filter = value
                 continue
@@ -300,11 +305,12 @@ _BLUE_YELLOW_SHIFT: Matrix = [[1.0, 0.0, 0.7], [0.0, 1.0, 0.7], [0.0, 0.0, 0.0]]
 TINT_CURVES: dict[str, TintCurve] = {
     # Image-intensifier green: deep green shadows, pale phosphor highlights.
     "night_vision": ((0.25, 1.0, 0.30), (0.78, 1.0, 0.72), 2.0),
-    # Blue shadows -> purple -> red/pink highlights.  (Each channel can only
-    # rise with brightness, so the brightest parts keep a little blue.)  Green
-    # rises late so highlights still get brighter: red and blue alone look
-    # dark, which would let a player in front of a lamp blend into it.
-    "night_vision_br": ((0.05, 0.55, 2.20), (1.45, 0.75, 0.20), 2.0),
+    # Blue and red look much darker to the eye than green, so pure blue or
+    # red would hide detail.  Blue gets some green (a cyan-blue), red gets a
+    # little green/blue in the shadows, and both lift toward a paler tone in
+    # the highlights so a player in front of a lamp never blends into it.
+    "night_vision_blue": ((0.10, 0.45, 1.00), (0.60, 0.85, 1.00), 2.0),
+    "night_vision_red": ((1.45, 0.22, 0.10), (1.00, 0.70, 0.55), 2.5),
     "amber": ((1.0, 0.72, 0.25), (1.0, 0.72, 0.25), 1.0),
     "ice": ((0.55, 0.85, 1.0), (0.55, 0.85, 1.0), 1.0),
 }
@@ -314,7 +320,8 @@ TINT_CURVES: dict[str, TintCurve] = {
 MONO_TINTS: dict[str, tuple[float, float, float]] = {
     "grayscale": (1.0, 1.0, 1.0),
     "night_vision": (0.30, 1.0, 0.35),
-    "night_vision_br": (0.70, 0.45, 1.00),
+    "night_vision_blue": (0.25, 0.60, 1.00),
+    "night_vision_red": (1.00, 0.35, 0.25),
     "amber": (1.0, 0.72, 0.25),
     "ice": (0.55, 0.85, 1.0),
 }

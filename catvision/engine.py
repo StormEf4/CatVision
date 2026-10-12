@@ -34,7 +34,7 @@ class Status:
         if not self.gamma_ok:
             parts.append("Windows refused the brightness change.")
         elif self.gamma_limited:
-            parts.append("On (Windows limited the strength - see README for the fix).")
+            parts.append("On, but Windows is holding back the strength of this look.")
         else:
             parts.append("On.")
         if self.color_used and not self.color_ok:

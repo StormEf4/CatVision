@@ -147,21 +147,30 @@ ACTION_LABELS: dict[str, str] = {
     "off": "Panic: everything off",
     "next": "Next preset",
     "prev": "Previous preset",
-    "boost_up": "More boost (shadow boost / exposure)",
-    "boost_down": "Less boost (shadow boost / exposure)",
+    "boost_up": "More boost (+10)",
+    "boost_down": "Less boost (-10)",
     "filter_next": "Next color filter",
     "show_window": "Show the CatVision window",
 }
 
 REPEATING_ACTIONS = {"boost_up", "boost_down"}
 
-DEFAULT_PRESET_HOTKEYS = [
+SUGGESTED_PRESET_HOTKEYS = [
     "Gentle Boost", "Dark Areas", "Pitch Black", "Night Vision", "Horror / Flashlight",
     "Fog & Haze Cutter", "Mixed Light", "High-Contrast Mono", "Warm Low-Light",
 ]
 
 
 def default_hotkeys() -> dict[str, str]:
+    """CatVision starts with no hotkeys: the user picks every one."""
+    return {}
+
+
+def suggested_hotkeys() -> dict[str, str]:
+    """A ready-made set the user can apply with one click (Hotkeys tab).
+
+    Versions 1.1-1.3 used exactly this set as their defaults.
+    """
     keys = {
         "toggle": "Ctrl+Alt+V",
         "off": "Ctrl+Alt+0",
@@ -172,14 +181,14 @@ def default_hotkeys() -> dict[str, str]:
         "filter_next": "Ctrl+Alt+F",
         "show_window": "Ctrl+Alt+C",
     }
-    for n, name in enumerate(DEFAULT_PRESET_HOTKEYS, start=1):
+    for n, name in enumerate(SUGGESTED_PRESET_HOTKEYS, start=1):
         keys[f"preset:{name}"] = f"Ctrl+Alt+{n}"
     return keys
 
 
 def action_label(action: str) -> str:
     if action.startswith("preset:"):
-        return "Preset: " + action[len("preset:"):]
+        return "Preset: " + action[len("preset:"):] + "  (on / off)"
     return ACTION_LABELS.get(action, action)
 
 
