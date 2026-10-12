@@ -38,14 +38,15 @@ BUILTIN_PRESETS: list[Preset] = [
     Preset(
         "Night Vision",
         "Like night-vision goggles: amplifies dim light evenly, deep green shadows "
-        "and pale highlights. Best for seeing detail in very dark games.",
-        Settings(exposure=70, contrast=1.1, black_floor=0.015, white_cap=0.97,
+        "and pale highlights. Bright lights are held back so they never blind you "
+        "or hide someone standing in front of them.",
+        Settings(exposure=70, anti_glare=70, contrast=1.1, black_floor=0.015, white_cap=0.88,
                  color_filter="night_vision"),
     ),
     Preset(
         "Night Vision (Blue/Red)",
         "Night vision in blue and red: blue shadows, purple mid-tones, red highlights.",
-        Settings(exposure=75, contrast=1.1, black_floor=0.015, white_cap=0.97,
+        Settings(exposure=75, anti_glare=70, contrast=1.1, black_floor=0.015, white_cap=0.88,
                  color_filter="night_vision_br"),
     ),
     Preset(

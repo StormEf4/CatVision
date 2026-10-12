@@ -576,3 +576,32 @@ class NightVisionTests(unittest.TestCase):
                 for ch in curves.build_ramp(p.settings, tint):
                     self.assertTrue(all(0 <= v <= 65535 for v in ch), p.name)
                     self.assertTrue(all(x <= y for x, y in zip(ch, ch[1:])), p.name)
+
+
+class AntiGlareTests(unittest.TestCase):
+    def test_off_matches_plain_exposure(self):
+        for x in (0.0, 0.03, 0.1, 0.4, 1.0):
+            self.assertAlmostEqual(curves.exposure_curve(x, 70, 0), curves.exposure_curve(x, 70))
+
+    def test_curve_is_continuous_and_rising(self):
+        prev = curves.exposure_curve(0.0, 70, 70)
+        for i in range(1, 1001):
+            y = curves.exposure_curve(i / 1000, 70, 70)
+            self.assertGreaterEqual(y, prev)
+            self.assertLess(y - prev, 0.03, "no jumps at the knee")
+            prev = y
+        self.assertAlmostEqual(curves.exposure_curve(1.0, 70, 70), 1.0)
+
+    def test_bright_things_stay_apart_in_night_vision(self):
+        """A mid-tone player (level 70) in front of a lit window (level 180)
+        must not merge into it, and the brightest output must stay capped."""
+        for name in ("Night Vision", "Night Vision (Blue/Red)"):
+            s = [p for p in BUILTIN_PRESETS if p.name == name][0].settings
+            tint, _m = curves.plan_color(s)
+            ramp = curves.build_ramp(s, tint)
+            luma = [0.2126 * r + 0.7152 * g + 0.0722 * b for r, g, b in zip(*ramp)]
+            self.assertGreater(luma[180] - luma[70], 0.12 * 65535, name)
+            self.assertGreater(luma[250] - luma[180], 0.015 * 65535, name)
+            self.assertLessEqual(max(max(ch) for ch in ramp), 0.89 * 65535, name)
+            # dark game detail still strongly lifted
+            self.assertGreater(luma[16], 0.25 * 65535, name)

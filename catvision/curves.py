@@ -27,6 +27,7 @@ RAMP_MAX = 65535
 LIMITS: dict[str, tuple[float, float]] = {
     "shadow_boost": (0.0, 100.0),
     "exposure": (0.0, 100.0),
+    "anti_glare": (0.0, 100.0),
     "gamma": (0.5, 3.0),
     "black_floor": (0.0, 0.30),
     "brightness": (0.5, 2.0),
@@ -65,6 +66,7 @@ class Settings:
 
     shadow_boost: float = 0.0      # 0..100, lifts dark tones, keeps highlights
     exposure: float = 0.0          # 0..100, strong even gain for very dark games
+    anti_glare: float = 0.0        # 0..100, keeps bright areas from blooming (with exposure)
     gamma: float = 1.0             # >1 brightens midtones, <1 darkens
     black_floor: float = 0.0       # raises pure black to this level (0..0.3)
     brightness: float = 1.0        # overall gain
@@ -130,18 +132,41 @@ def shadow_boost_factor(shadow_boost: float) -> float:
     return 201.0 ** (min(shadow_boost, 100.0) / 100.0) - 1.0
 
 
-def exposure_curve(x: float, exposure: float) -> float:
+ANTI_GLARE_MAX_ROOM = 0.45   # share of the output range reserved for highlights at 100
+_HIGHLIGHT_CURVE = 2.0       # gentle log shape for the highlight range
+
+
+def exposure_curve(x: float, exposure: float, anti_glare: float = 0.0) -> float:
     """Night-vision style gain: amplify dim light evenly, roll off highlights.
 
     ``(1 - e^(-k x)) / (1 - e^(-k))``.  Unlike Shadow boost's log curve (which
     is extremely steep right at black and then flattens, giving a foggy look
     when a whole scene is dark), this spreads a very dark scene's tones over
     the full range so shapes keep their depth.  0 = off.
+
+    On its own the curve saturates: everything above a modest brightness turns
+    the same white, so lamps bloom and a player standing in front of a bright
+    window disappears into it.  ``anti_glare`` fixes that: the exposure curve
+    only fills the output up to a knee, and the top part of the output range
+    is kept for highlights, which keep rising gently so bright areas stay
+    brighter than whatever is in front of them.
     """
     k = min(max(exposure, 0.0), 100.0) / 100.0 * 20.0
     if k < 1e-6:
         return x
-    return (1.0 - math.exp(-k * x)) / (1.0 - math.exp(-k))
+
+    def expo(v: float) -> float:
+        return (1.0 - math.exp(-k * v)) / (1.0 - math.exp(-k))
+
+    room = min(max(anti_glare, 0.0), 100.0) / 100.0 * ANTI_GLARE_MAX_ROOM
+    if room <= 0.0:
+        return expo(x)
+    knee = min(0.5, 1.6 / k)          # where the exposure curve reaches ~80%
+    top = 1.0 - room
+    if x <= knee:
+        return top * expo(x) / expo(knee)
+    t = (x - knee) / (1.0 - knee)
+    return top + room * math.log1p(_HIGHLIGHT_CURVE * t) / math.log1p(_HIGHLIGHT_CURVE)
 
 
 def tone_curve(x: float, s: Settings) -> float:
@@ -149,7 +174,7 @@ def tone_curve(x: float, s: Settings) -> float:
 
     ``x`` and the result are in 0..1.
     """
-    y = exposure_curve(_clamp01(x), s.exposure)
+    y = exposure_curve(_clamp01(x), s.exposure, s.anti_glare)
     if s.gamma != 1.0:
         y = y ** (1.0 / s.gamma)
     a = shadow_boost_factor(s.shadow_boost)
@@ -276,8 +301,10 @@ TINT_CURVES: dict[str, TintCurve] = {
     # Image-intensifier green: deep green shadows, pale phosphor highlights.
     "night_vision": ((0.25, 1.0, 0.30), (0.78, 1.0, 0.72), 2.0),
     # Blue shadows -> purple -> red/pink highlights.  (Each channel can only
-    # rise with brightness, so the brightest parts keep a little blue.)
-    "night_vision_br": ((0.05, 0.60, 2.60), (1.35, 0.40, 0.25), 1.25),
+    # rise with brightness, so the brightest parts keep a little blue.)  Green
+    # rises late so highlights still get brighter: red and blue alone look
+    # dark, which would let a player in front of a lamp blend into it.
+    "night_vision_br": ((0.05, 0.55, 2.20), (1.45, 0.75, 0.20), 2.0),
     "amber": ((1.0, 0.72, 0.25), (1.0, 0.72, 0.25), 1.0),
     "ice": ((0.55, 0.85, 1.0), (0.55, 0.85, 1.0), 1.0),
 }

@@ -27,6 +27,7 @@ APP_TITLE = "CatVision by StormEf4"   # shown in the window, header and tray
 CURVE_SLIDERS = [
     ("shadow_boost", "Shadow boost", "int"),
     ("exposure", "Exposure (very dark games)", "int"),
+    ("anti_glare", "Anti-glare (with Exposure)", "int"),
     ("gamma", "Gamma (midtones)", "x"),
     ("black_floor", "Black floor", "pct"),
     ("brightness", "Brightness", "pct"),
@@ -45,6 +46,9 @@ TIPS = {
     "exposure": "Amplifies dim light evenly, like night-vision goggles. Best when the "
                 "whole scene is very dark: shapes keep their depth instead of looking "
                 "foggy. Bright lights will bloom.",
+    "anti_glare": "Stops bright lights from blooming when Exposure is on, so you're never "
+                  "blinded and players in front of lamps or windows stay visible. Higher "
+                  "keeps more detail in bright areas; lower keeps more in dark areas.",
     "shadow_boost": "The main control. Brightens dark areas a lot and bright areas barely "
                     "at all, so the sky doesn't turn white.",
     "gamma": "Brightens (higher) or darkens (lower) the middle tones.",
