@@ -37,9 +37,16 @@ BUILTIN_PRESETS: list[Preset] = [
     ),
     Preset(
         "Night Vision",
-        "Strong lift with a green monochrome tint, like night-vision goggles.",
-        Settings(shadow_boost=80, gamma=1.2, black_floor=0.03, contrast=1.1,
+        "Like night-vision goggles: amplifies dim light evenly, deep green shadows "
+        "and pale highlights. Best for seeing detail in very dark games.",
+        Settings(exposure=70, contrast=1.1, black_floor=0.015, white_cap=0.97,
                  color_filter="night_vision"),
+    ),
+    Preset(
+        "Night Vision (Blue/Red)",
+        "Night vision in blue and red: blue shadows, purple mid-tones, red highlights.",
+        Settings(exposure=75, contrast=1.1, black_floor=0.015, white_cap=0.97,
+                 color_filter="night_vision_br"),
     ),
     Preset(
         "Horror / Flashlight",

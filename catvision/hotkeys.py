@@ -147,8 +147,8 @@ ACTION_LABELS: dict[str, str] = {
     "off": "Panic: everything off",
     "next": "Next preset",
     "prev": "Previous preset",
-    "boost_up": "More shadow boost",
-    "boost_down": "Less shadow boost",
+    "boost_up": "More boost (shadow boost / exposure)",
+    "boost_down": "Less boost (shadow boost / exposure)",
     "filter_next": "Next color filter",
     "show_window": "Show the CatVision window",
 }

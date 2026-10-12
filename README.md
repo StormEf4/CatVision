@@ -113,7 +113,7 @@ an action and press the new keys.
 | **Ctrl+Alt+V** | Turn CatVision on / off |
 | **Ctrl+Alt+1 … 9** | Jump to a preset (Gentle Boost … Warm Low-Light) |
 | **Ctrl+Alt+Page Down / Page Up** | Next / previous preset |
-| **Ctrl+Alt+=** / **Ctrl+Alt+-** | More / less shadow boost |
+| **Ctrl+Alt+=** / **Ctrl+Alt+-** | More / less boost (Shadow boost, or Exposure for night vision) |
 | **Ctrl+Alt+F** | Next color filter |
 | **Ctrl+Alt+C** | Show the CatVision window |
 | **Ctrl+Alt+0** | Panic button: everything back to normal |
@@ -139,7 +139,8 @@ You can also give hotkeys to any preset, and use the tray menu for the rest.
 | Gentle Boost | Games that are just a little too dark |
 | Dark Areas | Everyday choice: dark rooms, caves, night |
 | Pitch Black | Nearly black areas (looks washed out, but you'll see) |
-| Night Vision | Green night-vision look with a strong lift |
+| Night Vision | Like night-vision goggles: deep green shadows, pale highlights. Best for very dark games |
+| Night Vision (Blue/Red) | Night vision in blue and red: blue shadows, purple mid-tones, red highlights |
 | Horror / Flashlight | Lifts darkness, stops flashlights and lamps from dazzling |
 | Fog & Haze Cutter | Murky, foggy, smoky scenes |
 | Mixed Light | Dark shadows next to bright skies or explosions |
@@ -164,6 +165,9 @@ rename or delete.
 
 - **Shadow boost**: the main control. It brightens dark parts a lot and
   bright parts barely at all, so the sky doesn't turn white.
+- **Exposure**: for games where the *whole* scene is very dark. It amplifies
+  dim light evenly, like night-vision goggles, so shapes keep their depth
+  instead of looking foggy. Bright lights will bloom.
 - **Gamma (midtones)**: brightens or darkens the middle tones.
 - **Black floor**: raises pure black to dark grey.
 - **Brightness / Contrast**: as usual.
@@ -171,6 +175,24 @@ rename or delete.
   flashlights.
 - **Saturation / Filter strength / Red-Green-Blue**: color strength, how
   strongly the color filter applies, and an overall tint.
+
+## Night vision
+
+Tuned on dark in-game screenshots. Both night-vision presets use
+**Exposure**, which spreads a very dark scene's tones across the whole
+brightness range, then color the picture *after* brightening it, the way the
+phosphor screen in real goggles does. Compared with the old version, the new
+green Night Vision shows about 1.7x more detail in dark areas and no longer
+looks foggy.
+
+![Night vision before and after](docs/night_vision_before_after.png)
+
+- Raise or lower **Exposure** (or press **Ctrl+Alt+= / -**) for darker or
+  brighter games.
+- Green shows the most detail, because our eyes see fine detail best in
+  green. Blue/Red is more of a style choice.
+- With only some displays ticked, night vision stays on those displays, but
+  as a colored tint rather than full monochrome (Windows limit).
 
 ## Making your own color filters
 

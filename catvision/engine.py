@@ -119,12 +119,8 @@ class Engine:
 
         status = Status(enabled=True)
         per_display = not self.all_displays_selected()
-        if per_display:
-            tint, matrix = curves.split_for_displays(
-                self.settings, self.custom_filters, self.custom_tints)
-        else:
-            tint = (1.0, 1.0, 1.0)
-            matrix = curves.color_matrix(self.settings, self.custom_filters)
+        tint, matrix = curves.plan_color(self.settings, self.custom_filters, self.custom_tints,
+                                         all_displays=not per_display)
         ramp = curves.build_ramp(self.settings, tint)
         self._mark_dirty(True)
         for m in self._targets():

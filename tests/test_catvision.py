@@ -513,15 +513,16 @@ class DisplayOptionTests(unittest.TestCase):
         self.assertEqual(o.displays, ["a", "b"])
 
     def test_split_for_displays(self):
-        gains, m = curves.split_for_displays(Settings(color_filter="amber", filter_strength=0.5))
+        tint, m = curves.split_for_displays(Settings(color_filter="amber", filter_strength=0.5))
         self.assertTrue(curves.is_identity_matrix(m))
-        self.assertAlmostEqual(gains[2], 1 + (0.25 - 1) * 0.5)
-        gains, m = curves.split_for_displays(Settings(color_filter="grayscale"))
-        self.assertEqual(gains, (1.0, 1.0, 1.0))
+        lo, hi, _p = tint
+        self.assertAlmostEqual(lo[2], 1 + (0.25 - 1) * 0.5)
+        tint, m = curves.split_for_displays(Settings(color_filter="grayscale"))
+        self.assertIsNone(tint)
         self.assertFalse(curves.is_identity_matrix(m))
-        gains, m = curves.split_for_displays(
+        tint, m = curves.split_for_displays(
             Settings(color_filter="custom:Mine"), custom_tints={"custom:Mine": (1.0, 0.5, 0.5)})
-        self.assertEqual(gains, (1.0, 0.5, 0.5))
+        self.assertEqual(tint[0], (1.0, 0.5, 0.5))
 
 
 class FirstRunTests(unittest.TestCase):
@@ -538,3 +539,40 @@ class ColorEverywhereOptionTests(unittest.TestCase):
         o = config.Options.from_dict({"color_all_displays": True})
         self.assertFalse(o.color_everywhere)
         self.assertTrue(config.Options.from_dict({"color_everywhere": True}).color_everywhere)
+
+
+class NightVisionTests(unittest.TestCase):
+    def test_exposure_off_is_identity_and_on_lifts_evenly(self):
+        self.assertTrue(curves.is_identity_ramp(curves.build_ramp(Settings(exposure=0)), tolerance=1))
+        ramp = curves.build_ramp(Settings(exposure=70))[1]
+        self.assertTrue(all(a <= b for a, b in zip(ramp, ramp[1:])))
+        # The dim range a dark game lives in (levels 6..32) is spread widely,
+        # instead of being squeezed together like the log-shaped Shadow boost.
+        exp_spread = ramp[32] - ramp[6]
+        log = curves.build_ramp(Settings(shadow_boost=80, gamma=1.2))[1]
+        self.assertGreater(exp_spread, 1.3 * (log[32] - log[6]))
+
+    def test_night_vision_is_grayscale_then_green_on_all_displays(self):
+        s = [p for p in BUILTIN_PRESETS if p.name == "Night Vision"][0].settings
+        tint, m = curves.plan_color(s, all_displays=True)
+        self.assertFalse(curves.is_identity_matrix(m))     # grayscale step
+        r, g, b = curves.build_ramp(s, tint)
+        self.assertLess(r[8], g[8] / 2)                    # deep green shadows
+        self.assertGreater(r[250] / g[250], 0.5)           # paler phosphor highlights
+
+    def test_blue_red_goes_blue_to_red(self):
+        s = [p for p in BUILTIN_PRESETS if p.name == "Night Vision (Blue/Red)"][0].settings
+        tint, _m = curves.plan_color(s)
+        r, g, b = curves.build_ramp(s, tint)
+        self.assertGreater(b[8], 2 * r[8])                 # dark = blue
+        self.assertGreater(r[250], b[250])                 # bright = red
+        for ch in (r, g, b):
+            self.assertTrue(all(x <= y for x, y in zip(ch, ch[1:])), "ramps must not decrease")
+
+    def test_every_preset_ramp_is_valid_with_its_tint(self):
+        for p in BUILTIN_PRESETS:
+            for all_displays in (True, False):
+                tint, _m = curves.plan_color(p.settings, all_displays=all_displays)
+                for ch in curves.build_ramp(p.settings, tint):
+                    self.assertTrue(all(0 <= v <= 65535 for v in ch), p.name)
+                    self.assertTrue(all(x <= y for x, y in zip(ch, ch[1:])), p.name)

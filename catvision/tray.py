@@ -26,6 +26,7 @@ class TrayState:
     filter_key: str = "none"
     filters: list[tuple[str, str]] = field(default_factory=list)   # (key, label)
     boost: int = 0
+    boost_label: str = "Shadow boost"
     displays: list[tuple[str, str]] = field(default_factory=list)  # (id, label)
     chosen: list[str] = field(default_factory=list)                # empty = all
 
@@ -87,7 +88,7 @@ class Tray:
             ps.Menu.SEPARATOR,
             ps.MenuItem(lambda _i: f"Preset: {st().preset}", ps.Menu(presets)),
             ps.MenuItem("Color filter", ps.Menu(color_filters)),
-            ps.MenuItem(lambda _i: f"Shadow boost: {st().boost}", ps.Menu(
+            ps.MenuItem(lambda _i: f"{st().boost_label}: {st().boost}", ps.Menu(
                 ps.MenuItem("More (+10)", do("boost_up")),
                 ps.MenuItem("Less (-10)", do("boost_down")),
             )),
@@ -151,4 +152,4 @@ class Tray:
 
     def _title(self) -> str:
         s = self.state
-        return f"CatVision - {'ON' if s.enabled else 'OFF'} ({s.preset})"[:127]
+        return f"CatVision by StormEf4 - {'ON' if s.enabled else 'OFF'} ({s.preset})"[:127]

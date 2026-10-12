@@ -22,8 +22,11 @@ from .tray import Tray, TrayState
 
 IS_WINDOWS = sys.platform == "win32"
 
+APP_TITLE = "CatVision by StormEf4"   # shown in the window, header and tray
+
 CURVE_SLIDERS = [
     ("shadow_boost", "Shadow boost", "int"),
+    ("exposure", "Exposure (very dark games)", "int"),
     ("gamma", "Gamma (midtones)", "x"),
     ("black_floor", "Black floor", "pct"),
     ("brightness", "Brightness", "pct"),
@@ -39,6 +42,9 @@ COLOR_SLIDERS = [
 ]
 
 TIPS = {
+    "exposure": "Amplifies dim light evenly, like night-vision goggles. Best when the "
+                "whole scene is very dark: shapes keep their depth instead of looking "
+                "foggy. Bright lights will bloom.",
     "shadow_boost": "The main control. Brightens dark areas a lot and bright areas barely "
                     "at all, so the sky doesn't turn white.",
     "gamma": "Brightens (higher) or darkens (lower) the middle tones.",
@@ -140,7 +146,7 @@ class CatVisionApp:
         self._closed = False
         self._tray_hint_shown = False
 
-        root.title("CatVision")
+        root.title(APP_TITLE)
         root.configure(bg=BG)
         root.protocol("WM_DELETE_WINDOW", self.on_close_button)
         root.report_callback_exception = self._on_error
@@ -236,7 +242,11 @@ class CatVisionApp:
             pass
         titles = tk.Frame(header, bg=BG)
         titles.pack(side="left", padx=10)
-        tk.Label(titles, text="CatVision", bg=BG, fg=FG, font=self.fonts.big).pack(anchor="w")
+        title_row = tk.Frame(titles, bg=BG)
+        title_row.pack(anchor="w")
+        tk.Label(title_row, text="CatVision", bg=BG, fg=FG, font=self.fonts.big).pack(side="left")
+        tk.Label(title_row, text="by StormEf4", bg=BG, fg=ACCENT,
+                 font=self.fonts.small).pack(side="left", padx=(6, 0), pady=(6, 0))
         self.header_sub = tk.Label(titles, text="", bg=BG, fg=MUTED, font=self.fonts.small)
         self.header_sub.pack(anchor="w")
         self.pill = tk.Label(header, text="OFF", bg=OFF, fg=FG, font=self.fonts.bold,
@@ -287,6 +297,9 @@ class CatVisionApp:
         self.sliders.append(SliderRow(boost, 0, self.vars["shadow_boost"], "Shadow boost",
                                       *LIMITS["shadow_boost"], "int", self.fonts, self._on_change,
                                       tip=TIPS["shadow_boost"]))
+        self.sliders.append(SliderRow(boost, 1, self.vars["exposure"], "Exposure",
+                                      *LIMITS["exposure"], "int", self.fonts, self._on_change,
+                                      tip=TIPS["exposure"]))
 
         ttk.Label(f, text="Color filter", style="Head.TLabel").grid(row=6, column=0, sticky="w", pady=(10, 2))
         self.filter_combo = ttk.Combobox(f, state="readonly", font=self.fonts.normal, height=20)
@@ -302,7 +315,7 @@ class CatVisionApp:
                                  highlightthickness=0)
         self.pattern.grid(row=10, column=0, sticky="w")
         self._draw_pattern()
-        ttk.Label(f, text="Raise Shadow boost until you can see every dark square.",
+        ttk.Label(f, text="Raise Shadow boost or Exposure until you can see every dark square.",
                   style="Muted.TLabel").grid(row=11, column=0, sticky="w")
         self.home_hint = ttk.Label(f, text="", style="Muted.TLabel", justify="left")
         self.home_hint.grid(row=12, column=0, sticky="w", pady=(10, 0))
@@ -517,7 +530,7 @@ class CatVisionApp:
         ttk.Button(btns, text="Quit CatVision", command=self.quit).pack(side="left")
         row += 1
 
-        about = ttk.Label(f, text=(f"CatVision {__version__}\n"
+        about = ttk.Label(f, text=(f"{APP_TITLE}  -  version {__version__}\n"
                                    "Changes only what your monitor shows (graphics-card brightness "
                                    "table and Windows color filters). It never reads, changes or "
                                    "injects into games."),
@@ -784,7 +797,7 @@ class CatVisionApp:
         row = self._active_row()
         self.delete_btn.configure(
             text="Restore default" if row is not None and row.builtin else "Delete")
-        self.root.title(f"CatVision - {name}")
+        self.root.title(f"{APP_TITLE} - {name}")
         state = "on" if self.engine.enabled else "off"
         self.header_sub.configure(text=f"{name}{' (changed)' if self._modified else ''}  \u00b7  {state}")
 
@@ -796,7 +809,8 @@ class CatVisionApp:
             presets=self.preset_names(),
             filter_key=self.filter_key,
             filters=choices,
-            boost=int(round(self.vars["shadow_boost"].get())),
+            boost=int(round(self.vars[self._boost_key()].get())),
+            boost_label="Exposure" if self._boost_key() == "exposure" else "Shadow boost",
             displays=[(m.id, m.short or m.label) for m in self.engine.monitors()],
             chosen=[d for d in self.engine.displays
                     if d in {m.id for m in self.engine.monitors()}],
@@ -926,13 +940,14 @@ class CatVisionApp:
             self._set_enabled(True)
             msg = self.cfg.active_preset
         elif action in ("boost_up", "boost_down"):
-            var = self.vars["shadow_boost"]
+            key = self._boost_key()
+            var = self.vars[key]
             step = BOOST_STEP if action == "boost_up" else -BOOST_STEP
             var.set(min(100, max(0, round(var.get()) + step)))
             self._on_change()
             if not self.engine.enabled:
                 self._set_enabled(True)
-            msg = f"Shadow boost {round(var.get())}"
+            msg = f"{'Exposure' if key == 'exposure' else 'Shadow boost'} {round(var.get())}"
         elif action == "filter_next":
             keys = self._filter_keys
             idx = (keys.index(self.filter_key) + 1) % len(keys) if self.filter_key in keys else 0
@@ -960,6 +975,11 @@ class CatVisionApp:
             self.quit()
         if msg and self.cfg.options.hotkey_popup:
             self.toast.show(msg)
+
+    def _boost_key(self) -> str:
+        """The boost hotkeys adjust Exposure when the look uses it (night
+        vision), otherwise Shadow boost."""
+        return "exposure" if self.vars["exposure"].get() >= 0.5 else "shadow_boost"
 
     def _step_preset(self, step: int) -> None:
         cur = self._preset_index(self.cfg.active_preset)

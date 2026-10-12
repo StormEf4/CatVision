@@ -26,6 +26,7 @@ RAMP_MAX = 65535
 # to sanitise anything loaded from disk.
 LIMITS: dict[str, tuple[float, float]] = {
     "shadow_boost": (0.0, 100.0),
+    "exposure": (0.0, 100.0),
     "gamma": (0.5, 3.0),
     "black_floor": (0.0, 0.30),
     "brightness": (0.5, 2.0),
@@ -43,6 +44,7 @@ COLOR_FILTERS: dict[str, str] = {
     "none": "None",
     "grayscale": "Grayscale (high contrast mono)",
     "night_vision": "Night vision (green)",
+    "night_vision_br": "Night vision (blue / red)",
     "amber": "Amber (warm mono, easy on eyes)",
     "ice": "Ice (cool mono)",
     "deuteranopia": "Red-green assist (deuteranopia)",
@@ -62,6 +64,7 @@ class Settings:
     """Everything that defines one look.  Defaults are 'no change'."""
 
     shadow_boost: float = 0.0      # 0..100, lifts dark tones, keeps highlights
+    exposure: float = 0.0          # 0..100, strong even gain for very dark games
     gamma: float = 1.0             # >1 brightens midtones, <1 darkens
     black_floor: float = 0.0       # raises pure black to this level (0..0.3)
     brightness: float = 1.0        # overall gain
@@ -127,12 +130,26 @@ def shadow_boost_factor(shadow_boost: float) -> float:
     return 201.0 ** (min(shadow_boost, 100.0) / 100.0) - 1.0
 
 
+def exposure_curve(x: float, exposure: float) -> float:
+    """Night-vision style gain: amplify dim light evenly, roll off highlights.
+
+    ``(1 - e^(-k x)) / (1 - e^(-k))``.  Unlike Shadow boost's log curve (which
+    is extremely steep right at black and then flattens, giving a foggy look
+    when a whole scene is dark), this spreads a very dark scene's tones over
+    the full range so shapes keep their depth.  0 = off.
+    """
+    k = min(max(exposure, 0.0), 100.0) / 100.0 * 20.0
+    if k < 1e-6:
+        return x
+    return (1.0 - math.exp(-k * x)) / (1.0 - math.exp(-k))
+
+
 def tone_curve(x: float, s: Settings) -> float:
     """Brightness transfer function shared by all three channels.
 
     ``x`` and the result are in 0..1.
     """
-    y = _clamp01(x)
+    y = exposure_curve(_clamp01(x), s.exposure)
     if s.gamma != 1.0:
         y = y ** (1.0 / s.gamma)
     a = shadow_boost_factor(s.shadow_boost)
@@ -147,20 +164,29 @@ def tone_curve(x: float, s: Settings) -> float:
     return y
 
 
-def build_ramp(s: Settings, tint: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> list[list[int]]:
+# A tint curve colors the picture by brightness, after the tone curve:
+# (dark color gains, bright color gains, power).  Gains move from the first
+# to the second as brightness rises, so night vision can have deep green
+# shadows and pale phosphor highlights, or blue shadows and red highlights.
+TintCurve = tuple[tuple[float, float, float], tuple[float, float, float], float]
+NO_TINT: TintCurve = ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0), 1.0)
+
+
+def build_ramp(s: Settings, tint: TintCurve | None = None) -> list[list[int]]:
     """Return ``[red, green, blue]`` 256-entry tables of 16-bit values.
 
-    ``tint`` is an extra per-channel gain (used to show tint-style color
-    filters on chosen displays only).
+    ``tint`` colors the result by brightness (tint-style color filters).
     """
     s = s.clamped()
+    lo, hi, power = tint or NO_TINT
     tone = [tone_curve(i / (RAMP_SIZE - 1), s) for i in range(RAMP_SIZE)]
     ramp = []
-    for gain in (s.red * tint[0], s.green * tint[1], s.blue * tint[2]):
+    for c, gain in enumerate((s.red, s.green, s.blue)):
         channel = []
         prev = 0
         for y in tone:
-            v = int(round(_clamp01(y * gain) * s.white_cap * RAMP_MAX))
+            g = gain * (lo[c] + (hi[c] - lo[c]) * y ** power)
+            v = int(round(_clamp01(y * g) * s.white_cap * RAMP_MAX))
             v = max(prev, v)  # graphics drivers expect non-decreasing ramps
             channel.append(v)
             prev = v
@@ -244,9 +270,24 @@ _CVD_SIM: dict[str, Matrix] = {
 _RED_GREEN_SHIFT: Matrix = [[0.0, 0.0, 0.0], [0.7, 1.0, 0.0], [0.7, 0.0, 1.0]]
 _BLUE_YELLOW_SHIFT: Matrix = [[1.0, 0.0, 0.7], [0.0, 1.0, 0.7], [0.0, 0.0, 0.0]]
 
+# Tint-style filters as brightness-dependent tint curves (see build_ramp).
+# Tuned on dark in-game screenshots.
+TINT_CURVES: dict[str, TintCurve] = {
+    # Image-intensifier green: deep green shadows, pale phosphor highlights.
+    "night_vision": ((0.25, 1.0, 0.30), (0.78, 1.0, 0.72), 2.0),
+    # Blue shadows -> purple -> red/pink highlights.  (Each channel can only
+    # rise with brightness, so the brightest parts keep a little blue.)
+    "night_vision_br": ((0.05, 0.60, 2.60), (1.35, 0.40, 0.25), 1.25),
+    "amber": ((1.0, 0.72, 0.25), (1.0, 0.72, 0.25), 1.0),
+    "ice": ((0.55, 0.85, 1.0), (0.55, 0.85, 1.0), 1.0),
+}
+
+# Single-color approximations of the tint filters, used for color previews
+# and as the starting point when copying a filter.
 MONO_TINTS: dict[str, tuple[float, float, float]] = {
     "grayscale": (1.0, 1.0, 1.0),
     "night_vision": (0.30, 1.0, 0.35),
+    "night_vision_br": (0.70, 0.45, 1.00),
     "amber": (1.0, 0.72, 0.25),
     "ice": (0.55, 0.85, 1.0),
 }
@@ -305,37 +346,49 @@ def color_matrix(s: Settings, custom: dict[str, Matrix] | None = None) -> Matrix
     return m
 
 
-def filter_tint(key: str, custom_tints: dict[str, tuple] | None = None):
-    """The tint color of a tint-style filter, or None for other filters.
+def filter_tint(key: str, custom_tints: dict[str, tuple] | None = None) -> TintCurve | None:
+    """The tint curve of a tint-style filter, or None for other filters.
 
-    Tint filters can be approximated per display with the brightness table
-    (as a colored tint, without turning the picture grey).  Filters that mix
-    colors (grayscale, color-blind assist, channel mixers) can't.
+    Tint filters are drawn by the brightness table, which also works per
+    display.  Filters that mix colors (grayscale, color-blind assist,
+    channel mixers) can't be.
     """
     if key.startswith(CUSTOM_PREFIX):
         tint = (custom_tints or {}).get(key)
-    else:
-        tint = MONO_TINTS.get(key)
-    if tint is None or all(abs(t - 1.0) < 1e-6 for t in tint):
-        return None
-    return tuple(tint)
+        if tint is None or all(abs(t - 1.0) < 1e-6 for t in tint):
+            return None
+        return (tuple(tint), tuple(tint), 1.0)
+    return TINT_CURVES.get(key)
 
 
-def split_for_displays(s: Settings, custom: dict[str, Matrix] | None = None,
-                       custom_tints: dict[str, tuple] | None = None):
-    """Split settings for when only some displays are chosen.
+def plan_color(s: Settings, custom: dict[str, Matrix] | None = None,
+               custom_tints: dict[str, tuple] | None = None,
+               all_displays: bool = True) -> tuple[TintCurve | None, Matrix]:
+    """Decide how to show the settings' colors.
 
-    Returns ``(tint_gains, matrix)``: tint filters become per-display channel
-    gains; whatever is left must go through the screen-wide color matrix.
+    Returns ``(tint_curve, matrix)``.  Tint filters are drawn as a tint curve
+    in the brightness table, *after* the tone curve, like the phosphor screen
+    of real night vision.  On all displays the picture is first turned
+    grayscale by the (screen-wide) color matrix; with only some displays
+    chosen that step is skipped, so the tint keeps some of the game's color.
     """
     s = s.clamped()
     tint = filter_tint(s.color_filter, custom_tints)
     if tint is None or s.filter_strength <= 0:
-        return (1.0, 1.0, 1.0), color_matrix(s, custom)
+        return None, color_matrix(s, custom)
     k = s.filter_strength
-    gains = tuple(1.0 + (t - 1.0) * k for t in tint)
-    rest = Settings(**{**s.to_dict(), "color_filter": "none"})
-    return gains, color_matrix(rest, custom)
+    lo, hi, power = tint
+    curve = (tuple(1.0 + (t - 1.0) * k for t in lo), tuple(1.0 + (t - 1.0) * k for t in hi), power)
+    m = saturation_matrix(s.saturation)
+    if all_displays:
+        m = mat_mul(mat_lerp(IDENTITY3, filter_matrix("grayscale"), k), m)
+    return curve, m
+
+
+def split_for_displays(s: Settings, custom: dict[str, Matrix] | None = None,
+                       custom_tints: dict[str, tuple] | None = None):
+    """``plan_color`` for when only some displays are chosen."""
+    return plan_color(s, custom, custom_tints, all_displays=False)
 
 
 def is_identity_matrix(m: Matrix, tolerance: float = 1e-6) -> bool:
