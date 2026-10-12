@@ -50,6 +50,9 @@ COLOR_FILTERS: dict[str, str] = {
     "tritanopia": "Blue-yellow assist (tritanopia)",
 }
 
+# Custom (user-made) filters are referenced as "custom:<name>".
+CUSTOM_PREFIX = "custom:"
+
 # Rec.709 luma weights.
 LUMA = (0.2126, 0.7152, 0.0722)
 
@@ -82,7 +85,7 @@ class Settings:
                 continue
             value = data[f.name]
             if f.name == "color_filter":
-                if isinstance(value, str) and value in COLOR_FILTERS:
+                if isinstance(value, str) and is_valid_filter_key(value):
                     s.color_filter = value
                 continue
             try:
@@ -97,12 +100,20 @@ class Settings:
         data = asdict(self)
         for name, (lo, hi) in LIMITS.items():
             data[name] = min(hi, max(lo, float(data[name])))
-        if data["color_filter"] not in COLOR_FILTERS:
+        if not is_valid_filter_key(data["color_filter"]):
             data["color_filter"] = "none"
         return Settings(**data)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def is_valid_filter_key(key) -> bool:
+    if not isinstance(key, str):
+        return False
+    if key in COLOR_FILTERS:
+        return True
+    return key.startswith(CUSTOM_PREFIX) and 0 < len(key) - len(CUSTOM_PREFIX) <= 60
 
 
 def _clamp01(x: float) -> float:
@@ -229,7 +240,7 @@ _CVD_SIM: dict[str, Matrix] = {
 _RED_GREEN_SHIFT: Matrix = [[0.0, 0.0, 0.0], [0.7, 1.0, 0.0], [0.7, 0.0, 1.0]]
 _BLUE_YELLOW_SHIFT: Matrix = [[1.0, 0.0, 0.7], [0.0, 1.0, 0.7], [0.0, 0.0, 0.0]]
 
-_MONO_TINTS: dict[str, tuple[float, float, float]] = {
+MONO_TINTS: dict[str, tuple[float, float, float]] = {
     "grayscale": (1.0, 1.0, 1.0),
     "night_vision": (0.30, 1.0, 0.35),
     "amber": (1.0, 0.72, 0.25),
@@ -258,10 +269,17 @@ def saturation_matrix(sat: float) -> Matrix:
     return mat_lerp(gray, IDENTITY3, sat)
 
 
-def filter_matrix(name: str) -> Matrix:
-    if name in _MONO_TINTS:
-        tint = _MONO_TINTS[name]
-        return [[t * w for w in LUMA] for t in tint]
+def mono_tint_matrix(tint) -> Matrix:
+    """Grayscale, then multiply by a tint color."""
+    return [[t * w for w in LUMA] for t in tint]
+
+
+def filter_matrix(name: str, custom: dict[str, Matrix] | None = None) -> Matrix:
+    if name.startswith(CUSTOM_PREFIX):
+        m = (custom or {}).get(name)
+        return [row[:] for row in m] if m else [row[:] for row in IDENTITY3]
+    if name in MONO_TINTS:
+        return mono_tint_matrix(MONO_TINTS[name])
     if name in _CVD_SIM:
         sim = _CVD_SIM[name]
         shift = _BLUE_YELLOW_SHIFT if name == "tritanopia" else _RED_GREEN_SHIFT
@@ -270,12 +288,15 @@ def filter_matrix(name: str) -> Matrix:
     return [row[:] for row in IDENTITY3]
 
 
-def color_matrix(s: Settings) -> Matrix:
-    """Combined saturation + color filter matrix for the given settings."""
+def color_matrix(s: Settings, custom: dict[str, Matrix] | None = None) -> Matrix:
+    """Combined saturation + color filter matrix for the given settings.
+
+    ``custom`` maps "custom:<name>" keys to the user's own filter matrices.
+    """
     s = s.clamped()
     m = saturation_matrix(s.saturation)
     if s.color_filter != "none" and s.filter_strength > 0:
-        f = mat_lerp(IDENTITY3, filter_matrix(s.color_filter), s.filter_strength)
+        f = mat_lerp(IDENTITY3, filter_matrix(s.color_filter, custom), s.filter_strength)
         m = mat_mul(f, m)
     return m
 

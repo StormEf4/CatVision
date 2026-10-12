@@ -47,6 +47,7 @@ class Engine:
         self.settings = Settings()
         self.enabled = False
         self.monitor_choice = "all"
+        self.custom_filters: dict[str, curves.Matrix] = {}  # "custom:<name>" -> matrix
         self._flag = (state_dir / "display_modified.flag") if state_dir else None
         self._applied: dict[str, list[list[int]]] = {}
         self.status = Status()
@@ -107,7 +108,7 @@ class Engine:
             status.gamma_ok = status.gamma_ok and result.ok
             status.gamma_limited = status.gamma_limited or result.limited
 
-        matrix = curves.color_matrix(self.settings)
+        matrix = curves.color_matrix(self.settings, self.custom_filters)
         if curves.is_identity_matrix(matrix):
             self.color.reset()
         else:

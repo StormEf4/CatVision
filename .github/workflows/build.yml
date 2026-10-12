@@ -1,0 +1,72 @@
+name: Build CatVision.exe
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install pyinstaller==6.11.1 pystray==0.19.5 pillow==11.0.0
+
+      - name: Unit tests
+        run: python -m unittest -v
+
+      - name: Self-test from source (real Windows display, color-filter and hotkey APIs)
+        run: |
+          python run_catvision.py --selftest selftest-source.json
+          $code = $LASTEXITCODE
+          Get-Content selftest-source.json
+          exit $code
+
+      - name: Build CatVision.exe
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name CatVision
+          --icon catvision/assets/catvision.ico
+          --add-data "catvision/assets;catvision/assets"
+          --hidden-import pystray._win32
+          --version-file packaging/version_info.txt
+          run_catvision.py
+
+      - name: Self-test the built exe
+        run: |
+          $p = Start-Process -FilePath dist\CatVision.exe -ArgumentList '--selftest', "$PWD\selftest-exe.json" -Wait -PassThru
+          Get-Content selftest-exe.json
+          Get-Item dist\CatVision.exe | Select-Object Name, Length
+          exit $p.ExitCode
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CatVision
+          path: |
+            dist/CatVision.exe
+            selftest-*.json
+
+      - name: Publish download (GitHub Release)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest-build --yes --cleanup-tag || true
+          gh release create latest-build dist/CatVision.exe \
+            --target "$GITHUB_SHA" \
+            --latest \
+            --title "CatVision (latest build)" \
+            --notes "Download **CatVision.exe** below and double-click it. No Python or install needed.
+
+          Built automatically from commit $GITHUB_SHA on branch ${GITHUB_REF_NAME}.
+
+          Windows may show 'Windows protected your PC' because the app isn't code-signed: click **More info** then **Run anyway**."

@@ -105,3 +105,30 @@ def builtin_by_name(name: str) -> Preset | None:
         if p.name == name:
             return p
     return None
+
+
+@dataclass(frozen=True)
+class PresetEntry:
+    name: str
+    settings: Settings
+    builtin: bool
+    changed: bool        # a built-in preset the user saved their own version of
+    description: str
+
+
+def all_presets(saved: dict[str, Settings]) -> list[PresetEntry]:
+    """Built-in presets (with the user's saved changes) then the user's own.
+
+    ``saved`` holds the user's presets.  An entry with the same name as a
+    built-in preset replaces that built-in's settings.
+    """
+    rows = []
+    for p in BUILTIN_PRESETS:
+        mine = saved.get(p.name)
+        changed = mine is not None and mine != p.settings
+        rows.append(PresetEntry(p.name, mine if mine is not None else p.settings,
+                                True, changed, p.description))
+    builtin_names = {p.name for p in BUILTIN_PRESETS}
+    for name in sorted((n for n in saved if n not in builtin_names), key=str.lower):
+        rows.append(PresetEntry(name, saved[name], False, False, "Your own preset."))
+    return rows

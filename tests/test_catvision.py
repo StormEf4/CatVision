@@ -280,3 +280,156 @@ class PresetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HotkeyParsingTests(unittest.TestCase):
+    def test_parse_and_format_round_trip(self):
+        from catvision import hotkeys as hk
+        for combo in ["Ctrl+Alt+V", "Ctrl+Alt+Page Down", "Ctrl+Alt+=", "Ctrl+Alt+-",
+                      "Ctrl+Shift+F12", "Alt+Num 5", "F8", "Ctrl+Win+Num Add"]:
+            parsed = hk.parse_combo(combo)
+            self.assertIsNotNone(parsed, combo)
+            self.assertEqual(hk.format_combo(*parsed), combo)
+        self.assertEqual(hk.normalize_combo("alt+control+v"), "Ctrl+Alt+V")
+        self.assertEqual(hk.parse_combo("Ctrl+Alt+V"), (hk.MOD_CONTROL | hk.MOD_ALT, 0x56))
+
+    def test_invalid_combos(self):
+        from catvision import hotkeys as hk
+        for bad in ["", "Ctrl+", "Hyper+V", "Ctrl+Alt+Nope", None, 5]:
+            self.assertIsNone(hk.parse_combo(bad), bad)
+
+    def test_combo_problems(self):
+        from catvision import hotkeys as hk
+        self.assertIsNone(hk.combo_problem("Ctrl+Alt+V"))
+        self.assertIsNone(hk.combo_problem("F8"))
+        self.assertIsNone(hk.combo_problem("Shift+F8"))
+        self.assertIsNotNone(hk.combo_problem("Q"))          # would block typing in games
+        self.assertIsNotNone(hk.combo_problem("Shift+Q"))
+        self.assertIsNotNone(hk.combo_problem("Ctrl+Alt+Delete"))
+
+    def test_tk_key_names(self):
+        from catvision import hotkeys as hk
+        self.assertEqual(hk.key_name_from_tk("k", 0), "K")
+        self.assertEqual(hk.key_name_from_tk("Next", 0), "Page Down")
+        self.assertEqual(hk.key_name_from_tk("KP_7", 0), "Num 7")
+        self.assertEqual(hk.key_name_from_tk("plus", 0), "=")
+        self.assertEqual(hk.key_name_from_tk("F11", 0), "F11")
+        self.assertIsNone(hk.key_name_from_tk("Caps_Lock", 0))
+
+    def test_bindings_skip_blank_bad_and_duplicate(self):
+        from catvision import hotkeys as hk
+        b = hk.bindings_from_config({"toggle": "Ctrl+Alt+V", "off": "", "next": "junk",
+                                     "prev": "ctrl+alt+v", "preset:X": "Ctrl+Alt+1"})
+        self.assertEqual([x.action for x in b], ["toggle", "preset:X"])
+
+    def test_defaults_are_valid_and_unique(self):
+        from catvision import hotkeys as hk
+        d = hk.default_hotkeys()
+        self.assertEqual(len(set(d.values())), len(d))
+        for combo in d.values():
+            self.assertIsNone(hk.combo_problem(combo), combo)
+        names = {p.name for p in BUILTIN_PRESETS}
+        for action in d:
+            if action.startswith("preset:"):
+                self.assertIn(action[7:], names)
+
+
+class CustomFilterTests(unittest.TestCase):
+    def test_tint_and_mixer_matrices(self):
+        from catvision.filters import CustomFilter
+        tint = CustomFilter("tint", [0.0, 1.0, 0.0])
+        r, g, b = curves.apply_matrix(tint.to_matrix(), (0.5, 0.5, 0.5))
+        self.assertEqual((r, b), (0.0, 0.0))
+        self.assertAlmostEqual(g, 0.5, places=3)
+        swap = CustomFilter("mixer", matrix=[[0, 0, 1], [0, 1, 0], [1, 0, 0]])
+        self.assertEqual(curves.apply_matrix(swap.to_matrix(), (1.0, 0.0, 0.0)), (0.0, 0.0, 1.0))
+
+    def test_from_untrusted_dict_is_clamped(self):
+        from catvision.filters import CustomFilter
+        f = CustomFilter.from_dict({"kind": "evil", "tint": [9, "x", -1],
+                                    "matrix": [[99, 0, 0], [0, "nan", 0], [0, 0, 1]]})
+        self.assertEqual(f.kind, "tint")
+        self.assertEqual(f.tint, [1.5, 1.0, 0.0])
+        self.assertEqual(f.matrix[0][0], 2.0)
+        self.assertEqual(f.matrix[1][1], 1.0)
+        self.assertEqual(CustomFilter.from_dict({"matrix": [[1, 2]]}).matrix, curves.IDENTITY3)
+
+    def test_copy_of_builtin_matches_builtin(self):
+        from catvision import filters
+        for key in curves.COLOR_FILTERS:
+            if key == "none":
+                continue
+            copy = filters.copy_of_builtin(key).to_matrix()
+            orig = curves.filter_matrix(key)
+            for i in range(3):
+                for j in range(3):
+                    self.assertAlmostEqual(copy[i][j], orig[i][j], places=2, msg=key)
+
+    def test_settings_accept_custom_filter_keys(self):
+        s = Settings.from_dict({"color_filter": "custom:My Green"})
+        self.assertEqual(s.color_filter, "custom:My Green")
+        self.assertEqual(Settings.from_dict({"color_filter": "custom:"}).color_filter, "none")
+        self.assertEqual(Settings.from_dict({"color_filter": "custom:" + "x" * 99}).color_filter, "none")
+
+    def test_engine_uses_custom_filter(self):
+        from catvision import filters
+        from catvision.filters import CustomFilter
+        color = FakeColor()
+        with tempfile.TemporaryDirectory() as d:
+            e = Engine(FakeGamma(), color, Path(d))
+            custom = {"Red Only": CustomFilter("mixer", matrix=[[1, 0, 0], [0, 0, 0], [0, 0, 0]])}
+            e.custom_filters = filters.matrices(custom)
+            e.settings = Settings(color_filter="custom:Red Only")
+            e.set_enabled(True)
+            self.assertEqual(color.last[0:3], [1.0, 0.0, 0.0])
+            self.assertEqual(color.last[5:8], [0.0, 0.0, 0.0])
+            # a deleted filter falls back to no filter instead of breaking
+            e.custom_filters = {}
+            e.apply()
+            self.assertIsNone(color.last)
+
+
+class PresetOverrideTests(unittest.TestCase):
+    def test_saved_builtin_overrides_and_customs_follow(self):
+        from catvision.presets import all_presets
+        mine = Settings(shadow_boost=99)
+        rows = all_presets({"Dark Areas": mine, "zeta": Settings(), "Alpha": Settings()})
+        names = [r.name for r in rows]
+        self.assertEqual(names[:len(BUILTIN_PRESETS)], [p.name for p in BUILTIN_PRESETS])
+        self.assertEqual(names[len(BUILTIN_PRESETS):], ["Alpha", "zeta"])
+        dark = rows[names.index("Dark Areas")]
+        self.assertTrue(dark.builtin and dark.changed)
+        self.assertEqual(dark.settings, mine)
+        self.assertFalse(rows[0].changed)
+
+
+class ConfigV2Tests(unittest.TestCase):
+    def test_v1_file_gets_default_hotkeys(self):
+        from catvision.hotkeys import default_hotkeys
+        c = config.Config.from_json({"version": 1, "current": {"shadow_boost": 40}})
+        self.assertEqual(c.hotkeys, default_hotkeys())
+        self.assertEqual(c.custom_filters, {})
+
+    def test_round_trip_filters_and_hotkeys(self):
+        from catvision.filters import CustomFilter
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.json"
+            c = config.Config()
+            c.custom_filters["Mine"] = CustomFilter("mixer", matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]])
+            c.hotkeys = {"toggle": "alt+ctrl+k", "off": "", "preset:Mine": "garbage"}
+            config.save(c, path)
+            loaded = config.load(path)
+            self.assertEqual(loaded.custom_filters["Mine"].matrix, [[0, 1, 0], [1, 0, 0], [0, 0, 1]])
+            self.assertEqual(loaded.hotkeys, {"toggle": "Ctrl+Alt+K", "off": "", "preset:Mine": ""})
+
+    def test_config_dir_override(self):
+        import os
+        old = os.environ.get("CATVISION_CONFIG_DIR")
+        os.environ["CATVISION_CONFIG_DIR"] = "/tmp/somewhere"
+        try:
+            self.assertEqual(config.app_dir(), Path("/tmp/somewhere"))
+        finally:
+            if old is None:
+                del os.environ["CATVISION_CONFIG_DIR"]
+            else:
+                os.environ["CATVISION_CONFIG_DIR"] = old
