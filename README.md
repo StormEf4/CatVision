@@ -59,8 +59,8 @@ The window is small and split into tabs:
 
 | Tab | What's there |
 | --- | --- |
-| **Home** | The big **ON/OFF** button, preset picker (◀ ▶ to flip through), **Shadow boost** and **Exposure**, color filter, which **displays** to change, and a test pattern |
-| **Tune** | Every slider. **Save** keeps your changes in the current preset (built-in ones too), **Save as new...** makes your own preset |
+| **Home** | Preset picker (◀ ▶ to flip through), **Shadow boost** and **Exposure**, color filter, and which **displays** to change |
+| **Tune** | Every slider, and a big **Test pattern** to tune against. **Save** keeps your changes in the current preset (built-in ones too), **Save as new...** makes your own preset |
 | **Presets** | Every preset in one list: **Use it**, **New...** (from your current settings), **Copy...**, **Rename...**, **Delete** |
 | **Filters** | Make and edit your own color filters |
 | **Hotkeys** | Set a hotkey for any action, and an on/off hotkey for every preset |
@@ -73,8 +73,9 @@ that fix it. Click it again to close it; it also closes by itself once the
 problem is fixed.
 
 **Quick start:** pick **Dark Areas**, click **OFF** so it turns green, then
-move **Shadow boost** until the dark squares in the test pattern are all
-visible. Not sure what something does? Rest the mouse on it for a short
+open **Test pattern...** in the Tune tab and move **Shadow boost** until the
+dark squares are all visible. Leave the pattern open while you adjust; it has
+a **Full screen** button (or press F11) for an even bigger picture. Not sure what something does? Rest the mouse on it for a short
 explanation.
 
 ## Choosing displays (multiple monitors)

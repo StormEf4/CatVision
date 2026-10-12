@@ -17,6 +17,7 @@ from .engine import Engine, emergency_reset
 from .gui_filters import FiltersTab
 from .gui_hotkeys import HotkeysTab
 from .gui_presets import PresetsTab
+from .gui_testpattern import open_test_pattern
 from .gui_notices import Notice, WarningButton
 from .hotkeys import HotkeyListener, action_label, bindings_from_config
 from .presets import all_presets, builtin_by_name
@@ -291,9 +292,10 @@ class CatVisionApp:
         self.welcome = ttk.Frame(f, style="Card.TFrame", padding=10)
         self.welcome.columnconfigure(0, weight=1)
         ttk.Label(self.welcome, style="Card.TLabel", justify="left", wraplength=wrap - 90,
-                  text="Welcome! Pick a preset, turn CatVision on with the OFF/ON button at the "
-                       "top, then raise Shadow boost until every dark square in the test "
-                       "pattern shows. Rest the mouse on anything for help.").grid(row=0, column=0, sticky="w")
+                  text="Welcome! Pick a preset and turn CatVision on with the OFF/ON button at "
+                       "the top. Then open the test pattern in the Tune tab and raise Shadow "
+                       "boost until every dark square shows. Rest the mouse on anything for "
+                       "help.").grid(row=0, column=0, sticky="w")
         ttk.Button(self.welcome, text="Got it", style="Accent.TButton",
                    command=self._dismiss_welcome).grid(row=0, column=1, padx=(8, 0))
         if not self.cfg.options.seen_welcome:
@@ -313,7 +315,6 @@ class CatVisionApp:
         nxt = ttk.Button(prow, text="\u25b6", width=3, command=lambda: self._step_preset(1))
         nxt.grid(row=0, column=2, padx=(4, 0))
         Tooltip(nxt, "Next preset")
-        f.bind("<Configure>", self._on_home_resize)
 
         boost = ttk.Frame(f)
         boost.grid(row=5, column=0, sticky="ew", pady=(12, 0))
@@ -333,23 +334,8 @@ class CatVisionApp:
 
         self._build_displays(f, row=8, wrap=wrap)
 
-        ttk.Label(f, text="Test pattern", style="Head.TLabel").grid(row=9, column=0, sticky="w", pady=(12, 2))
-        self.pattern = tk.Canvas(f, width=self.px_(300), height=self.px_(84), bg="#000000",
-                                 highlightthickness=0)
-        self.pattern.grid(row=10, column=0, sticky="w")
-        self._draw_pattern()
-        self.pattern_hint = ttk.Label(
-            f, style="Muted.TLabel", justify="left", wraplength=wrap,
-            text="Raise Shadow Boost and Exposure levels to your satisfaction. Above is a full "
-                 "dark range for small testing. Since everyone's monitor is different, my "
-                 "defaults may not be satisfactory.")
-        self.pattern_hint.grid(row=11, column=0, sticky="w")
         self.home_hint = ttk.Label(f, text="", style="Muted.TLabel", justify="left")
-        self.home_hint.grid(row=12, column=0, sticky="w", pady=(10, 0))
-
-    def _on_home_resize(self, e) -> None:
-        width = max(100, e.width - 24)
-        self.pattern_hint.configure(wraplength=width)
+        self.home_hint.grid(row=9, column=0, sticky="w", pady=(10, 0))
 
     def _dismiss_welcome(self) -> None:
         self.welcome.grid_remove()
@@ -587,11 +573,18 @@ class CatVisionApp:
         f.columnconfigure(0, weight=1)
         self.tune_title = ttk.Label(f, text="", style="Head.TLabel")
         self.tune_title.grid(row=0, column=0, sticky="w")
+        pattern = ttk.Button(f, text="Test pattern...", style="Accent.TButton",
+                             command=lambda: open_test_pattern(self))
+        pattern.grid(row=0, column=1, sticky="e")
+        Tooltip(pattern, "An image to test your monitors levels. Raise Shadow Boost and Exposure "
+                         "levels to your satisfaction. Since everyone's monitor is different, my "
+                         "defaults may not be satisfactory.")
         ttk.Label(f, text="Changes show instantly. Click Save to keep them in this preset.",
-                  style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 6))
+                  style="Muted.TLabel").grid(row=1, column=0, columnspan=2, sticky="w",
+                                             pady=(2, 6))
 
         sl = ttk.Frame(f)
-        sl.grid(row=2, column=0, sticky="ew")
+        sl.grid(row=2, column=0, columnspan=2, sticky="ew")
         row = 0
         for key, label, kind in CURVE_SLIDERS + COLOR_SLIDERS:
             if key == "saturation":
@@ -602,7 +595,7 @@ class CatVisionApp:
             row += 1
 
         bottom = ttk.Frame(f)
-        bottom.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        bottom.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self.graph_size = self.px_(150)
         self.graph = tk.Canvas(bottom, width=self.graph_size, height=self.graph_size, bg=PANEL,
                                highlightthickness=0)
@@ -1005,20 +998,6 @@ class CatVisionApp:
                 pts += [pad + size * i / 255, h - pad - size * ch[i] / 65535]
             pts += [pad + size, h - pad - size * ch[255] / 65535]
             c.create_line(*pts, fill=color, width=2, smooth=True)
-
-    def _draw_pattern(self) -> None:
-        c = self.pattern
-        c.delete("all")
-        p = self.px_
-        n = 10
-        cell = p(300) / n
-        for i in range(n):
-            v = 1 + i * 3          # very dark greys: 1..28 out of 255
-            c.create_rectangle(i * cell + p(2), p(4), (i + 1) * cell - p(2), p(40),
-                               fill=f"#{v:02x}{v:02x}{v:02x}", outline="")
-            v = 255 - (n - 1 - i) * 3  # very bright greys: 228..255
-            c.create_rectangle(i * cell + p(2), p(46), (i + 1) * cell - p(2), p(82),
-                               fill=f"#{v:02x}{v:02x}{v:02x}", outline="")
 
     # ================================================================ options
 
