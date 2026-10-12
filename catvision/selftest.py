@@ -144,6 +144,34 @@ def _warning_popup_check(root, app, report_path: str) -> dict:
     return out
 
 
+def _test_pattern_check(root, app, report_path: str) -> dict:
+    """Open the test pattern window, try full screen and save a picture."""
+    from .gui_testpattern import open_test_pattern
+    out: dict = {}
+    try:
+        tp = open_test_pattern(app)
+        root.update()
+        out["size"] = [tp.win.winfo_width(), tp.win.winfo_height()]
+        out["items_drawn"] = len(tp.canvas.find_all())
+        try:
+            from PIL import ImageGrab
+            x, y = tp.win.winfo_rootx(), tp.win.winfo_rooty()
+            path = report_path.rsplit(".", 1)[0] + ".pattern.png"
+            ImageGrab.grab(bbox=(x, y, x + tp.win.winfo_width(), y + tp.win.winfo_height()),
+                           all_screens=True).save(path)
+            out["screenshot"] = path
+        except Exception as exc:
+            out["screenshot"] = f"failed: {exc}"
+        tp.toggle_full()
+        root.update()
+        out["full_screen"] = bool(tp.win.attributes("-fullscreen"))
+        out["full_size"] = [tp.win.winfo_width(), tp.win.winfo_height()]
+        tp.close()
+    except Exception as exc:
+        out["error"] = repr(exc)
+    return out
+
+
 def run(report_path: str) -> int:
     report: dict = {"platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
                     "checks": {}, "errors": []}
@@ -237,6 +265,7 @@ def run(report_path: str) -> int:
 
         def popup_check_then_quit():  # after the steps, so their toasts are gone
             info["warning_popup"] = _warning_popup_check(root, app, report_path)
+            info["test_pattern"] = _test_pattern_check(root, app, report_path)
             app.quit()
         root.after(300 + 150 * len(steps) + 1800, popup_check_then_quit)
         root.mainloop()
