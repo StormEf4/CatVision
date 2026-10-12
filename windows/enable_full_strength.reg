@@ -1,0 +1,8 @@
+Windows Registry Editor Version 5.00
+
+; Lets CatVision use its full shadow-boost strength.
+; By default Windows refuses strong brightness curves. This raises that limit.
+; It is the same tweak used by display calibration tools. Sign out or restart after.
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM]
+"GdiIcmGammaRange"=dword:00000100

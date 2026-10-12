@@ -1,0 +1,17 @@
+[project]
+name = "catvision"
+version = "1.0.0"
+description = "Make dark games easier to see using only display-level Windows accessibility APIs."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.gui-scripts]
+catvision = "catvision.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["catvision"]

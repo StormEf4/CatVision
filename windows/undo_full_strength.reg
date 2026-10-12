@@ -1,0 +1,7 @@
+Windows Registry Editor Version 5.00
+
+; Undo enable_full_strength.reg (back to the Windows default limit).
+; Sign out or restart after.
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM]
+"GdiIcmGammaRange"=-
