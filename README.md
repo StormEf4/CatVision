@@ -146,6 +146,7 @@ all** removes them again. Everything is also in the tray menu.
 | Night Vision (Blue) | Night vision in cool blue, with the same anti-glare protection |
 | Night Vision (Red) | Night vision in red, with the same anti-glare protection |
 | Night Vision (Grey) | Black-and-white like an IR camera: crisp, deep blacks, the most dark detail of any night vision |
+| Thermal | Thermal-camera look: dark areas purple, bright areas orange to white (colors by brightness, not real heat) |
 | Horror / Flashlight | Lifts darkness, stops flashlights and lamps from dazzling |
 | Fog & Haze Cutter | Murky, foggy, smoky scenes |
 | Mixed Light | Dark shadows next to bright skies or explosions |
@@ -214,6 +215,11 @@ about 5x the game on its own.
   fine detail best in neutral and green tones. Blue and Red are tuned to stay
   as readable as possible (pure blue or red would be too dark), and still
   show about 4x the game's own dark detail.
+- **Thermal** looks like a thermal camera, but it colors the picture by
+  *brightness*, not heat: dark things look "cold", bright things look "hot".
+  Real heat vision would mean reading the game's data, which is exactly what
+  anti-cheat systems watch for and what CatVision never does, so it stays a
+  display-only effect like everything else.
 - With only some displays ticked, night vision stays on those displays, but
   as a colored tint rather than full monochrome (Windows limit).
 
@@ -241,23 +247,28 @@ into any preset, and can be cycled with the *Next color filter* hotkey.
 ## Get the full strength
 
 By default Windows only lets apps change brightness a limited amount, which
-weakens strong looks like night vision. When that happens, CatVision shows a
-yellow bar: *"Windows is holding back the strength of this look"* with an
-**Unlock full strength...** button.
+weakens strong looks like night vision. When that happens, a notice at the
+bottom of the window says *"Windows is holding back the strength of this
+look"* and has an **Unlock full strength...** button.
 
 1. Click **Unlock full strength...** and confirm. Windows asks for permission.
 2. Restart your PC.
 
 This changes one documented Windows setting (`GdiIcmGammaRange`), the same
 one display-calibration software uses. **Settings → Full strength** shows
-whether it's unlocked and has an **Undo** button. If the bar still appears
-after the restart, your graphics driver has its own limit, and CatVision is
-already as strong as your PC allows.
+whether it's unlocked and has an **Undo** button. If the notice still appears
+after the restart, it tells you your graphics driver has its own limit, and
+CatVision is already as strong as your PC allows.
 
 (Running from source instead? `windows/enable_full_strength.reg` and
 `windows/undo_full_strength.reg` do the same thing.)
 
 ## Tips and troubleshooting
+
+When something needs your attention, CatVision lists it at the **bottom of the
+window**: what's wrong, what to do, and a button that does it (for example
+**Use it anyway** when a color effect can only cover every display). The line
+under the notices just says what CatVision is doing.
 
 - **Game in exclusive fullscreen and the color filter doesn't show?**
   Brightness works in every mode, but color filters need **Borderless** or

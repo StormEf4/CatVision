@@ -15,6 +15,7 @@ from .curves import LIMITS, Settings
 from .engine import Engine, emergency_reset
 from .gui_filters import FiltersTab
 from .gui_hotkeys import HotkeysTab
+from .gui_notices import Notice, NoticeArea
 from .hotkeys import HotkeyListener, action_label, bindings_from_config
 from .presets import all_presets, builtin_by_name
 from .theme import (ACCENT, BG, FG, GRID, MUTED, OFF, ON, PANEL, TEXT_SIZES, WARN, Fonts,
@@ -216,7 +217,9 @@ class CatVisionApp:
         self.status = tk.Label(root, text="", anchor="w", justify="left", bg=PANEL, fg=FG,
                                padx=10, pady=5, font=self.fonts.small, wraplength=self.px_(380))
         self.status.pack(fill="x", side="bottom")
-        self._build_strength_banner(root)
+        # All problems are listed here, above the status line, with the fix.
+        self.notices = NoticeArea(root, self.fonts, self.px_)
+        self.notices.frame.pack(fill="x", side="bottom", after=self.status)
         self.status.bind("<Configure>",
                          lambda e: self.status.configure(wraplength=max(100, e.width - 20)))
 
@@ -329,7 +332,6 @@ class CatVisionApp:
     def _on_home_resize(self, e) -> None:
         width = max(100, e.width - 24)
         self.preset_desc.configure(wraplength=width)
-        self.display_note.configure(wraplength=width)
 
     def _dismiss_welcome(self) -> None:
         self.welcome.grid_remove()
@@ -360,27 +362,10 @@ class CatVisionApp:
             Tooltip(chip, m.label)
         ttk.Label(box, text="CatVision only changes the ticked displays.",
                   style="Muted.TLabel").pack(anchor="w")
-        self.display_note = ttk.Label(box, text="", style="Warn.TLabel", justify="left",
-                                      wraplength=wrap)
-        self.color_all_var = tk.BooleanVar(value=self.cfg.options.color_everywhere)
-        self.color_all_check = ttk.Checkbutton(
-            box, text="Use it anyway (changes the colors of every display)",
-            variable=self.color_all_var, command=self._on_color_all)
         if len(monitors) > 1:
             box.grid(row=row, column=0, sticky="ew")
 
     # ------------------------------------------------------- full strength
-
-    def _build_strength_banner(self, root: tk.Tk) -> None:
-        """Shown when Windows is weakening the current look, with the fix."""
-        self.strength_banner = tk.Frame(root, bg="#3a2f12", padx=10, pady=6)
-        self.strength_text = tk.Label(self.strength_banner, text="", bg="#3a2f12", fg=WARN,
-                                      justify="left", anchor="w", font=self.fonts.small,
-                                      wraplength=self.px_(300))
-        self.strength_text.pack(side="left", fill="x", expand=True)
-        self.strength_btn = ttk.Button(self.strength_banner, text="Unlock full strength...",
-                                       style="Accent.TButton",
-                                       command=self._unlock_full_strength)
 
     def _strength_state(self) -> str:
         """'locked', 'restart', 'unlocked' or 'unknown' (not Windows)."""
@@ -407,22 +392,6 @@ class CatVisionApp:
         self.unlock_btn.state(["!disabled"] if state == "locked" else ["disabled"])
         self.relock_btn.state(["!disabled"] if state in ("restart", "unlocked") else ["disabled"])
 
-        st = self.engine.status
-        if not (self.engine.enabled and st.gamma_limited) or state == "unknown":
-            self.strength_banner.pack_forget()
-            return
-        if state == "locked":
-            text = "Windows is holding back the strength of this look."
-            self.strength_btn.pack(side="right", padx=(8, 0))
-        elif state == "restart":
-            text = "Almost there: restart your PC to unlock full strength."
-            self.strength_btn.pack_forget()
-        else:
-            text = ("Your graphics driver limits brightness changes, so this is as strong "
-                    "as your PC allows.")
-            self.strength_btn.pack_forget()
-        self.strength_text.configure(text=text)
-        self.strength_banner.pack(fill="x", side="bottom", after=self.status)
 
     def _unlock_full_strength(self) -> None:
         if not messagebox.askyesno(
@@ -451,7 +420,7 @@ class CatVisionApp:
             self.root.after(1500, self._after_strength_change)
 
     def _after_strength_change(self) -> None:
-        self._update_strength_ui()
+        self._render_status()
         state = self._strength_state()
         if state == "restart":
             messagebox.showinfo("CatVision", "Done. Restart your PC to finish unlocking "
@@ -489,40 +458,91 @@ class CatVisionApp:
                 var.set(not var.get())
             self._on_display_chip(target)
 
-    def _on_color_all(self) -> None:
-        self.cfg.options.color_everywhere = self.color_all_var.get()
-        self.engine.color_all_displays = self.cfg.options.color_everywhere
+    def _set_color_everywhere(self, value: bool) -> None:
+        """Allow (or stop) screen-wide color changes while only some displays
+        are ticked."""
+        self.cfg.options.color_everywhere = value
+        self.engine.color_all_displays = value
         self.engine.apply()
         self._render_status()
         self._schedule_save()
 
-    def _update_display_note(self) -> None:
-        """Explain what happens to color filters when only some displays are ticked."""
-        partial = bool(self.display_vars) and not self.engine.all_displays_selected()
+    def _screen_wide_color_text(self) -> str:
+        """Name the part of the current look Windows can only apply screen-wide."""
         s = self._read_settings()
-        _tint, matrix = curves.split_for_displays(
-            s, self.engine.custom_filters, self.engine.custom_tints)
-        if partial and not curves.is_identity_matrix(matrix):
-            parts = []
-            if (s.color_filter != "none" and s.filter_strength > 0
-                    and curves.filter_tint(s.color_filter, self.engine.custom_tints) is None):
-                parts.append(f"the '{self.filter_combo.get().split('  (')[0]}' filter")
-            if s.saturation != 1.0:
-                parts.append(f"saturation ({s.saturation * 100:.0f}%)")
-            what = " and ".join(parts) or "this color change"
-            if self.engine.color_all_displays:
-                text = (f"Heads up: {what} is changing the colors of every display, "
-                        "including unticked ones (Windows can only do it screen-wide).")
-            else:
-                text = (f"{what[0].upper() + what[1:]} can only be applied to every display "
-                        "at once (a Windows limit), so it's left off to keep your unticked "
-                        "displays untouched. Brightness and tints still work on the ticked ones.")
-            self.display_note.configure(text=text)
-            self.display_note.pack(anchor="w", pady=(4, 0))
-            self.color_all_check.pack(anchor="w")
-        else:
-            self.display_note.pack_forget()
-            self.color_all_check.pack_forget()
+        parts = []
+        if (s.color_filter != "none" and s.filter_strength > 0
+                and curves.filter_tint(s.color_filter, self.engine.custom_tints) is None):
+            parts.append(f"the '{self.filter_combo.get().split('  (')[0]}' filter")
+        if s.saturation != 1.0:
+            parts.append(f"saturation ({s.saturation * 100:.0f}%)")
+        return " and ".join(parts) or "this color change"
+
+    # ------------------------------------------------------------- notices
+
+    def _collect_notices(self) -> list[Notice]:
+        notices: list[Notice] = []
+        on = self.engine.enabled
+        st = self.engine.status
+        if self.hotkeys.failed:
+            names = ", ".join(action_label(a) for a in self.hotkeys.failed)
+            notices.append(Notice(
+                "hotkeys", "warn", f"Another program already uses some of your hotkeys: {names}.",
+                "Pick different keys for them in the Hotkeys tab.",
+                [("Open Hotkeys", lambda: self.notebook.select(self.hotkeys_tab.frame))]))
+        if not on:
+            return notices
+        if not st.gamma_ok:
+            notices.append(Notice(
+                "gamma_refused", "warn", "Windows refused the brightness change.",
+                "Click Reset display, then turn CatVision on again. If it keeps happening, "
+                "turn off HDR in Windows Settings > System > Display.",
+                [("Reset display", self._reset_display)]))
+        elif st.gamma_limited:
+            state = self._strength_state()
+            if state == "locked":
+                notices.append(Notice(
+                    "strength", "warn", "Windows is holding back the strength of this look.",
+                    "Click Unlock: Windows asks for permission, then restart your PC.",
+                    [("Unlock full strength...", self._unlock_full_strength)]))
+            elif state == "restart":
+                notices.append(Notice(
+                    "strength", "info", "Full strength is unlocked.",
+                    "Restart your PC to finish. Until then Windows keeps the old limit."))
+            elif state == "unlocked":
+                notices.append(Notice(
+                    "strength", "info", "This look is as strong as your PC allows.",
+                    "Your graphics driver has its own limit on brightness changes. Nothing "
+                    "needs fixing; lower Exposure or Shadow boost if parts look flat."))
+        what = self._screen_wide_color_text()
+        if st.color_skipped:
+            notices.append(Notice(
+                "color_skipped", "warn",
+                f"{what[0].upper() + what[1:]} can't be limited to the ticked displays.",
+                "Windows can only apply it to every display at once, so it's off for now. "
+                "Click Use it anyway, or tick all your displays.",
+                [("Use it anyway", lambda: self._set_color_everywhere(True)),
+                 ("Tick all displays", lambda: self._set_displays_from_tray("display:all"))]))
+        elif st.color_all_displays:
+            notices.append(Notice(
+                "color_everywhere", "info",
+                f"{what[0].upper() + what[1:]} is also changing your unticked displays.",
+                "Windows can only apply it to every display at once. Click Keep it off to "
+                "leave unticked displays untouched.",
+                [("Keep it off", lambda: self._set_color_everywhere(False))]))
+        if st.color_used and not st.color_ok and self.engine.color.available:
+            notices.append(Notice(
+                "color_failed", "warn", "The color filter couldn't be applied.",
+                "Turn off Windows' own color filters (Windows Settings > Accessibility > "
+                "Color filters), then click Try again.",
+                [("Try again", self._apply_now)]))
+        if st.messages:
+            notices.append(Notice("preview", "info", "Preview mode",
+                                  " ".join(dict.fromkeys(st.messages))))
+        return notices
+
+    def refresh_notices(self) -> None:
+        self.notices.show(self._collect_notices())
 
     def identify_displays(self) -> None:
         """Show each display's name in big letters on that display."""
@@ -885,22 +905,19 @@ class CatVisionApp:
             text="ON  -  click to turn off" if on else "OFF  -  click to turn on",
             bg=ON if on else OFF, activebackground=ON if on else OFF, fg=FG)
         self.pill.configure(text="ON" if on else "OFF", bg=ON if on else OFF)
-        st = self.engine.status
-        warn = on and (not st.gamma_ok or st.gamma_limited or (st.color_used and not st.color_ok)
-                       or st.color_skipped or bool(st.messages))
-        text = st.summary()
-        if on and not self.engine.all_displays_selected():
+        # The status line only says what's happening; any problem (with its
+        # fix) goes to the notice area just above it, never in two places.
+        if not on:
+            text = "Off - your display is back to normal."
+        elif self.engine.all_displays_selected():
+            text = f"On - {self.cfg.active_preset}."
+        else:
             names = ", ".join(m.short for m in self.engine.monitors()
                               if m.id in self.engine.displays)
-            text = text.replace("On.", f"On for {names}.", 1)
-        if (on and st.gamma_limited and st.gamma_ok and not st.messages
-                and self._strength_state() != "unknown"):
-            # The banner above explains it (with the fix), so keep this short.
-            text = text.replace("On, but Windows is holding back the strength of this look.", "On.")
-            warn = st.color_skipped or (st.color_used and not st.color_ok)
-        self.set_status(text, warn)
+            text = f"On for {names} - {self.cfg.active_preset}."
+        self.set_status(text)
         self._update_strength_ui()
-        self._update_display_note()
+        self.refresh_notices()
         self._update_title()
         self._sync_tray()
 
@@ -1023,9 +1040,7 @@ class CatVisionApp:
         hint = "   ".join(parts)
         self.home_hint.configure(text=hint + "\nChange keys in the Hotkeys tab." if hint else
                                  "No hotkeys set yet. Choose your own in the Hotkeys tab.")
-        if self.hotkeys.failed:
-            self.set_status("Some hotkeys are taken by another program: "
-                            + ", ".join(action_label(a) for a in self.hotkeys.failed), True)
+        self.refresh_notices()
 
     def pause_hotkeys(self) -> None:
         """Release hotkeys while the user records a new one."""

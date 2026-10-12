@@ -67,6 +67,14 @@ BUILTIN_PRESETS: list[Preset] = [
                  white_cap=0.80, color_filter="night_vision_grey"),
     ),
     Preset(
+        "Thermal",
+        "Thermal-camera look: dark areas purple, bright areas orange to white. It "
+        "colors by brightness, not real heat (that would mean reading game data, "
+        "which CatVision never does).",
+        Settings(exposure=70, anti_glare=70, contrast=1.1, black_floor=0.0, white_cap=0.80,
+                 color_filter="thermal"),
+    ),
+    Preset(
         "Horror / Flashlight",
         "Lifts darkness but caps the brightest whites so flashlights and "
         "lamps don't dazzle you.",

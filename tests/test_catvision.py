@@ -600,7 +600,7 @@ class AntiGlareTests(unittest.TestCase):
         """A mid-tone player (level 70) in front of a lit window (level 180)
         must not merge into it, and the brightest output must stay capped."""
         for name in ("Night Vision", "Night Vision (Blue)", "Night Vision (Red)",
-                     "Night Vision (Grey)"):
+                     "Night Vision (Grey)", "Thermal"):
             s = [p for p in BUILTIN_PRESETS if p.name == name][0].settings
             tint, _m = curves.plan_color(s)
             ramp = curves.build_ramp(s, tint)
@@ -657,3 +657,27 @@ class GreyNightVisionTests(unittest.TestCase):
         # i.e. more visible detail in the dark range games live in (levels 6-32).
         spread = lambda ch: luma(ch, 32) - luma(ch, 6)
         self.assertGreater(spread((r, g, b)), spread(gr))
+
+
+class ThermalTests(unittest.TestCase):
+    def test_gradient_stops_only_rise(self):
+        for key, grad in curves.GRADIENTS.items():
+            for (p0, c0), (p1, c1) in zip(grad.stops, grad.stops[1:]):
+                self.assertLess(p0, p1, key)
+                for j in range(3):
+                    self.assertLessEqual(c0[j], c1[j], f"{key}: channel {j} must not fall")
+
+    def test_thermal_cold_purple_hot_yellow(self):
+        st = [p for p in BUILTIN_PRESETS if p.name == "Thermal"][0].settings
+        tint, m = curves.plan_color(st)
+        self.assertIsInstance(tint, curves.Gradient)
+        self.assertFalse(curves.is_identity_matrix(m))        # grey first, then palette
+        r, g, b = curves.build_ramp(st, tint)
+        self.assertGreater(b[3], g[3])                        # cold: purple (blue > green)
+        self.assertGreater(r[3], g[3])
+        self.assertGreater(g[250], b[250])                    # hot: yellow-white
+        self.assertGreater(r[250], b[250])
+
+    def test_gradient_strength_blends_to_grey(self):
+        grad = curves.GRADIENTS["thermal"]
+        self.assertEqual(curves.Gradient(grad.stops, 0.0).color(0.4), (0.4, 0.4, 0.4))

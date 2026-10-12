@@ -17,6 +17,7 @@ Two kinds of output are produced from a :class:`Settings` object:
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from dataclasses import asdict, dataclass, fields
 
 RAMP_SIZE = 256
@@ -48,6 +49,7 @@ COLOR_FILTERS: dict[str, str] = {
     "night_vision_blue": "Night vision (blue)",
     "night_vision_red": "Night vision (red)",
     "night_vision_grey": "Night vision (grey)",
+    "thermal": "Thermal style (colors by brightness)",
     "amber": "Amber (warm mono, easy on eyes)",
     "ice": "Ice (cool mono)",
     "deuteranopia": "Red-green assist (deuteranopia)",
@@ -203,21 +205,52 @@ TintCurve = tuple[tuple[float, float, float], tuple[float, float, float], float]
 NO_TINT: TintCurve = ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0), 1.0)
 
 
-def build_ramp(s: Settings, tint: TintCurve | None = None) -> list[list[int]]:
+@dataclass(frozen=True)
+class Gradient:
+    """A gradient map: brightness -> color, through a list of color stops.
+
+    Used for false-color palettes such as the thermal look.  Every channel
+    must rise (or stay level) from stop to stop, because the graphics card's
+    brightness table can only go up.  ``strength`` blends with plain grey.
+    """
+
+    stops: tuple[tuple[float, tuple[float, float, float]], ...]
+    strength: float = 1.0
+
+    def color(self, y: float) -> tuple[float, float, float]:
+        y = _clamp01(y)
+        positions = [p for p, _c in self.stops]
+        i = min(max(bisect_right(positions, y) - 1, 0), len(self.stops) - 2)
+        (p0, c0), (p1, c1) = self.stops[i], self.stops[i + 1]
+        t = 0.0 if p1 <= p0 else _clamp01((y - p0) / (p1 - p0))
+        k = self.strength
+        return tuple((1 - k) * y + k * (c0[j] + (c1[j] - c0[j]) * t) for j in range(3))
+
+
+Tint = TintCurve | Gradient
+
+
+def build_ramp(s: Settings, tint: Tint | None = None) -> list[list[int]]:
     """Return ``[red, green, blue]`` 256-entry tables of 16-bit values.
 
-    ``tint`` colors the result by brightness (tint-style color filters).
+    ``tint`` colors the result by brightness (tint-style color filters and
+    gradient maps).
     """
     s = s.clamped()
-    lo, hi, power = tint or NO_TINT
+    gradient = tint if isinstance(tint, Gradient) else None
+    lo, hi, power = NO_TINT if gradient else (tint or NO_TINT)
     tone = [tone_curve(i / (RAMP_SIZE - 1), s) for i in range(RAMP_SIZE)]
+    colors = [gradient.color(y) for y in tone] if gradient else None
     ramp = []
     for c, gain in enumerate((s.red, s.green, s.blue)):
         channel = []
         prev = 0
-        for y in tone:
-            g = gain * (lo[c] + (hi[c] - lo[c]) * y ** power)
-            v = int(round(_clamp01(y * g) * s.white_cap * RAMP_MAX))
+        for i, y in enumerate(tone):
+            if colors:
+                out = colors[i][c] * gain
+            else:
+                out = y * gain * (lo[c] + (hi[c] - lo[c]) * y ** power)
+            v = int(round(_clamp01(out) * s.white_cap * RAMP_MAX))
             v = max(prev, v)  # graphics drivers expect non-decreasing ramps
             channel.append(v)
             prev = v
@@ -318,6 +351,25 @@ TINT_CURVES: dict[str, TintCurve] = {
     "ice": ((0.55, 0.85, 1.0), (0.55, 0.85, 1.0), 1.0),
 }
 
+# False-color palettes (gradient maps), keyed like COLOR_FILTERS.
+GRADIENTS: dict[str, Gradient] = {
+    # Thermal-camera style: dark = cold (black, purple), bright = hot (red,
+    # orange, yellow, white).  It colors by brightness, not real heat:
+    # CatVision never reads anything from the game.  (Blue can't fall again
+    # after purple, so the hot end keeps a little blue; tuned on a dark
+    # in-game screenshot.)
+    # The hot end keeps rising until white so a player in front of a bright
+    # light never merges into it.
+    "thermal": Gradient((
+        (0.00, (0.00, 0.00, 0.00)),
+        (0.15, (0.26, 0.00, 0.33)),
+        (0.35, (0.68, 0.04, 0.35)),
+        (0.55, (0.92, 0.32, 0.35)),
+        (0.80, (1.00, 0.72, 0.40)),
+        (1.00, (1.00, 1.00, 0.85)),
+    )),
+}
+
 # Single-color approximations of the tint filters, used for color previews
 # and as the starting point when copying a filter.
 MONO_TINTS: dict[str, tuple[float, float, float]] = {
@@ -326,6 +378,7 @@ MONO_TINTS: dict[str, tuple[float, float, float]] = {
     "night_vision_blue": (0.25, 0.60, 1.00),
     "night_vision_red": (1.00, 0.35, 0.25),
     "night_vision_grey": (1.00, 1.00, 1.00),
+    "thermal": (1.00, 0.55, 0.15),
     "amber": (1.0, 0.72, 0.25),
     "ice": (0.55, 0.85, 1.0),
 }
@@ -384,7 +437,7 @@ def color_matrix(s: Settings, custom: dict[str, Matrix] | None = None) -> Matrix
     return m
 
 
-def filter_tint(key: str, custom_tints: dict[str, tuple] | None = None) -> TintCurve | None:
+def filter_tint(key: str, custom_tints: dict[str, tuple] | None = None) -> Tint | None:
     """The tint curve of a tint-style filter, or None for other filters.
 
     Tint filters are drawn by the brightness table, which also works per
@@ -396,12 +449,12 @@ def filter_tint(key: str, custom_tints: dict[str, tuple] | None = None) -> TintC
         if tint is None or all(abs(t - 1.0) < 1e-6 for t in tint):
             return None
         return (tuple(tint), tuple(tint), 1.0)
-    return TINT_CURVES.get(key)
+    return GRADIENTS.get(key) or TINT_CURVES.get(key)
 
 
 def plan_color(s: Settings, custom: dict[str, Matrix] | None = None,
                custom_tints: dict[str, tuple] | None = None,
-               all_displays: bool = True) -> tuple[TintCurve | None, Matrix]:
+               all_displays: bool = True) -> tuple[Tint | None, Matrix]:
     """Decide how to show the settings' colors.
 
     Returns ``(tint_curve, matrix)``.  Tint filters are drawn as a tint curve
@@ -415,8 +468,12 @@ def plan_color(s: Settings, custom: dict[str, Matrix] | None = None,
     if tint is None or s.filter_strength <= 0:
         return None, color_matrix(s, custom)
     k = s.filter_strength
-    lo, hi, power = tint
-    curve = (tuple(1.0 + (t - 1.0) * k for t in lo), tuple(1.0 + (t - 1.0) * k for t in hi), power)
+    if isinstance(tint, Gradient):
+        curve = Gradient(tint.stops, k)
+    else:
+        lo, hi, power = tint
+        curve = (tuple(1.0 + (t - 1.0) * k for t in lo), tuple(1.0 + (t - 1.0) * k for t in hi),
+                 power)
     m = saturation_matrix(s.saturation)
     if all_displays:
         m = mat_mul(mat_lerp(IDENTITY3, filter_matrix("grayscale"), k), m)
