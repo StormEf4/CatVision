@@ -238,6 +238,25 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(color.last)                   # no screen-wide filter needed
         self.assertFalse(status.color_all_displays)
 
+    def test_unticked_display_untouched_by_every_preset_and_filter(self):
+        """Regression: saturation / color-mixing filters must not leak onto
+        displays the user left unticked (the screen-wide color engine would
+        change every display)."""
+        from catvision.presets import BUILTIN_PRESETS as presets
+        for p in presets:
+            g = FakeGamma()
+            color = FakeColor()
+            e = Engine(g, color, self.dir)
+            e.displays = ["\\\\.\\DISPLAY2"]
+            e.settings = p.settings
+            status = e.set_enabled(True)
+            self.assertTrue(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY1"]), p.name)
+            self.assertIsNone(color.last, f"{p.name} changed every display's colors")
+            if p.settings.saturation != 1.0 or p.settings.color_filter in (
+                    "grayscale", "deuteranopia", "protanopia", "tritanopia"):
+                self.assertTrue(status.color_skipped, p.name)
+            e.shutdown()
+
     def test_mixing_filter_with_chosen_displays(self):
         g = FakeGamma()
         color = FakeColor()
@@ -245,13 +264,13 @@ class EngineTests(unittest.TestCase):
         e.displays = ["\\\\.\\DISPLAY1"]
         e.settings = Settings(color_filter="deuteranopia")
         status = e.set_enabled(True)
-        self.assertTrue(status.color_all_displays)      # allowed by default, but flagged
-        self.assertIsNotNone(color.last)
-        e.color_all_displays = False
-        status = e.apply()
-        self.assertTrue(status.color_skipped)
+        self.assertTrue(status.color_skipped)           # off by default: others untouched
         self.assertIsNone(color.last)
-        self.assertIn("every display", status.summary())
+        self.assertIn("other displays", status.summary())
+        e.color_all_displays = True                     # the user opted in
+        status = e.apply()
+        self.assertTrue(status.color_all_displays)
+        self.assertIsNotNone(color.last)
 
     def test_restore_now(self):
         g = FakeGamma()
@@ -512,3 +531,10 @@ class FirstRunTests(unittest.TestCase):
         self.assertEqual(c.current, builtin_by_name(c.active_preset).settings)
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(config.load(Path(d) / "missing.json").current, c.current)
+
+
+class ColorEverywhereOptionTests(unittest.TestCase):
+    def test_old_default_on_setting_is_not_carried_over(self):
+        o = config.Options.from_dict({"color_all_displays": True})
+        self.assertFalse(o.color_everywhere)
+        self.assertTrue(config.Options.from_dict({"color_everywhere": True}).color_everywhere)

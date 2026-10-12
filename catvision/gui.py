@@ -156,7 +156,7 @@ class CatVisionApp:
         self.engine.custom_filters = filters.matrices(cfg.custom_filters)
         self.engine.custom_tints = filters.tints(cfg.custom_filters)
         self.engine.displays = list(cfg.options.displays)
-        self.engine.color_all_displays = cfg.options.color_all_displays
+        self.engine.color_all_displays = cfg.options.color_everywhere
 
         self.hotkeys = HotkeyListener(self._actions.put)
         # Force quit runs on the tray thread and only needs to put the screen back.
@@ -343,9 +343,9 @@ class CatVisionApp:
                   style="Muted.TLabel").pack(anchor="w")
         self.display_note = ttk.Label(box, text="", style="Warn.TLabel", justify="left",
                                       wraplength=wrap)
-        self.color_all_var = tk.BooleanVar(value=self.cfg.options.color_all_displays)
+        self.color_all_var = tk.BooleanVar(value=self.cfg.options.color_everywhere)
         self.color_all_check = ttk.Checkbutton(
-            box, text="Use this color filter on all displays anyway",
+            box, text="Use it anyway (changes the colors of every display)",
             variable=self.color_all_var, command=self._on_color_all)
         if len(monitors) > 1:
             box.grid(row=row, column=0, sticky="ew")
@@ -381,8 +381,8 @@ class CatVisionApp:
             self._on_display_chip(target)
 
     def _on_color_all(self) -> None:
-        self.cfg.options.color_all_displays = self.color_all_var.get()
-        self.engine.color_all_displays = self.cfg.options.color_all_displays
+        self.cfg.options.color_everywhere = self.color_all_var.get()
+        self.engine.color_all_displays = self.cfg.options.color_everywhere
         self.engine.apply()
         self._render_status()
         self._schedule_save()
@@ -390,12 +390,25 @@ class CatVisionApp:
     def _update_display_note(self) -> None:
         """Explain what happens to color filters when only some displays are ticked."""
         partial = bool(self.display_vars) and not self.engine.all_displays_selected()
+        s = self._read_settings()
         _tint, matrix = curves.split_for_displays(
-            self._read_settings(), self.engine.custom_filters, self.engine.custom_tints)
+            s, self.engine.custom_filters, self.engine.custom_tints)
         if partial and not curves.is_identity_matrix(matrix):
-            self.display_note.configure(
-                text="This color filter mixes colors, which Windows can only do on every "
-                     "display at once. Brightness still only changes the ticked displays.")
+            parts = []
+            if (s.color_filter != "none" and s.filter_strength > 0
+                    and curves.filter_tint(s.color_filter, self.engine.custom_tints) is None):
+                parts.append(f"the '{self.filter_combo.get().split('  (')[0]}' filter")
+            if s.saturation != 1.0:
+                parts.append(f"saturation ({s.saturation * 100:.0f}%)")
+            what = " and ".join(parts) or "this color change"
+            if self.engine.color_all_displays:
+                text = (f"Heads up: {what} is changing the colors of every display, "
+                        "including unticked ones (Windows can only do it screen-wide).")
+            else:
+                text = (f"{what[0].upper() + what[1:]} can only be applied to every display "
+                        "at once (a Windows limit), so it's left off to keep your unticked "
+                        "displays untouched. Brightness and tints still work on the ticked ones.")
+            self.display_note.configure(text=text)
             self.display_note.pack(anchor="w", pady=(4, 0))
             self.color_all_check.pack(anchor="w")
         else:

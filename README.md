@@ -82,11 +82,11 @@ shows each display's name on that screen so you know which is which.
 - **Tint filters** (Night vision, Amber, Ice and your own *Monochrome tint*
   filters) also stay on the ticked displays. There they show as a colored
   tint rather than full monochrome.
-- **Color-mixing filters** (Grayscale, the color-blind assists, saturation and
-  your own *Channel mixer* filters) are a Windows limit: Windows can only
-  apply those to **every display at once**. CatVision tells you when that
-  happens, and you can choose to use the filter on all displays anyway or
-  leave it off.
+- **Unticked displays are never changed.** Saturation and color-mixing
+  filters (Grayscale, the color-blind assists and your own *Channel mixer*
+  filters) can only be applied by Windows to **every display at once**, so
+  while only some displays are ticked they're left off. A note tells you when
+  that happens. Tick *Use it anyway* if you want them on every display.
 
 ## The tray icon (by the clock)
 

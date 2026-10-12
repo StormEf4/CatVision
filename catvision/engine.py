@@ -40,7 +40,8 @@ class Status:
         if self.color_used and not self.color_ok:
             parts.append("Color filter could not be applied.")
         if self.color_skipped:
-            parts.append("The color filter is off because it can only cover every display.")
+            parts.append("Saturation / color-mixing filters are off so your other displays "
+                         "stay untouched.")
         parts.extend(self.messages)
         return " ".join(parts)
 
@@ -52,9 +53,10 @@ class Engine:
         self.settings = Settings()
         self.enabled = False
         self.displays: list[str] = []      # chosen display ids; empty = all displays
-        # When only some displays are chosen, filters that mix colors can only
-        # be shown on every display (Windows limit).  Allow that?
-        self.color_all_displays = True
+        # When only some displays are chosen, saturation and filters that mix
+        # colors can only be shown on every display (Windows limit), so they
+        # are left off unless the user explicitly allows that.
+        self.color_all_displays = False
         self.custom_filters: dict[str, curves.Matrix] = {}  # "custom:<name>" -> matrix
         self.custom_tints: dict[str, tuple] = {}            # "custom:<name>" -> tint
         self._lock = threading.RLock()  # force-quit restores from the tray thread

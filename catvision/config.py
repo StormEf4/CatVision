@@ -32,7 +32,11 @@ class Options:
     enable_on_start: bool = False
     close_to_tray: bool = True      # closing the window keeps CatVision in the tray
     displays: list = field(default_factory=list)  # chosen display ids; empty = all
-    color_all_displays: bool = True  # allow screen-wide color filters with chosen displays
+    # With only some displays ticked, still apply saturation / color-mixing
+    # filters even though Windows applies them to every display.  Off by
+    # default so unticked displays are never changed.  (Renamed from
+    # "color_all_displays", which defaulted to on, so old configs reset.)
+    color_everywhere: bool = False
     text_size: str = "Large"        # Normal / Large / Extra large
     seen_welcome: bool = False
 
