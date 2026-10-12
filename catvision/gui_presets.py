@@ -5,30 +5,7 @@ from __future__ import annotations
 
 from tkinter import simpledialog, ttk
 
-from .curves import COLOR_FILTERS, Settings
-from .filters import name_from_key
 from .theme import Tooltip, listbox
-
-
-def summary(s: Settings) -> str:
-    """One readable line describing a preset's main settings."""
-    parts = []
-    if s.shadow_boost:
-        parts.append(f"Shadow boost {s.shadow_boost:.0f}")
-    if s.exposure:
-        parts.append(f"Exposure {s.exposure:.0f}")
-    if s.exposure and s.anti_glare:
-        parts.append(f"Anti-glare {s.anti_glare:.0f}")
-    if s.gamma != 1.0:
-        parts.append(f"Gamma {s.gamma:.2f}")
-    if s.contrast != 1.0:
-        parts.append(f"Contrast {s.contrast * 100:.0f}%")
-    if s.saturation != 1.0:
-        parts.append(f"Saturation {s.saturation * 100:.0f}%")
-    if s.color_filter != "none":
-        label = COLOR_FILTERS.get(s.color_filter) or f"{name_from_key(s.color_filter)} (mine)"
-        parts.append(f"Filter: {label}")
-    return "  ·  ".join(parts) or "No changes (normal picture)"
 
 
 class PresetsTab:
@@ -38,6 +15,7 @@ class PresetsTab:
         self.frame = f = ttk.Frame(notebook, padding=10)
         self.names: list[str] = []
         f.columnconfigure(0, weight=1)
+        f.rowconfigure(3, weight=1)  # the footnote sits at the bottom
 
         top = ttk.Frame(f)
         top.grid(row=0, column=0, sticky="ew")
@@ -46,33 +24,31 @@ class PresetsTab:
         self.list.grid(row=0, column=0, sticky="nsew")
         self.list.bind("<<ListboxSelect>>", lambda e: self._on_select())
         self.list.bind("<Double-1>", lambda e: self._use())
-        btns = ttk.Frame(top)
+        btns = ttk.Frame(top)  # same order as the Filters tab
         btns.grid(row=0, column=1, sticky="n", padx=(8, 0))
+        new = ttk.Button(btns, text="New...", command=self._new)
+        new.pack(fill="x")
+        Tooltip(new, "Make a new preset from what's on screen now (your current settings).")
+        ttk.Button(btns, text="Copy...", command=self._copy).pack(fill="x", pady=3)
+        self.rename_btn = ttk.Button(btns, text="Rename...", command=self._rename)
+        self.rename_btn.pack(fill="x")
+        self.delete_btn = ttk.Button(btns, text="Delete", command=self._delete)
+        self.delete_btn.pack(fill="x", pady=3)
         self.use_btn = ttk.Button(btns, text="Use it", style="Accent.TButton", command=self._use)
         self.use_btn.pack(fill="x")
-        new = ttk.Button(btns, text="New...", command=self._new)
-        new.pack(fill="x", pady=(6, 3))
-        Tooltip(new, "Make a new preset from what's on screen now (your current settings).")
-        ttk.Button(btns, text="Copy...", command=self._copy).pack(fill="x")
-        self.rename_btn = ttk.Button(btns, text="Rename...", command=self._rename)
-        self.rename_btn.pack(fill="x", pady=3)
-        self.delete_btn = ttk.Button(btns, text="Delete", command=self._delete)
-        self.delete_btn.pack(fill="x")
 
         self.title = ttk.Label(f, text="", style="Head.TLabel")
         self.title.grid(row=1, column=0, sticky="w", pady=(10, 0))
         self.desc = ttk.Label(f, text="", style="Muted.TLabel", justify="left",
                               wraplength=app.px_(380))
         self.desc.grid(row=2, column=0, sticky="ew")
-        self.values = ttk.Label(f, text="", justify="left", wraplength=app.px_(380))
-        self.values.grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        self.hint = ttk.Label(f, text="", style="Muted.TLabel", justify="left",
+        self.hint = ttk.Label(f, text="", style="Footnote.TLabel", justify="left",
                               wraplength=app.px_(380))
-        self.hint.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self.hint.grid(row=3, column=0, sticky="sew", pady=(8, 0))
         f.bind("<Configure>", self._on_resize)
 
     def _on_resize(self, e) -> None:
-        for label in (self.desc, self.values, self.hint):
+        for label in (self.desc, self.hint):
             label.configure(wraplength=max(100, e.width - 24))
 
     # ----------------------------------------------------------------- list
@@ -101,20 +77,19 @@ class PresetsTab:
     def _on_select(self) -> None:
         row = self.app.preset_row(self._selected()) if self._selected() else None
         if row is None:
-            for w in (self.title, self.desc, self.values, self.hint):
+            for w in (self.title, self.desc, self.hint):
                 w.configure(text="")
             return
-        kind = "Built-in preset" if row.builtin else "Your preset"
+        kind = "Built-in preset*" if row.builtin else "Your preset*"
         if row.builtin and row.changed:
             kind += " (you've saved changes to it)"
         self.title.configure(text=row.name)
         self.desc.configure(text=f"{kind}. {row.description}" if row.builtin else kind + ".")
-        self.values.configure(text=summary(row.settings))
         if row.builtin:
-            self.hint.configure(text="Built-in presets can't be renamed or deleted. Use Copy to "
-                                     "make your own version, or adjust it in Tune and Save.")
+            self.hint.configure(text="* Built-in presets can't be renamed or deleted. Use Copy "
+                                     "to make your own version, or adjust it in Tune and Save.")
         else:
-            self.hint.configure(text="Adjust it in the Tune tab and click Save to change it.")
+            self.hint.configure(text="* Adjust it in the Tune tab and click Save to change it.")
         self.rename_btn.state(["disabled"] if row.builtin else ["!disabled"])
         if row.builtin:
             self.delete_btn.configure(text="Restore default")

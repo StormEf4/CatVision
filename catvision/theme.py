@@ -38,6 +38,7 @@ class Fonts:
         self.bold = self.normal.copy()
         self.big = self.normal.copy()
         self.small = self.normal.copy()
+        self.tiny = self.normal.copy()
         self.resize(size_name)
 
     def resize(self, size_name: str) -> None:
@@ -50,6 +51,7 @@ class Fonts:
         self.bold.configure(size=base, weight="bold")
         self.big.configure(size=int(base * 1.4), weight="bold")
         self.small.configure(size=max(8, base - 2))
+        self.tiny.configure(size=max(7, base - 3))
         self.base = base
 
 
@@ -66,6 +68,7 @@ def setup_style(root: tk.Tk, fonts: Fonts) -> None:
     style.configure("TLabelframe.Label", background=BG, foreground=ACCENT, font=fonts.bold)
     style.configure("TLabel", background=BG, foreground=FG)
     style.configure("Muted.TLabel", background=BG, foreground=MUTED, font=fonts.small)
+    style.configure("Footnote.TLabel", background=BG, foreground=MUTED, font=fonts.tiny)
     style.configure("Head.TLabel", background=BG, foreground=FG, font=fonts.bold)
     style.configure("TCheckbutton", background=BG, foreground=FG)
     style.map("TCheckbutton", background=[("active", BG)])

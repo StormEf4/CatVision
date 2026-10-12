@@ -46,7 +46,7 @@ class FiltersTab:
         self.rename_btn.pack(fill="x")
         self.delete_btn = ttk.Button(btns, text="Delete", command=self._delete)
         self.delete_btn.pack(fill="x", pady=3)
-        ttk.Button(btns, text="Use it", command=self._use).pack(fill="x")
+        ttk.Button(btns, text="Use it", style="Accent.TButton", command=self._use).pack(fill="x")
 
         self.info = ttk.Label(f, text="", style="Muted.TLabel", justify="left",
                               wraplength=app.px_(380))

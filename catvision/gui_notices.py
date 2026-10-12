@@ -110,10 +110,13 @@ class WarningButton:
         self.before = before
         self.icon = tk.Label(parent, text="⚠", bg=parent.cget("bg"), fg=ACCENT,
                              font=fonts.big, cursor="hand2", padx=6)
-        self.icon.bind("<Button-1>", lambda e: self.toggle())
+        # On release, so the icon's tooltip (hidden on press) can't sit on top.
+        self.icon.bind("<ButtonRelease-1>", lambda e: self.toggle())
         self.notices: list[Notice] = []
         self.popup: tk.Toplevel | None = None
         self.area: NoticeArea | None = None
+        self._watch_job = None
+        self._away = 0
         root.bind("<Configure>", self._on_root_change, add="+")
         root.bind("<Unmap>", self._on_root_unmap, add="+")
 
@@ -145,9 +148,12 @@ class WarningButton:
     def open(self) -> None:
         if self.popup is not None:
             return
+        # Not transient(): on Windows a borderless transient window ends up
+        # hidden behind the main window.  Topmost keeps it in front instead,
+        # and _watch closes it when the user switches to another app.
         self.popup = tk.Toplevel(self.root)
+        self.popup.withdraw()
         self.popup.overrideredirect(True)
-        self.popup.transient(self.root)
         self.popup.configure(bg=ACCENT)           # 1px amber border
         inner = tk.Frame(self.popup, bg=PANEL)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
@@ -155,12 +161,36 @@ class WarningButton:
         self.area.frame.pack(fill="x")
         self.area.show(self.notices)
         self._place()
+        self.popup.deiconify()
+        self.popup.attributes("-topmost", True)
+        self.popup.lift()
+        self._away = 0
+        self._watch_job = self.root.after(400, self._watch)
 
     def close(self) -> None:
+        if self._watch_job is not None:
+            self.root.after_cancel(self._watch_job)
+            self._watch_job = None
         if self.popup is not None:
             self.popup.destroy()
         self.popup = None
         self.area = None
+
+    def _watch(self) -> None:
+        """Close the drop-down once CatVision is no longer the active app, so
+        it never floats over a game or another window."""
+        self._watch_job = None
+        if self.popup is None:
+            return
+        try:
+            active = self.root.focus_displayof() is not None
+        except (tk.TclError, KeyError):
+            active = True
+        self._away = 0 if active else self._away + 1
+        if self._away >= 2:
+            self.close()
+            return
+        self._watch_job = self.root.after(400, self._watch)
 
     def _width(self) -> int:
         return max(self.px(300), min(self.root.winfo_width() - self.px(24), self.px(520)))

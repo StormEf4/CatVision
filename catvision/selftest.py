@@ -74,12 +74,15 @@ def _real_click(widget) -> None:
     u.mouse_event(0x0004, 0, 0, 0, 0)   # left up
 
 
-def _popup_state(root, popup) -> dict:
+def _popup_state(root, get_popup) -> dict:
+    """Let Tk handle pending input, then report whether the window that
+    get_popup() returns is really visible on top of everything."""
     import ctypes
     import time
-    for _ in range(8):
+    for _ in range(6):
         root.update()
         time.sleep(0.05)
+    popup = get_popup()
     if popup is None or not popup.winfo_exists():
         return {"exists": False}
     popup.update_idletasks()
@@ -107,8 +110,9 @@ def _warning_popup_check(root, app, report_path: str) -> dict:
         root.focus_force()
         root.update()
         out["icon_mapped"] = bool(app.warning.icon.winfo_ismapped())
+        out["app_active"] = root.focus_displayof() is not None
         _real_click(app.warning.icon)
-        out["after_click"] = _popup_state(root, app.warning.popup)
+        out["after_click"] = _popup_state(root, lambda: app.warning.popup)
         try:
             from PIL import ImageGrab
             path = report_path.rsplit(".", 1)[0] + ".popup.png"
@@ -116,6 +120,8 @@ def _warning_popup_check(root, app, report_path: str) -> dict:
             out["screenshot"] = path
         except Exception as exc:
             out["screenshot"] = f"failed: {exc}"
+        _real_click(app.warning.icon)
+        out["after_second_click"] = _popup_state(root, lambda: app.warning.popup)
         app.warning.close()
         # The same drop-down made a different way, for comparison.
         for name, transient, topmost in (("no_transient", False, False),
@@ -129,7 +135,7 @@ def _warning_popup_check(root, app, report_path: str) -> dict:
                 p.attributes("-topmost", True)
             tk.Label(p, text="test drop-down", padx=40, pady=30).pack()
             p.geometry(f"+{root.winfo_rootx() + 60}+{root.winfo_rooty() + 120}")
-            out[name] = _popup_state(root, p)
+            out[name] = _popup_state(root, lambda: p)
             p.destroy()
         app.hotkeys.failed = []
         app.refresh_notices()
@@ -228,8 +234,11 @@ def run(report_path: str) -> int:
         info = {"tabs": len(app.notebook.tabs()), "presets": len(app.preset_names()),
                 "tray_running": app.tray.running}
         info["screenshots"] = _screenshots(root, app, report_path)
-        info["warning_popup"] = _warning_popup_check(root, app, report_path)
-        root.after(300 + 150 * len(steps) + 300, app.quit)
+
+        def popup_check_then_quit():  # after the steps, so their toasts are gone
+            info["warning_popup"] = _warning_popup_check(root, app, report_path)
+            app.quit()
+        root.after(300 + 150 * len(steps) + 1800, popup_check_then_quit)
         root.mainloop()
         info["enabled_after"] = engine.enabled
         return info
