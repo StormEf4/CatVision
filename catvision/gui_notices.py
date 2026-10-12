@@ -31,14 +31,16 @@ class Notice:
 
 
 class NoticeArea:
-    def __init__(self, root: tk.Misc, fonts: Fonts, px: Callable[[float], int]):
+    def __init__(self, root: tk.Misc, fonts: Fonts, px: Callable[[float], int],
+                 width: int | None = None):
         self.fonts = fonts
         self.px = px
         self.frame = tk.Frame(root, bg=PANEL)
         self._shown: list[tuple] = []
-        self._labels: list[tk.Label] = []
-        self._wrap = px(360)
-        self.frame.bind("<Configure>", self._on_resize)
+        self._labels: list[tuple[tk.Label, bool]] = []
+        self._wrap = (width - px(70)) if width else px(360)
+        if width is None:  # fixed-width areas (the drop-down) don't re-wrap
+            self.frame.bind("<Configure>", self._on_resize)
 
     @property
     def visible(self) -> bool:
@@ -91,3 +93,91 @@ class NoticeArea:
 
     def _text_width(self, has_buttons: bool) -> int:
         return max(120, self._wrap - (self.px(170) if has_buttons else 0))
+
+
+class WarningButton:
+    """A warning icon in the header that only appears when something needs
+    attention.  Clicking it opens a drop-down with every notice (what's wrong,
+    what to do, and buttons that fix it); clicking again closes it, and it
+    closes by itself once everything is resolved.  It floats over the window,
+    so it never takes space from the app or shifts anything around."""
+
+    def __init__(self, parent: tk.Misc, root: tk.Tk, fonts: Fonts,
+                 px: Callable[[float], int], before: tk.Widget | None = None):
+        self.root = root
+        self.fonts = fonts
+        self.px = px
+        self.before = before
+        self.icon = tk.Label(parent, text="⚠", bg=parent.cget("bg"), fg=ACCENT,
+                             font=fonts.big, cursor="hand2", padx=6)
+        self.icon.bind("<Button-1>", lambda e: self.toggle())
+        self.notices: list[Notice] = []
+        self.popup: tk.Toplevel | None = None
+        self.area: NoticeArea | None = None
+        root.bind("<Configure>", self._on_root_change, add="+")
+        root.bind("<Unmap>", self._on_root_unmap, add="+")
+
+    @property
+    def is_open(self) -> bool:
+        return self.popup is not None
+
+    def show(self, notices: list[Notice]) -> None:
+        self.notices = notices
+        if not notices:
+            self.close()
+            self.icon.pack_forget()
+            return
+        count = len(notices)
+        self.icon.configure(text="⚠" if count == 1 else f"⚠ {count}")
+        if not self.icon.winfo_ismapped():
+            opts = {"before": self.before} if self.before is not None else {}
+            self.icon.pack(side="left", padx=(0, 8), **opts)
+        if self.area is not None:
+            self.area.show(notices)
+            self._place()
+
+    def toggle(self) -> None:
+        if self.is_open:
+            self.close()
+        elif self.notices:
+            self.open()
+
+    def open(self) -> None:
+        if self.popup is not None:
+            return
+        self.popup = tk.Toplevel(self.root)
+        self.popup.overrideredirect(True)
+        self.popup.transient(self.root)
+        self.popup.configure(bg=ACCENT)           # 1px amber border
+        inner = tk.Frame(self.popup, bg=PANEL)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        self.area = NoticeArea(inner, self.fonts, self.px, width=self._width())
+        self.area.frame.pack(fill="x")
+        self.area.show(self.notices)
+        self._place()
+
+    def close(self) -> None:
+        if self.popup is not None:
+            self.popup.destroy()
+        self.popup = None
+        self.area = None
+
+    def _width(self) -> int:
+        return max(self.px(300), min(self.root.winfo_width() - self.px(24), self.px(520)))
+
+    def _place(self) -> None:
+        if self.popup is None:
+            return
+        self.popup.update_idletasks()
+        w = self.popup.winfo_reqwidth()
+        x = self.root.winfo_rootx() + self.root.winfo_width() - w - self.px(12)
+        y = self.icon.winfo_rooty() + self.icon.winfo_height() + self.px(6)
+        self.popup.geometry(f"+{max(0, x)}+{y}")
+
+    def _on_root_change(self, e) -> None:
+        if e.widget is self.root:
+            self._place()
+
+    def _on_root_unmap(self, e) -> None:
+        if e.widget is self.root:
+            self.close()

@@ -59,11 +59,18 @@ The window is small and split into tabs:
 
 | Tab | What's there |
 | --- | --- |
-| **Home** | The big **ON/OFF** button, preset picker (◀ ▶ to flip through), **Shadow boost**, color filter, which **displays** to change, and a test pattern |
+| **Home** | The big **ON/OFF** button, preset picker (◀ ▶ to flip through), **Shadow boost** and **Exposure**, color filter, which **displays** to change, and a test pattern |
 | **Tune** | Every slider. **Save** keeps your changes in the current preset (built-in ones too), **Save as new...** makes your own preset |
+| **Presets** | Every preset in one list: **Use it**, **New...** (from your current settings), **Copy...**, **Rename...**, **Delete** |
 | **Filters** | Make and edit your own color filters |
-| **Hotkeys** | Change any hotkey, or give any preset its own hotkey |
-| **Settings** | Start with Windows, tray icon, text size, reset display, quit |
+| **Hotkeys** | Set a hotkey for any action, and an on/off hotkey for every preset |
+| **Settings** | Start with Windows, tray icon, text size, full strength, reset display |
+
+The header shows the ON/OFF switch and a **Quit** button (quitting always puts
+your screen back to normal). When something needs your attention, a **⚠**
+appears next to them: click it to see what's wrong, what to do, and buttons
+that fix it. Click it again to close it; it also closes by itself once the
+problem is fixed.
 
 **Quick start:** pick **Dark Areas**, click **OFF** so it turns green, then
 move **Shadow boost** until the dark squares in the test pattern are all
@@ -72,8 +79,9 @@ explanation.
 
 ## Choosing displays (multiple monitors)
 
-With two or more monitors, the Home tab shows a button for each display.
-CatVision only changes the **ticked** displays, so you can brighten the
+With two or more monitors, the Home tab shows a checkbox for each display:
+🖥️ and its number, with ⭐ on your main display (rest the mouse on one for its
+full name). CatVision only changes the **ticked** displays, so you can brighten the
 game monitor and leave the one with Discord or a browser alone. **Identify**
 shows each display's name on that screen so you know which is which.
 
@@ -83,10 +91,10 @@ shows each display's name on that screen so you know which is which.
   filters) also stay on the ticked displays. There they show as a colored
   tint rather than full monochrome.
 - **Unticked displays are never changed.** Saturation and color-mixing
-  filters (Grayscale, the color-blind assists and your own *Channel mixer*
-  filters) can only be applied by Windows to **every display at once**, so
-  while only some displays are ticked they're left off. A note tells you when
-  that happens. Tick *Use it anyway* if you want them on every display.
+  filters (Grayscale and your own *Channel mixer* filters) can only be
+  applied by Windows to **every display at once**, so while only some
+  displays are ticked they're left off. The ⚠ tells you when that happens,
+  with a **Use it anyway** button if you want them on every display.
 
 ## The tray icon (by the clock)
 
@@ -112,7 +120,7 @@ action and press the keys.
 | Action | What it does |
 | --- | --- |
 | Turn CatVision on / off | On or off with the current preset |
-| **Preset: (any preset)** | Toggles that preset: turns it on, press again to turn it off |
+| **On/off: (any preset)** | Every preset has one: turns that preset on, press again to turn it off |
 | Next / previous preset | Flip through presets |
 | More / less boost | Shadow boost, or Exposure for night vision |
 | Next color filter | Cycle color filters |
@@ -120,12 +128,13 @@ action and press the keys.
 | Panic: everything off | Everything back to normal |
 
 Want a ready-made set? **Use suggested keys** fills in Ctrl+Alt+V for on/off,
-Ctrl+Alt+1-9 for nine presets, Ctrl+Alt+0 for panic and a few more. **Clear
+Ctrl+Alt+1-8 for the eight presets, Ctrl+Alt+0 for panic and a few more. **Clear
 all** removes them again. Everything is also in the tray menu.
 
 <img src="docs/hotkeys.png" width="300" align="right" alt="Hotkeys tab">
 
-- **Add preset hotkey...** gives any preset (including your own) a key.
+- Every built-in preset has its own on/off row. **Add preset hotkey...** gives
+  your own presets one too.
 - CatVision won't let you pick a plain letter key like `Q`, because that key
   would stop working in your games. Use Ctrl or Alt with it, or an F-key.
 - If another program already uses a key combination, the list marks it
@@ -137,33 +146,31 @@ all** removes them again. Everything is also in the tray menu.
 
 ## Presets
 
+<img src="docs/presets.png" width="300" align="right" alt="Presets tab">
+
 | Preset | Good for |
 | --- | --- |
 | Gentle Boost | Games that are just a little too dark |
 | Dark Areas | Everyday choice: dark rooms, caves, night |
 | Pitch Black | Nearly black areas (looks washed out, but you'll see) |
-| Night Vision | Like night-vision goggles: deep green shadows, pale highlights, no blinding bloom. Best for very dark games |
+| Night Vision | Like night-vision goggles: deep green shadows, pale highlights, no blinding bloom |
 | Night Vision (Blue) | Night vision in cool blue, with the same anti-glare protection |
-| Night Vision (Red) | Night vision in red, with the same anti-glare protection |
-| Night Vision (Grey) | Black-and-white like an IR camera: crisp, deep blacks, the most dark detail of any night vision |
-| Thermal | Thermal-camera look: dark areas purple, bright areas orange to white (colors by brightness, not real heat) |
-| Horror / Flashlight | Lifts darkness, stops flashlights and lamps from dazzling |
 | Fog & Haze Cutter | Murky, foggy, smoky scenes |
-| Mixed Light | Dark shadows next to bright skies or explosions |
-| High-Contrast Mono | Grayscale: shapes and edges stand out |
-| Warm Low-Light | Shadow lift with less blue light for tired eyes |
 | Vivid Pop | Richer colors and contrast |
-| Amber Night | Strong lift in warm amber monochrome |
 | Glare Guard | Bright snow and desert scenes |
-| Red-Green Assist (Deutan / Protan) | Color correction for red-green color blindness |
-| Blue-Yellow Assist (Tritan) | Color correction for blue-yellow color blindness |
+
+More looks are in the **Color filter** list (Night vision red and grey,
+Thermal style, Grayscale, Amber, Ice); pick one and **Save as new...** to make
+it a preset.
+
+<br clear="right">
 
 <img src="docs/tune.png" width="300" align="right" alt="Tune tab">
 
 **Changing presets:** pick one, adjust the sliders in **Tune**, and click
-**Save**. An edited built-in preset shows *(edited)*, and **Restore default**
-puts it back. **Save as new...** creates your own preset, which you can
-rename or delete.
+**Save**. An edited built-in preset shows *(edited)*; **Restore default** in
+the **Presets** tab puts it back. Create, copy, rename and delete your own
+presets in the **Presets** tab.
 
 <br clear="right">
 
@@ -201,21 +208,18 @@ settings together:
 
 On the reference screenshot, with two test players placed in front of a lit
 window: before Anti-glare, the mid-tone player was *brighter* than the window
-and disappeared into the glow. Now both players stand out, and the brightest
-output is capped at 80% instead of 88%. The new Night Vision still shows
-about 1.25x the dark-area detail of the original (pre-1.3) version, and
-about 5x the game on its own.
+and disappeared into the glow. Now both players stand out clearly, bright
+areas keep their detail, and the brightest output is capped at 80%. Night
+Vision shows about 3x the game's own dark-area detail.
 
 ![Night vision before and after](docs/night_vision_before_after.png)
 
-- Raise or lower **Exposure** (or use your *More / less boost* hotkeys) for darker or
-  brighter games. In **Tune**, raise **Anti-glare** if bright areas still
-  hide things, or lower it to see more in the darkest corners.
-- **Grey (IR camera)** shows the most dark detail, then green: our eyes see
-  fine detail best in neutral and green tones. Blue and Red are tuned to stay
-  as readable as possible (pure blue or red would be too dark), and still
-  show about 4x the game's own dark detail.
-- **Thermal** looks like a thermal camera, but it colors the picture by
+- Raise **Exposure** (or use your *More boost* hotkey) for very dark games,
+  lower it for brighter ones. In **Tune**, raise **Anti-glare** if bright
+  areas still hide things, or lower it to see more in the darkest corners.
+- Green shows the most detail, because our eyes see fine detail best in green.
+  Blue is tuned to stay as readable as possible (pure blue would be too dark).
+- The **Thermal style** color filter looks like a thermal camera, but it colors the picture by
   *brightness*, not heat: dark things look "cold", bright things look "hot".
   Real heat vision would mean reading the game's data, which is exactly what
   anti-cheat systems watch for and what CatVision never does, so it stays a
@@ -235,7 +239,7 @@ click **Copy...** to start from it). There are two kinds:
   **Pick a color...**.
 - **Channel mixer**: full control. Each output color is a mix of the input
   colors. For example, *Red out = 1.0 × Red* is normal, and moving some of
-  Red into Green helps red-green color blindness.
+  Red into Green shifts reds toward yellow.
 
 Your filter is used straight away so you can see changes live (turn
 CatVision on first), and the preview shows colors before and after. Your
@@ -247,16 +251,16 @@ into any preset, and can be cycled with the *Next color filter* hotkey.
 ## Get the full strength
 
 By default Windows only lets apps change brightness a limited amount, which
-weakens strong looks like night vision. When that happens, a notice at the
-bottom of the window says *"Windows is holding back the strength of this
-look"* and has an **Unlock full strength...** button.
+weakens strong looks like night vision. When that happens, the ⚠ in the
+header says *"Windows is holding back the strength of this look"* and has an
+**Unlock full strength...** button.
 
 1. Click **Unlock full strength...** and confirm. Windows asks for permission.
 2. Restart your PC.
 
 This changes one documented Windows setting (`GdiIcmGammaRange`), the same
 one display-calibration software uses. **Settings → Full strength** shows
-whether it's unlocked and has an **Undo** button. If the notice still appears
+whether it's unlocked and has an **Undo** button. If the ⚠ still says so
 after the restart, it tells you your graphics driver has its own limit, and
 CatVision is already as strong as your PC allows.
 
@@ -265,10 +269,10 @@ CatVision is already as strong as your PC allows.
 
 ## Tips and troubleshooting
 
-When something needs your attention, CatVision lists it at the **bottom of the
-window**: what's wrong, what to do, and a button that does it (for example
-**Use it anyway** when a color effect can only cover every display). The line
-under the notices just says what CatVision is doing.
+When something needs your attention, a **⚠** appears in the header. Click it
+for what's wrong, what to do, and a button that does it (for example **Use it
+anyway** when a color effect can only cover every display). The line at the
+bottom of the window just says what CatVision is doing.
 
 - **Game in exclusive fullscreen and the color filter doesn't show?**
   Brightness works in every mode, but color filters need **Borderless** or

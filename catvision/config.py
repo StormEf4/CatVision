@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .curves import Settings
 from .filters import CustomFilter, clean_name
-from .hotkeys import default_hotkeys, normalize_combo, suggested_hotkeys
+from .hotkeys import LEGACY_DEFAULT_HOTKEYS, default_hotkeys, normalize_combo
 
 
 def app_dir() -> Path:
@@ -60,6 +60,14 @@ DEFAULT_PRESET = "Dark Areas"
 
 # Built-in presets that were renamed or replaced: old name -> new name.
 LEGACY_PRESETS = {"Night Vision (Blue/Red)": "Night Vision (Blue)"}
+
+# Built-in presets removed for good in 1.6.  Saved edits of them and their
+# hotkeys are dropped; if one was active, CatVision falls back to the default.
+REMOVED_PRESETS = {
+    "Night Vision (Red)", "Night Vision (Grey)", "Thermal", "Horror / Flashlight",
+    "Mixed Light", "High-Contrast Mono", "Warm Low-Light", "Amber Night",
+    "Red-Green Assist (Deutan)", "Red-Green Assist (Protan)", "Blue-Yellow Assist (Tritan)",
+}
 
 
 def _default_settings() -> Settings:
@@ -120,13 +128,19 @@ class Config:
         c.options = Options.from_dict(data.get("options"))
         # Versions 1.1-1.3 came with hotkeys already set.  If they were never
         # changed, clear them: the user now chooses their own.
-        if c.hotkeys == suggested_hotkeys():
+        if c.hotkeys == LEGACY_DEFAULT_HOTKEYS:
             c.hotkeys = default_hotkeys()
         _migrate_preset_names(c)
         return c
 
 
 def _migrate_preset_names(c: Config) -> None:
+    for name in REMOVED_PRESETS:
+        c.custom_presets.pop(name, None)
+        c.hotkeys.pop("preset:" + name, None)
+    if c.active_preset in REMOVED_PRESETS:
+        c.active_preset = DEFAULT_PRESET
+        c.current = _default_settings()
     for old, new in LEGACY_PRESETS.items():
         if c.active_preset == old:
             c.active_preset = new

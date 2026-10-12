@@ -155,10 +155,25 @@ ACTION_LABELS: dict[str, str] = {
 
 REPEATING_ACTIONS = {"boost_up", "boost_down"}
 
-SUGGESTED_PRESET_HOTKEYS = [
-    "Gentle Boost", "Dark Areas", "Pitch Black", "Night Vision", "Horror / Flashlight",
-    "Fog & Haze Cutter", "Mixed Light", "High-Contrast Mono", "Warm Low-Light",
-]
+_SUGGESTED_KEYS = {
+    "toggle": "Ctrl+Alt+V",
+    "off": "Ctrl+Alt+0",
+    "next": "Ctrl+Alt+Page Down",
+    "prev": "Ctrl+Alt+Page Up",
+    "boost_up": "Ctrl+Alt+=",
+    "boost_down": "Ctrl+Alt+-",
+    "filter_next": "Ctrl+Alt+F",
+    "show_window": "Ctrl+Alt+C",
+}
+
+# Versions 1.1-1.3 came with exactly this set already applied; used only to
+# recognise (and clear) those untouched old defaults when upgrading.
+LEGACY_DEFAULT_HOTKEYS = dict(_SUGGESTED_KEYS, **{
+    f"preset:{name}": f"Ctrl+Alt+{n}" for n, name in enumerate([
+        "Gentle Boost", "Dark Areas", "Pitch Black", "Night Vision", "Horror / Flashlight",
+        "Fog & Haze Cutter", "Mixed Light", "High-Contrast Mono", "Warm Low-Light",
+    ], start=1)
+})
 
 
 def default_hotkeys() -> dict[str, str]:
@@ -167,28 +182,19 @@ def default_hotkeys() -> dict[str, str]:
 
 
 def suggested_hotkeys() -> dict[str, str]:
-    """A ready-made set the user can apply with one click (Hotkeys tab).
-
-    Versions 1.1-1.3 used exactly this set as their defaults.
-    """
-    keys = {
-        "toggle": "Ctrl+Alt+V",
-        "off": "Ctrl+Alt+0",
-        "next": "Ctrl+Alt+Page Down",
-        "prev": "Ctrl+Alt+Page Up",
-        "boost_up": "Ctrl+Alt+=",
-        "boost_down": "Ctrl+Alt+-",
-        "filter_next": "Ctrl+Alt+F",
-        "show_window": "Ctrl+Alt+C",
-    }
-    for n, name in enumerate(SUGGESTED_PRESET_HOTKEYS, start=1):
-        keys[f"preset:{name}"] = f"Ctrl+Alt+{n}"
+    """A ready-made set the user can apply with one click (Hotkeys tab):
+    every action, plus an on/off toggle for each built-in preset
+    (Ctrl+Alt+1, 2, 3, ... in list order)."""
+    from .presets import BUILTIN_PRESETS
+    keys = dict(_SUGGESTED_KEYS)
+    for n, preset in enumerate(BUILTIN_PRESETS[:9], start=1):
+        keys[f"preset:{preset.name}"] = f"Ctrl+Alt+{n}"
     return keys
 
 
 def action_label(action: str) -> str:
     if action.startswith("preset:"):
-        return "Preset: " + action[len("preset:"):] + "  (on / off)"
+        return "On/off: " + action[len("preset:"):]
     return ACTION_LABELS.get(action, action)
 
 

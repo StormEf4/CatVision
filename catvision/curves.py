@@ -52,13 +52,14 @@ COLOR_FILTERS: dict[str, str] = {
     "thermal": "Thermal style (colors by brightness)",
     "amber": "Amber (warm mono, easy on eyes)",
     "ice": "Ice (cool mono)",
-    "deuteranopia": "Red-green assist (deuteranopia)",
-    "protanopia": "Red-green assist (protanopia)",
-    "tritanopia": "Blue-yellow assist (tritanopia)",
 }
 
 # Filters that were renamed or replaced, so old saved settings still load.
-LEGACY_FILTERS = {"night_vision_br": "night_vision_blue"}
+LEGACY_FILTERS = {
+    "night_vision_br": "night_vision_blue",
+    # colour-blind assists were removed in 1.6
+    "deuteranopia": "none", "protanopia": "none", "tritanopia": "none",
+}
 
 # Custom (user-made) filters are referenced as "custom:<name>".
 CUSTOM_PREFIX = "custom:"
@@ -310,29 +311,6 @@ Matrix = list[list[float]]
 
 IDENTITY3: Matrix = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 
-# Machado et al. (2009) color vision deficiency simulation, severity 1.0.
-_CVD_SIM: dict[str, Matrix] = {
-    "protanopia": [
-        [0.152286, 1.052583, -0.204868],
-        [0.114503, 0.786281, 0.099216],
-        [-0.003882, -0.048116, 1.051998],
-    ],
-    "deuteranopia": [
-        [0.367322, 0.860646, -0.227968],
-        [0.280085, 0.672501, 0.047413],
-        [-0.011820, 0.042940, 0.953970],
-    ],
-    "tritanopia": [
-        [1.255528, -0.076749, -0.178779],
-        [-0.078411, 0.930809, 0.147602],
-        [0.004733, 0.691367, 0.303900],
-    ],
-}
-
-# Daltonization: move the color information a viewer cannot see into
-# channels they can.
-_RED_GREEN_SHIFT: Matrix = [[0.0, 0.0, 0.0], [0.7, 1.0, 0.0], [0.7, 0.0, 1.0]]
-_BLUE_YELLOW_SHIFT: Matrix = [[1.0, 0.0, 0.7], [0.0, 1.0, 0.7], [0.0, 0.0, 0.0]]
 
 # Tint-style filters as brightness-dependent tint curves (see build_ramp).
 # Tuned on dark in-game screenshots.
@@ -416,11 +394,6 @@ def filter_matrix(name: str, custom: dict[str, Matrix] | None = None) -> Matrix:
         return [row[:] for row in m] if m else [row[:] for row in IDENTITY3]
     if name in MONO_TINTS:
         return mono_tint_matrix(MONO_TINTS[name])
-    if name in _CVD_SIM:
-        sim = _CVD_SIM[name]
-        shift = _BLUE_YELLOW_SHIFT if name == "tritanopia" else _RED_GREEN_SHIFT
-        error = mat_add(IDENTITY3, mat_scale(sim, -1.0))
-        return mat_add(IDENTITY3, mat_mul(shift, error))
     return [row[:] for row in IDENTITY3]
 
 

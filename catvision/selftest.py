@@ -14,6 +14,39 @@ import tempfile
 import traceback
 
 
+def _screenshots(root, app, report_path: str) -> list[str]:
+    """Save pictures of the window and of display checkboxes (to check that
+    the monitor emoji renders on real Windows).  Best effort."""
+    import tkinter as tk
+    from tkinter import ttk
+    saved = []
+    try:
+        from PIL import ImageGrab
+        from .backends import Monitor
+        from .gui import display_chip_text
+        win = tk.Toplevel(root)
+        win.configure(bg="#121317", padx=12, pady=12)
+        for i, primary in enumerate((True, False)):
+            m = Monitor(f"\\\\.\\DISPLAY{i + 1}", "test", primary, short=f"Display {i + 1}")
+            var = tk.BooleanVar(value=primary)
+            ttk.Checkbutton(win, text=display_chip_text(m, i), variable=var,
+                            style="Chip.TCheckbutton").pack(side="left", padx=4)
+        win.geometry("+40+40")
+        for target, suffix in ((win, ".chips.png"), (root, ".window.png")):
+            target.update()
+            target.lift()
+            target.update()
+            x, y = target.winfo_rootx(), target.winfo_rooty()
+            box = (x, y, x + target.winfo_width(), y + target.winfo_height())
+            path = report_path.rsplit(".", 1)[0] + suffix
+            ImageGrab.grab(bbox=box, all_screens=True).save(path)
+            saved.append(path)
+        win.destroy()
+    except Exception as exc:  # screenshots are only a diagnostic
+        saved.append(f"failed: {exc}")
+    return saved
+
+
 def run(report_path: str) -> int:
     report: dict = {"platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
                     "checks": {}, "errors": []}
@@ -103,6 +136,7 @@ def run(report_path: str) -> int:
             root.after(300 + 150 * i, lambda a=action: app.handle_action(a))
         info = {"tabs": len(app.notebook.tabs()), "presets": len(app.preset_names()),
                 "tray_running": app.tray.running}
+        info["screenshots"] = _screenshots(root, app, report_path)
         root.after(300 + 150 * len(steps) + 300, app.quit)
         root.mainloop()
         info["enabled_after"] = engine.enabled

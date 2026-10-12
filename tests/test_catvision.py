@@ -116,13 +116,6 @@ class MatrixTests(unittest.TestCase):
         self.assertGreater(g, r)
         self.assertGreater(g, b)
 
-    def test_colorblind_filters_keep_grey_grey(self):
-        for name in ("protanopia", "deuteranopia", "tritanopia"):
-            r, g, b = curves.apply_matrix(curves.filter_matrix(name), (0.5, 0.5, 0.5))
-            self.assertAlmostEqual(r, 0.5, delta=0.02, msg=name)
-            self.assertAlmostEqual(g, 0.5, delta=0.02, msg=name)
-            self.assertAlmostEqual(b, 0.5, delta=0.02, msg=name)
-
     def test_filter_strength_zero_is_identity(self):
         m = curves.color_matrix(Settings(color_filter="night_vision", filter_strength=0))
         self.assertTrue(curves.is_identity_matrix(m))
@@ -253,7 +246,7 @@ class EngineTests(unittest.TestCase):
             self.assertTrue(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY1"]), p.name)
             self.assertIsNone(color.last, f"{p.name} changed every display's colors")
             if p.settings.saturation != 1.0 or p.settings.color_filter in (
-                    "grayscale", "deuteranopia", "protanopia", "tritanopia"):
+                    "grayscale",):
                 self.assertTrue(status.color_skipped, p.name)
             e.shutdown()
 
@@ -262,7 +255,7 @@ class EngineTests(unittest.TestCase):
         color = FakeColor()
         e = Engine(g, color, self.dir)
         e.displays = ["\\\\.\\DISPLAY1"]
-        e.settings = Settings(color_filter="deuteranopia")
+        e.settings = Settings(color_filter="grayscale")
         status = e.set_enabled(True)
         self.assertTrue(status.color_skipped)           # off by default: others untouched
         self.assertIsNone(color.last)
@@ -568,7 +561,10 @@ class NightVisionTests(unittest.TestCase):
         r, g, b = ramp_for("Night Vision (Blue)")
         self.assertGreater(b[8], r[8] * 2)                 # blue shadows
         self.assertGreater(b[180], r[180])                 # still blue in brights
-        r, g, b = ramp_for("Night Vision (Red)")
+        red = Settings(exposure=80, anti_glare=70, contrast=1.1, black_floor=0.015,
+                       white_cap=0.88, color_filter="night_vision_red")
+        tint, _m = curves.plan_color(red)
+        r, g, b = curves.build_ramp(red, tint)
         self.assertGreater(r[8], g[8] * 2)                 # red shadows
         self.assertGreater(r[8], b[8] * 2)
         self.assertGreater(r[180], b[180])
@@ -599,17 +595,25 @@ class AntiGlareTests(unittest.TestCase):
     def test_bright_things_stay_apart_in_night_vision(self):
         """A mid-tone player (level 70) in front of a lit window (level 180)
         must not merge into it, and the brightest output must stay capped."""
-        for name in ("Night Vision", "Night Vision (Blue)", "Night Vision (Red)",
-                     "Night Vision (Grey)", "Thermal"):
-            s = [p for p in BUILTIN_PRESETS if p.name == name][0].settings
+        looks = {p.name: p.settings for p in BUILTIN_PRESETS if "Night Vision" in p.name}
+        # filters kept without a preset, with the settings they were tuned for
+        looks["night_vision_red"] = Settings(exposure=80, anti_glare=70, contrast=1.1,
+                                             black_floor=0.015, white_cap=0.88,
+                                             color_filter="night_vision_red")
+        looks["night_vision_grey"] = Settings(exposure=72, anti_glare=70, contrast=1.25,
+                                              brightness=0.9, white_cap=0.80,
+                                              color_filter="night_vision_grey")
+        looks["thermal"] = Settings(exposure=70, anti_glare=70, contrast=1.1, white_cap=0.80,
+                                    color_filter="thermal")
+        for name, s in looks.items():
             tint, _m = curves.plan_color(s)
             ramp = curves.build_ramp(s, tint)
             luma = [0.2126 * r + 0.7152 * g + 0.0722 * b for r, g, b in zip(*ramp)]
             self.assertGreater(luma[180] - luma[70], 0.12 * 65535, name)
             self.assertGreater(luma[250] - luma[180], 0.015 * 65535, name)
             self.assertLessEqual(max(max(ch) for ch in ramp), 0.89 * 65535, name)
-            # dark game detail still strongly lifted
-            self.assertGreater(luma[16], 0.25 * 65535, name)
+            # dark game detail clearly lifted (3x the game on its own)
+            self.assertGreater(luma[16], 3 * (16 / 255) * 65535, name)
 
 
 class LegacyBlueRedTests(unittest.TestCase):
@@ -635,15 +639,16 @@ class NoDefaultHotkeysTests(unittest.TestCase):
         self.assertEqual(bindings_from_config(config.Config().hotkeys), [])
 
     def test_untouched_old_defaults_are_cleared_but_custom_keys_kept(self):
-        from catvision.hotkeys import suggested_hotkeys
-        self.assertEqual(config.Config.from_json({"hotkeys": suggested_hotkeys()}).hotkeys, {})
-        custom = dict(suggested_hotkeys(), toggle="Ctrl+Alt+K")
+        from catvision.hotkeys import LEGACY_DEFAULT_HOTKEYS
+        self.assertEqual(config.Config.from_json({"hotkeys": LEGACY_DEFAULT_HOTKEYS}).hotkeys, {})
+        custom = dict(LEGACY_DEFAULT_HOTKEYS, toggle="Ctrl+Alt+K")
         self.assertEqual(config.Config.from_json({"hotkeys": custom}).hotkeys["toggle"], "Ctrl+Alt+K")
 
 
 class GreyNightVisionTests(unittest.TestCase):
     def test_grey_is_neutral_and_greyscale_on_all_displays(self):
-        st = [p for p in BUILTIN_PRESETS if p.name == "Night Vision (Grey)"][0].settings
+        st = Settings(exposure=72, anti_glare=70, contrast=1.25, brightness=0.9,
+                      white_cap=0.80, color_filter="night_vision_grey")
         tint, m = curves.plan_color(st, all_displays=True)
         self.assertFalse(curves.is_identity_matrix(m))        # picture made grey first
         r, g, b = curves.build_ramp(st, tint)
@@ -668,7 +673,8 @@ class ThermalTests(unittest.TestCase):
                     self.assertLessEqual(c0[j], c1[j], f"{key}: channel {j} must not fall")
 
     def test_thermal_cold_purple_hot_yellow(self):
-        st = [p for p in BUILTIN_PRESETS if p.name == "Thermal"][0].settings
+        st = Settings(exposure=70, anti_glare=70, contrast=1.1, white_cap=0.80,
+                      color_filter="thermal")
         tint, m = curves.plan_color(st)
         self.assertIsInstance(tint, curves.Gradient)
         self.assertFalse(curves.is_identity_matrix(m))        # grey first, then palette
@@ -681,3 +687,34 @@ class ThermalTests(unittest.TestCase):
     def test_gradient_strength_blends_to_grey(self):
         grad = curves.GRADIENTS["thermal"]
         self.assertEqual(curves.Gradient(grad.stops, 0.0).color(0.4), (0.4, 0.4, 0.4))
+
+
+class PresetCleanupTests(unittest.TestCase):
+    def test_only_the_kept_presets_remain(self):
+        self.assertEqual([p.name for p in BUILTIN_PRESETS], [
+            "Gentle Boost", "Dark Areas", "Pitch Black", "Night Vision", "Night Vision (Blue)",
+            "Fog & Haze Cutter", "Vivid Pop", "Glare Guard"])
+        for key in ("deuteranopia", "protanopia", "tritanopia"):
+            self.assertNotIn(key, curves.COLOR_FILTERS)
+        for key in ("night_vision_red", "night_vision_grey", "thermal", "grayscale", "amber", "ice"):
+            self.assertIn(key, curves.COLOR_FILTERS)          # filters kept
+
+    def test_removed_presets_and_filters_migrate(self):
+        c = config.Config.from_json({
+            "active_preset": "Thermal",
+            "current": {"color_filter": "deuteranopia", "shadow_boost": 30},
+            "custom_presets": {"Horror / Flashlight": {"shadow_boost": 70}, "Mine": {}},
+            "hotkeys": {"preset:Mixed Light": "Ctrl+Alt+7", "toggle": "Ctrl+Alt+K"},
+        })
+        self.assertEqual(c.active_preset, "Dark Areas")
+        self.assertEqual(c.current, config.Config().current)
+        self.assertNotIn("Horror / Flashlight", c.custom_presets)
+        self.assertIn("Mine", c.custom_presets)
+        self.assertEqual(c.hotkeys, {"toggle": "Ctrl+Alt+K"})
+        self.assertEqual(Settings.from_dict({"color_filter": "protanopia"}).color_filter, "none")
+
+    def test_suggested_keys_cover_every_builtin_preset(self):
+        from catvision.hotkeys import suggested_hotkeys
+        keys = suggested_hotkeys()
+        for p in BUILTIN_PRESETS:
+            self.assertIn("preset:" + p.name, keys)

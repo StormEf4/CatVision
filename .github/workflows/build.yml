@@ -53,6 +53,7 @@ jobs:
           path: |
             dist/CatVision.exe
             selftest-*.json
+            selftest-*.png
 
       - name: Publish download (GitHub Release)
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'

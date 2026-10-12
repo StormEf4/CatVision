@@ -30,8 +30,8 @@ class HotkeysTab:
                                  selectmode="browse", height=12)
         self.tree.heading("action", text="Action")
         self.tree.heading("keys", text="Keys")
-        self.tree.column("action", width=app.px_(220), stretch=True)
-        self.tree.column("keys", width=app.px_(170), stretch=True)
+        self.tree.column("action", width=app.px_(250), stretch=True)
+        self.tree.column("keys", width=app.px_(140), stretch=True)
         self.tree.tag_configure("warn", foreground=WARN)
         self.tree.grid(row=1, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(f, orient="vertical", command=self.tree.yview)
@@ -54,11 +54,15 @@ class HotkeysTab:
             row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
     def _actions_in_order(self) -> list[str]:
+        """Every action, an on/off toggle row for each built-in preset (unset
+        until the user picks keys), then the user's own presets that have keys."""
+        from .presets import BUILTIN_PRESETS
         actions = list(ACTION_LABELS)
+        builtin = ["preset:" + p.name for p in BUILTIN_PRESETS]
         presets = self.app.preset_names()
-        bound = [a for a in self.cfg.hotkeys if a.startswith("preset:")]
-        bound.sort(key=lambda a: (presets.index(a[7:]) if a[7:] in presets else 999, a))
-        return actions + bound
+        mine = [a for a in self.cfg.hotkeys if a.startswith("preset:") and a not in builtin]
+        mine.sort(key=lambda a: (presets.index(a[7:]) if a[7:] in presets else 999, a))
+        return actions + builtin + mine
 
     def refresh(self) -> None:
         if not hasattr(self.app, "hotkeys"):

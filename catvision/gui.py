@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import sys
 import time
 import tkinter as tk
@@ -15,7 +16,8 @@ from .curves import LIMITS, Settings
 from .engine import Engine, emergency_reset
 from .gui_filters import FiltersTab
 from .gui_hotkeys import HotkeysTab
-from .gui_notices import Notice, NoticeArea
+from .gui_presets import PresetsTab
+from .gui_notices import Notice, WarningButton
 from .hotkeys import HotkeyListener, action_label, bindings_from_config
 from .presets import all_presets, builtin_by_name
 from .theme import (ACCENT, BG, FG, GRID, MUTED, OFF, ON, PANEL, TEXT_SIZES, WARN, Fonts,
@@ -68,6 +70,18 @@ TIPS = {
 
 BOOST_STEP = 10
 KEEP_APPLIED_MS = 2000
+
+
+MONITOR_EMOJI = "\U0001F5A5\uFE0F"   # desktop computer
+MAIN_EMOJI = "\u2B50"                  # star marks the main display
+
+
+def display_chip_text(m, index: int) -> str:
+    """Checkbox label for a display: a monitor emoji and its number (a star on
+    the main one).  The full name is in the checkbox's tooltip."""
+    found = re.search(r"\d+", m.short or m.id or "")
+    number = found.group(0) if found else str(index + 1)
+    return f"{MONITOR_EMOJI} {number}" + (f" {MAIN_EMOJI}" if m.primary else "")
 
 
 class Toast:
@@ -217,9 +231,6 @@ class CatVisionApp:
         self.status = tk.Label(root, text="", anchor="w", justify="left", bg=PANEL, fg=FG,
                                padx=10, pady=5, font=self.fonts.small, wraplength=self.px_(380))
         self.status.pack(fill="x", side="bottom")
-        # All problems are listed here, above the status line, with the fix.
-        self.notices = NoticeArea(root, self.fonts, self.px_)
-        self.notices.frame.pack(fill="x", side="bottom", after=self.status)
         self.status.bind("<Configure>",
                          lambda e: self.status.configure(wraplength=max(100, e.width - 20)))
 
@@ -231,6 +242,8 @@ class CatVisionApp:
         settings = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(home, text="Home")
         self.notebook.add(tune, text="Tune")
+        self.presets_tab = PresetsTab(self.notebook, self)
+        self.notebook.add(self.presets_tab.frame, text="Presets")
         self._build_home(home)
         self._build_tune(tune)
         self.filters_tab = FiltersTab(self.notebook, self)
@@ -256,13 +269,25 @@ class CatVisionApp:
         tk.Label(title_row, text="CatVision", bg=BG, fg=FG, font=self.fonts.big).pack(side="left")
         tk.Label(title_row, text="by StormEf4", bg=BG, fg=ACCENT,
                  font=self.fonts.small).pack(side="left", padx=(6, 0), pady=(6, 0))
+        self.tagline_font = self.fonts.small.copy()
+        self.tagline_font.configure(slant="italic")
+        tk.Label(titles, text="Get the pounce on the prey.", bg=BG, fg=FG,
+                 font=self.tagline_font).pack(anchor="w")
         self.header_sub = tk.Label(titles, text="", bg=BG, fg=MUTED, font=self.fonts.small)
         self.header_sub.pack(anchor="w")
-        self.pill = tk.Label(header, text="OFF", bg=OFF, fg=FG, font=self.fonts.bold,
+        right = tk.Frame(header, bg=BG)
+        right.pack(side="right")
+        self.pill = tk.Label(right, text="OFF", bg=OFF, fg=FG, font=self.fonts.bold,
                              padx=16, pady=5, cursor="hand2")
-        self.pill.pack(side="right")
+        self.pill.pack(side="left")
         self.pill.bind("<Button-1>", lambda e: self._toggle())
         Tooltip(self.pill, "Click to turn CatVision on or off.")
+        quit_btn = ttk.Button(right, text="Quit", width=5, command=self.quit)
+        quit_btn.pack(side="left", padx=(8, 0))
+        Tooltip(quit_btn, "Quit CatVision. Your screen goes back to normal.")
+        # Only shown when something needs attention; click it for details + fixes.
+        self.warning = WarningButton(right, root, self.fonts, self.px_, before=self.pill)
+        Tooltip(self.warning.icon, "Something needs your attention. Click for details.")
 
     def _build_home(self, f: ttk.Frame) -> None:
         f.columnconfigure(0, weight=1)
@@ -355,7 +380,7 @@ class CatVisionApp:
         for i, m in enumerate(monitors):
             var = tk.BooleanVar(value=not chosen or m.id in chosen)
             self.display_vars[m.id] = var
-            chip = ttk.Checkbutton(chips, text=m.short or m.label, variable=var,
+            chip = ttk.Checkbutton(chips, text=display_chip_text(m, i), variable=var,
                                    style="Chip.TCheckbutton",
                                    command=lambda d=m.id: self._on_display_chip(d))
             chip.grid(row=i // 2, column=i % 2, sticky="ew", padx=(0, 6), pady=2)
@@ -542,7 +567,7 @@ class CatVisionApp:
         return notices
 
     def refresh_notices(self) -> None:
-        self.notices.show(self._collect_notices())
+        self.warning.show(self._collect_notices())
 
     def identify_displays(self) -> None:
         """Show each display's name in big letters on that display."""
@@ -594,9 +619,10 @@ class CatVisionApp:
         ttk.Button(btns, text="Save", command=self._save_preset).pack(fill="x")
         ttk.Button(btns, text="Save as new...", command=self._save_preset_as).pack(fill="x", pady=3)
         ttk.Button(btns, text="Undo changes", command=self._revert).pack(fill="x")
-        ttk.Button(btns, text="Rename...", command=self._rename_preset).pack(fill="x", pady=3)
-        self.delete_btn = ttk.Button(btns, text="Delete", command=self._delete_or_restore)
-        self.delete_btn.pack(fill="x")
+        manage = ttk.Button(btns, text="Manage presets...",
+                            command=lambda: self.notebook.select(self.presets_tab.frame))
+        manage.pack(fill="x", pady=(3, 0))
+        Tooltip(manage, "Create, copy, rename and delete presets in the Presets tab.")
 
     def _build_settings(self, f: ttk.Frame) -> None:
         f.columnconfigure(1, weight=1)
@@ -643,7 +669,6 @@ class CatVisionApp:
         btns.grid(row=row, column=0, columnspan=2, sticky="w", pady=(14, 0))
         ttk.Button(btns, text="Reset display now", command=self._reset_display).pack(side="left")
         ttk.Button(btns, text="Open settings folder", command=self._open_folder).pack(side="left", padx=6)
-        ttk.Button(btns, text="Quit CatVision", command=self.quit).pack(side="left")
         row += 1
 
         strength = ttk.Frame(f)
@@ -685,6 +710,7 @@ class CatVisionApp:
             self.preset_desc.configure(text="")
         self._update_title()
         self.hotkeys_tab.refresh()
+        self.presets_tab.refresh()
         self._sync_tray()
 
     def preset_names(self) -> list[str]:
@@ -761,29 +787,48 @@ class CatVisionApp:
         self.refresh_presets()
         self._schedule_save()
 
-    def _rename_preset(self) -> None:
-        row = self._active_row()
+    def preset_row(self, name: str | None = None):
+        """The preset called ``name`` (default: the active one), or None."""
+        idx = self._preset_index(name if name is not None else self.cfg.active_preset)
+        return None if idx is None else self._rows[idx]
+
+    def name_is_free(self, name: str) -> bool:
+        if builtin_by_name(name) or name in self.cfg.custom_presets:
+            messagebox.showinfo("CatVision", "A preset with that name already exists.")
+            return False
+        return True
+
+    def add_preset(self, name: str, settings: Settings, use: bool = True) -> None:
+        """Create one of the user's own presets (Presets tab: New / Copy)."""
+        self.cfg.custom_presets[name] = settings.clamped()
+        self.refresh_presets()
+        if use:
+            self.activate_preset_by_name(name)
+        self._schedule_save()
+
+    def _rename_preset(self, name: str | None = None) -> None:
+        row = self.preset_row(name)
         if row is None or row.builtin:
             messagebox.showinfo("CatVision", "Built-in presets can't be renamed. "
-                                "Use 'Save as new...' to make your own copy.")
+                                "Use Copy to make your own version.")
             return
         new = self._ask_name("Rename preset", "New name:", row.name)
         if not new or new == row.name:
             return
-        if builtin_by_name(new) or new in self.cfg.custom_presets:
-            messagebox.showinfo("CatVision", "A preset with that name already exists.")
+        if not self.name_is_free(new):
             return
         self.cfg.custom_presets[new] = self.cfg.custom_presets.pop(row.name)
         old_action, new_action = "preset:" + row.name, "preset:" + new
         if old_action in self.cfg.hotkeys:
             self.cfg.hotkeys[new_action] = self.cfg.hotkeys.pop(old_action)
             self.reload_hotkeys()
-        self.cfg.active_preset = new
+        if self.cfg.active_preset == row.name:
+            self.cfg.active_preset = new
         self.refresh_presets()
         self._schedule_save()
 
-    def _delete_or_restore(self) -> None:
-        row = self._active_row()
+    def _delete_or_restore(self, name: str | None = None) -> None:
+        row = self.preset_row(name)
         if row is None:
             return
         if row.builtin:
@@ -793,16 +838,19 @@ class CatVisionApp:
             if messagebox.askyesno("CatVision", f"Put '{row.name}' back to its original settings?"):
                 self.cfg.custom_presets.pop(row.name, None)
                 self.refresh_presets()
-                self._activate_preset(self._preset_index(row.name))
+                if self.cfg.active_preset == row.name:
+                    self._activate_preset(self._preset_index(row.name))
                 self._schedule_save()
             return
         if not messagebox.askyesno("CatVision", f"Delete your preset '{row.name}'?"):
             return
+        was_active = self.cfg.active_preset == row.name
         del self.cfg.custom_presets[row.name]
         if self.cfg.hotkeys.pop("preset:" + row.name, None) is not None:
             self.reload_hotkeys()
         self.refresh_presets()
-        self._activate_preset(0)
+        if was_active:
+            self._activate_preset(0)
         self._schedule_save()
 
     def _revert(self) -> None:
@@ -928,9 +976,6 @@ class CatVisionApp:
         name = self.cfg.active_preset
         changed = "  (unsaved changes)" if self._modified else ""
         self.tune_title.configure(text=f"Adjusting: {name}{changed}")
-        row = self._active_row()
-        self.delete_btn.configure(
-            text="Restore default" if row is not None and row.builtin else "Delete")
         self.root.title(f"{APP_TITLE} - {name}")
         state = "on" if self.engine.enabled else "off"
         self.header_sub.configure(text=f"{name}{' (changed)' if self._modified else ''}  \u00b7  {state}")
