@@ -288,22 +288,18 @@ class CatVisionApp:
     def _build_home(self, f: ttk.Frame) -> None:
         f.columnconfigure(0, weight=1)
         wrap = self.px_(380)
-        self.toggle_btn = tk.Button(f, command=self._toggle, font=self.fonts.big, relief="flat",
-                                    bd=0, pady=8, cursor="hand2", activeforeground=FG)
-        self.toggle_btn.grid(row=0, column=0, sticky="ew")
-
         self.welcome = ttk.Frame(f, style="Card.TFrame", padding=10)
         self.welcome.columnconfigure(0, weight=1)
         ttk.Label(self.welcome, style="Card.TLabel", justify="left", wraplength=wrap - 90,
-                  text="Welcome! Pick a preset, turn CatVision on, then raise Shadow boost "
-                       "until every dark square in the test pattern shows. Rest the mouse on "
-                       "anything for help.").grid(row=0, column=0, sticky="w")
+                  text="Welcome! Pick a preset, turn CatVision on with the OFF/ON button at the "
+                       "top, then raise Shadow boost until every dark square in the test "
+                       "pattern shows. Rest the mouse on anything for help.").grid(row=0, column=0, sticky="w")
         ttk.Button(self.welcome, text="Got it", style="Accent.TButton",
                    command=self._dismiss_welcome).grid(row=0, column=1, padx=(8, 0))
         if not self.cfg.options.seen_welcome:
-            self.welcome.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+            self.welcome.grid(row=1, column=0, sticky="ew", pady=(0, 12))
 
-        ttk.Label(f, text="Preset", style="Head.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 2))
+        ttk.Label(f, text="Preset", style="Head.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 2))
         prow = ttk.Frame(f)
         prow.grid(row=3, column=0, sticky="ew")
         prow.columnconfigure(1, weight=1)
@@ -950,9 +946,6 @@ class CatVisionApp:
 
     def _render_status(self) -> None:
         on = self.engine.enabled
-        self.toggle_btn.configure(
-            text="ON  -  click to turn off" if on else "OFF  -  click to turn on",
-            bg=ON if on else OFF, activebackground=ON if on else OFF, fg=FG)
         self.pill.configure(text="ON" if on else "OFF", bg=ON if on else OFF)
         # The status line only says what's happening; any problem (with its
         # fix) goes to the notice area just above it, never in two places.
