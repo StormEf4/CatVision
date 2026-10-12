@@ -313,9 +313,6 @@ class CatVisionApp:
         nxt = ttk.Button(prow, text="\u25b6", width=3, command=lambda: self._step_preset(1))
         nxt.grid(row=0, column=2, padx=(4, 0))
         Tooltip(nxt, "Next preset")
-        self.preset_desc = ttk.Label(f, text="", style="Muted.TLabel", justify="left",
-                                     wraplength=wrap)
-        self.preset_desc.grid(row=4, column=0, sticky="ew", pady=(4, 0))
         f.bind("<Configure>", self._on_home_resize)
 
         boost = ttk.Frame(f)
@@ -352,7 +349,6 @@ class CatVisionApp:
 
     def _on_home_resize(self, e) -> None:
         width = max(100, e.width - 24)
-        self.preset_desc.configure(wraplength=width)
         self.pattern_hint.configure(wraplength=width)
 
     def _dismiss_welcome(self) -> None:
@@ -701,10 +697,8 @@ class CatVisionApp:
         idx = self._preset_index(self.cfg.active_preset)
         if idx is not None:
             self.preset_combo.current(idx)
-            self.preset_desc.configure(text=self._rows[idx].description)
         else:
             self.preset_combo.set(self.cfg.active_preset)
-            self.preset_desc.configure(text="")
         self._update_title()
         self.hotkeys_tab.refresh()
         self.presets_tab.refresh()
@@ -725,7 +719,6 @@ class CatVisionApp:
         row = self._rows[idx]
         self.cfg.active_preset = row.name
         self.preset_combo.current(idx)
-        self.preset_desc.configure(text=row.description)
         self._load_settings(row.settings)
         self._modified = False
         self._update_title()
