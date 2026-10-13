@@ -59,9 +59,9 @@ class Engine:
         self.color_all_displays = False
         self.custom_filters: dict[str, curves.Matrix] = {}  # "custom:<name>" -> matrix
         self.custom_tints: dict[str, tuple] = {}            # "custom:<name>" -> tint
-        # Auto levels (beta): per display id, (setting, amount) added on top
-        # of the preset, e.g. ("shadow_boost", 12.5).
-        self.auto_offsets: dict[str, tuple[str, float]] = {}
+        # Auto levels (beta): per display id, amounts added on top of the
+        # preset, e.g. {"shadow_boost": 12.5} or {"shadow_boost": 15, "exposure": 4}.
+        self.auto_offsets: dict[str, dict[str, float]] = {}
         self._lock = threading.RLock()  # force-quit restores from the tray thread
         self._flag = (state_dir / "display_modified.flag") if state_dir else None
         self._applied: dict[str, list[list[int]]] = {}
@@ -149,13 +149,13 @@ class Engine:
         self.status = status
         return status
 
-    def set_auto_offsets(self, offsets: dict[str, tuple[str, float]]) -> None:
+    def set_auto_offsets(self, offsets: dict[str, dict[str, float]]) -> None:
         """Auto levels (beta): move Shadow boost / Exposure per display without
         touching the preset.  Only the brightness tables are redone."""
         with self._lock:
             changed = [m for m in self._targets()
                        if offsets.get(m.id) != self.auto_offsets.get(m.id)]
-            self.auto_offsets = dict(offsets)
+            self.auto_offsets = {d: dict(v) for d, v in offsets.items()}
             if not self.enabled or not changed:
                 return
             tint, _matrix = curves.plan_color(self.settings, self.custom_filters,
@@ -165,15 +165,16 @@ class Engine:
 
     def settings_for(self, display_id: str) -> Settings:
         """The settings a display really gets (the preset plus auto levels)."""
-        key, amount = self.auto_offsets.get(display_id, ("", 0.0))
-        if not key or not amount:
+        amounts = {k: v for k, v in self.auto_offsets.get(display_id, {}).items() if v}
+        if not amounts:
             return self.settings
-        return replace(self.settings, **{key: getattr(self.settings, key) + amount}).clamped()
+        return replace(self.settings, **{k: getattr(self.settings, k) + v
+                                         for k, v in amounts.items()}).clamped()
 
     def _apply_gamma(self, monitors, tint, status: Status) -> None:
         ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
         for m in monitors:
-            which = self.auto_offsets.get(m.id, ("", 0.0))
+            which = tuple(sorted(self.auto_offsets.get(m.id, {}).items()))
             ramp = ramps.get(which)
             if ramp is None:
                 ramp = ramps[which] = curves.build_ramp(self.settings_for(m.id), tint)

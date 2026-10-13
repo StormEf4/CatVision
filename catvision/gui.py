@@ -72,6 +72,7 @@ TIPS = {
 
 BOOST_STEP = 10
 KEEP_APPLIED_MS = 2000
+SETTING_NAMES = {"shadow_boost": "Shadow boost", "exposure": "Exposure"}
 AUTO_TICK_MS = 50       # auto levels (beta) moves the displays this often (smooth fades)
 
 
@@ -216,6 +217,7 @@ class CatVisionApp:
         self._auto_job = None
         self._auto_shown: dict = {}
         self._auto_watched: set[str] = set()
+        self._auto_game = ""       # title of the full-screen game in front, if any
         # Force quit runs on the tray thread and only needs to put the screen back.
         self.tray = Tray(self._actions.put, on_force_quit=self.engine.restore_now)
         self._build()
@@ -397,10 +399,15 @@ class CatVisionApp:
         Tooltip(badge, "New and still being tested. Tell StormEf4 how it works for you.")
         self.auto_keep_btn = ttk.Button(head, text="Keep this look", command=self._keep_auto_look)
         self.auto_keep_btn.pack(side="right")
+        self.auto_forget_btn = ttk.Button(head, text="Forget", width=7,
+                                          command=self._forget_game_look)
+        Tooltip(self.auto_forget_btn, "Beta. Stop using the look you kept for this game; "
+                                      "it goes back to the normal Aim for.")
         Tooltip(self.auto_keep_btn,
                 "Beta. Happy with how the game looks right now? Click this and auto levels "
                 "aims for this look from now on (it sets Aim for to match). Brighter or "
-                "darker scenes are then adjusted from there.")
+                "darker scenes are then adjusted from there. Each game remembers its own "
+                "look (by its window title) and gets it back next time.")
         self.auto_var = tk.BooleanVar(value=o.auto_levels)
         chk = ttk.Checkbutton(box, text="Adjust to the game automatically", variable=self.auto_var,
                               command=lambda: self.set_auto_levels(self.auto_var.get()))
@@ -451,7 +458,7 @@ class CatVisionApp:
             ("auto_game_only", "Only while a game fills the screen",
              "Beta. Pauses on the desktop and in windowed apps and goes back to your preset. "
              "Games in fullscreen or borderless windowed mode count, and so do full-screen "
-             "videos. Only the position of the window in front is checked."),
+             "videos. Only the position and title of the window in front are checked."),
             ("auto_dim", "Also tone down bright scenes",
              "Beta. Lowers the boost in bright scenes and flashes so you're never blinded. "
              "Untick it to only ever brighten."),
@@ -465,6 +472,8 @@ class CatVisionApp:
         self.auto_info = ttk.Label(box, text="", style="Muted.TLabel", justify="left",
                                    wraplength=wrap)
         self.auto_info.grid(row=6, column=0, sticky="ew", pady=(2, 0))
+        box.bind("<Configure>", lambda e: self.auto_info.configure(
+            wraplength=max(100, e.width - 4)))
         if not self.auto_watch.available:
             for c in controls:
                 c.state(["disabled"])
@@ -480,11 +489,30 @@ class CatVisionApp:
         self._render_auto_info(self._auto_shown)
 
     def _on_auto_slider(self) -> None:
+        o = self.cfg.options
         for r in self.auto_rows:
             r.refresh()
-        for key, var in self.auto_vars.items():
-            setattr(self.cfg.options, key, round(var.get(), 3))
+        o.auto_strength = round(self.auto_vars["auto_strength"].get(), 3)
+        aim = round(self.auto_vars["auto_target"].get(), 3)
+        if self._auto_game in o.auto_game_looks:   # editing this game's own look
+            o.auto_game_looks[self._auto_game] = aim
+        else:
+            o.auto_target = aim
         self._schedule_save()
+
+    def _auto_aim(self) -> float:
+        """Aim for: the game's own look if it has one, otherwise the default."""
+        o = self.cfg.options
+        return o.auto_game_looks.get(self._auto_game, o.auto_target)
+
+    def _set_auto_game(self, title: str) -> None:
+        """A different game (or none) is in front: show its Aim for."""
+        if title == self._auto_game:
+            return
+        self._auto_game = title
+        self.auto_vars["auto_target"].set(self._auto_aim())
+        for r in self.auto_rows:
+            r.refresh()
 
     def set_auto_levels(self, on: bool) -> None:
         self.cfg.options.auto_levels = on
@@ -539,7 +567,10 @@ class CatVisionApp:
         if fresh or not self._auto_shown:
             self._auto_seq = seq
             # Only adjust displays a game fills; elsewhere drift back to the preset.
-            in_front = autolevels.full_screen_displays(rects) if o.auto_game_only else None
+            in_front, title = autolevels.window_in_front(rects)
+            self._set_auto_game(title if in_front else "")
+            if not o.auto_game_only:
+                in_front = None
             self._auto_watched = (set(rects) if in_front is None else set(rects) & in_front)
             self.auto_watch.watch({d: rects[d] for d in self._auto_watched})
         speed = autolevels.SPEEDS.get(o.auto_speed, 1.0)
@@ -552,22 +583,26 @@ class CatVisionApp:
                 continue
             if did in latest:
                 if fresh:
-                    ctrl.observe(latest[did], o.auto_strength, o.auto_target, o.auto_dim)
+                    ctrl.observe(latest[did], o.auto_strength, self._auto_aim(), o.auto_dim)
                 shown[did] = ("watching", latest[did])
             else:
                 shown[did] = ("starting", None)
             ctrl.advance(dt, speed)
         applied = self.engine.auto_offsets
-        offsets: dict[str, tuple[str, float]] = {}
+        base = {k: getattr(self.engine.settings, k) for k in ("shadow_boost", "exposure")}
+        offsets: dict[str, dict[str, float]] = {}
         for did, ctrl in self._auto_ctrl.items():
             if did not in rects:
                 continue
-            amount = round(ctrl.offset, 1)
+            amounts = {k: round(v, 1) for k, v in
+                       autolevels.split_offset(key, ctrl.offset, base).items()}
+            amounts = {k: v for k, v in amounts.items() if v}
             old = applied.get(did)
-            if old and old[0] == key and abs(old[1] - amount) < 0.3:
-                amount = old[1]  # too small to be worth redoing the display for
-            if amount or old:
-                offsets[did] = (key, amount)
+            if old is not None and old.keys() == amounts.keys() and all(
+                    abs(old[k] - v) < 0.3 for k, v in amounts.items()):
+                amounts = old  # too small to be worth redoing the display for
+            if amounts or old:
+                offsets[did] = amounts
         if offsets != applied:
             self.engine.set_auto_offsets(offsets)
         if fresh or shown.keys() != self._auto_shown.keys():
@@ -586,16 +621,33 @@ class CatVisionApp:
                     continue
                 lo, hi = autolevels.TARGET_LIMITS
                 aim = autolevels.aim_for_current_look(m.key, ctrl.offset, o.auto_strength)
-                o.auto_target = round(min(hi, max(lo, aim)), 3)
-                self.auto_vars["auto_target"].set(o.auto_target)
+                aim = round(min(hi, max(lo, aim)), 3)
+                if self._auto_game:     # remembered for this game only
+                    o.auto_game_looks[self._auto_game] = aim
+                    where = f" for {self._auto_game}"
+                else:
+                    o.auto_target = aim
+                    where = ""
+                self.auto_vars["auto_target"].set(aim)
                 for r in self.auto_rows:
                     r.refresh()
                 self._schedule_save()
-                msg = f"Auto levels (beta): keeping this look (Aim for {o.auto_target * 100:.0f}%)"
+                self._render_auto_info(self._auto_shown)
+                msg = f"Auto levels (beta): keeping this look{where} (Aim for {aim * 100:.0f}%)"
                 break
         if not quiet:
             self.set_status(msg)
         return msg
+
+    def _forget_game_look(self) -> None:
+        o = self.cfg.options
+        if o.auto_game_looks.pop(self._auto_game, None) is not None:
+            self.auto_vars["auto_target"].set(o.auto_target)
+            for r in self.auto_rows:
+                r.refresh()
+            self._schedule_save()
+            self.set_status(f"Auto levels (beta): {self._auto_game} uses the normal Aim for again.")
+        self._render_auto_info(self._auto_shown)
 
     def _auto_setting(self) -> str:
         """Auto levels moves whichever of Shadow boost / Exposure the preset
@@ -606,9 +658,15 @@ class CatVisionApp:
     def _render_auto_info(self, shown: dict) -> None:
         if not hasattr(self, "auto_info"):
             return
+        o = self.cfg.options
+        kept = self._auto_game in o.auto_game_looks
+        if kept and self._auto_active():
+            self.auto_forget_btn.pack(side="right", padx=(0, 6))
+        else:
+            self.auto_forget_btn.pack_forget()
         if not self.auto_watch.available:
             text = self.auto_watch.reason
-        elif not self.cfg.options.auto_levels:
+        elif not o.auto_levels:
             text = "Off."
         elif not self.engine.enabled:
             text = "Starts when CatVision is on."
@@ -616,14 +674,22 @@ class CatVisionApp:
             text = "Watching..."
         else:
             key = self._auto_setting()
-            label = "Exposure" if key == "exposure" else "Shadow boost"
             names = {m.id: m.short or m.label for m in self.engine.monitors()}
             lines = []
+            if self._auto_game:
+                lines.append(f"Game: {self._auto_game}"
+                             + ("  \u00b7  its own kept look" if kept else ""))
             for did, (state, m) in shown.items():
                 name = names.get(did, did)
                 base = getattr(self.engine.settings, key)
                 now = getattr(self.engine.settings_for(did), key)
-                change = f"{label} {base:.0f} \u2192 {now:.0f}"
+                change = f"{SETTING_NAMES[key]} {base:.0f} \u2192 {now:.0f}"
+                spilled = [k for k, v in self.engine.auto_offsets.get(did, {}).items()
+                           if k != key and v]
+                if spilled:  # the main slider is at its limit: say where the rest went
+                    eff = self.engine.settings_for(did)
+                    change = ", ".join(f"{SETTING_NAMES[k]} {getattr(eff, k):.0f}"
+                                       for k in [key] + spilled)
                 if state == "waiting":
                     back = "" if abs(now - base) < 0.5 else f"  \u00b7  easing back to {base:.0f}"
                     lines.append(f"{name}: waiting for a full-screen game{back}")

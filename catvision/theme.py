@@ -164,7 +164,7 @@ class SliderRow:
                  kind: str, fonts: Fonts, on_change: Callable[[], None], tip: str = ""):
         self.var = var
         self.kind = kind
-        lab = ttk.Label(parent, text=label)
+        self.label = lab = ttk.Label(parent, text=label)
         lab.grid(row=row, column=0, sticky="w", pady=2)
         if tip:
             Tooltip(lab, tip)

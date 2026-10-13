@@ -765,7 +765,7 @@ class AutoLevelsTests(unittest.TestCase):
             e.set_settings(Settings(shadow_boost=40))
             e.set_enabled(True)
             plain = g.get_ramp("\\\\.\\DISPLAY2")
-            e.set_auto_offsets({"\\\\.\\DISPLAY1": ("shadow_boost", 30.0)})
+            e.set_auto_offsets({"\\\\.\\DISPLAY1": {"shadow_boost": 30.0}})
             self.assertEqual(g.get_ramp("\\\\.\\DISPLAY2"), plain)      # untouched
             boosted = g.get_ramp("\\\\.\\DISPLAY1")
             self.assertGreater(boosted[0][20], plain[0][20])           # brighter darks
@@ -905,3 +905,46 @@ class AutoLevelsRefinedTests(unittest.TestCase):
         for key, offset in ((0.02, 18.0), (0.3, -10.0), (0.12, 0.0)):
             aim = aim_for_current_look(key, offset, 30)
             self.assertAlmostEqual(target_offset(key, 30, aim), offset, places=6)
+
+
+class AutoLevelsRoomAndGamesTests(unittest.TestCase):
+    def test_room_left_goes_to_the_main_slider(self):
+        from catvision.autolevels import split_offset
+        self.assertEqual(split_offset("shadow_boost", 20, {"shadow_boost": 40, "exposure": 0}),
+                         {"shadow_boost": 20})
+
+    def test_extra_spills_into_exposure_near_the_top(self):
+        from catvision.autolevels import split_offset
+        out = split_offset("shadow_boost", 30, {"shadow_boost": 85, "exposure": 0})
+        self.assertEqual(out["shadow_boost"], 15)
+        self.assertAlmostEqual(out["exposure"], 7.5)     # Exposure works harder per point
+
+    def test_dimming_below_zero_takes_from_the_other_slider(self):
+        from catvision.autolevels import split_offset
+        out = split_offset("shadow_boost", -30, {"shadow_boost": 10, "exposure": 6})
+        self.assertEqual(out["shadow_boost"], -10)
+        self.assertAlmostEqual(out["exposure"], -6)       # can't go below 0 either
+
+    def test_engine_applies_several_settings_per_display(self):
+        with tempfile.TemporaryDirectory() as d:
+            g = FakeGamma()
+            e = Engine(g, NullColorBackend(), Path(d))
+            e.set_settings(Settings(shadow_boost=85))
+            e.set_enabled(True)
+            only_boost = g.get_ramp("\\\\.\\DISPLAY1")
+            e.set_auto_offsets({"\\\\.\\DISPLAY1": {"shadow_boost": 15, "exposure": 8}})
+            s = e.settings_for("\\\\.\\DISPLAY1")
+            self.assertEqual((s.shadow_boost, s.exposure), (100, 8))
+            self.assertNotEqual(g.get_ramp("\\\\.\\DISPLAY1"), only_boost)
+
+    def test_game_looks_are_saved_and_cleaned(self):
+        o = config.Options.from_dict({"auto_game_looks": {"ARC Raiders": 0.09, "bad": "x"}})
+        self.assertEqual(o.auto_game_looks, {"ARC Raiders": 0.09})
+        from catvision.autolevels import clean_title
+        self.assertEqual(clean_title("  ARC   Raiders \n"), "ARC Raiders")
+
+    def test_window_check_is_skipped_off_windows(self):
+        import sys
+        from catvision.autolevels import window_in_front
+        if sys.platform != "win32":
+            self.assertEqual(window_in_front({"a": (0, 0, 10, 10)}), (None, ""))

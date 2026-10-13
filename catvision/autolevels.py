@@ -31,6 +31,10 @@ SPEEDS = {"slow": 0.5, "normal": 1.0, "fast": 2.0}
 SETTLE_S = 1.0                  # only brighten once it has stayed dark this long (no pumping)
 FLASH_RATIO = 2.0               # a picture twice as bright as the last one is a flash...
 LOST_S = 2.0                    # ...and a picture lost this long eases back to the preset
+# When the main slider runs out of room, the rest goes to the other one
+# (Exposure works harder per point, so it gets half as much).
+SPILL = {"shadow_boost": ("exposure", 0.5), "exposure": ("shadow_boost", 1.0)}
+SLIDER_RANGE = (0.0, 100.0)
 
 DEFAULT_STRENGTH = 30.0         # how far (slider points) it may move Shadow boost / Exposure
 DEFAULT_TARGET = 0.12           # the scene brightness it aims for (log-average, 0-1)
@@ -108,6 +112,26 @@ def target_offset(key: float, strength: float, target: float, dim: bool = True) 
     stops = math.log2(target / max(key, 1 / 255))
     amount = strength * max(-1.0, min(1.0, stops / STOPS_FOR_FULL))
     return amount if dim else max(0.0, amount)
+
+
+def split_offset(key: str, offset: float, base: dict[str, float]) -> dict[str, float]:
+    """Share an adjustment between Shadow boost and Exposure: the preset's
+    main slider first, and whatever doesn't fit (it's already near the top or
+    bottom) goes to the other one, so auto levels keeps its full range."""
+    lo, hi = SLIDER_RANGE
+    main = max(lo - base[key], min(hi - base[key], offset))
+    out = {key: main}
+    rest = offset - main
+    if abs(rest) > 0.05:
+        other, ratio = SPILL[key]
+        extra = max(lo - base[other], min(hi - base[other], rest * ratio))
+        if abs(extra) > 0.05:
+            out[other] = extra
+    return out
+
+
+def clean_title(title: str) -> str:
+    return " ".join((title or "").split())[:60]
 
 
 def aim_for_current_look(key: float, offset: float, strength: float) -> float:
@@ -192,12 +216,14 @@ class Controller:
 _SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
 
 
-def full_screen_displays(rects: dict[str, Rect]) -> set[str] | None:
-    """Displays that the window in front fills (a game in fullscreen or
-    borderless mode, a full-screen video...).  None if it can't be told
+def window_in_front(rects: dict[str, Rect]) -> tuple[set[str] | None, str]:
+    """Which displays the window in front fills (a game in fullscreen or
+    borderless mode, a full-screen video...), and that window's title, which
+    is used to remember each game's look.  Only the window's position and
+    title are read, never anything inside it.  (None, "") if it can't be told
     (not Windows), meaning "don't hold anything back"."""
     if not IS_WINDOWS:
-        return None
+        return None, ""
     try:
         import ctypes
         import os
@@ -206,24 +232,34 @@ def full_screen_displays(rects: dict[str, Rect]) -> set[str] | None:
         u.GetForegroundWindow.restype = wintypes.HWND
         hwnd = u.GetForegroundWindow()
         if not hwnd:
-            return set()
+            return set(), ""
         pid = wintypes.DWORD()
         u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == os.getpid():
-            return set()            # CatVision's own windows (e.g. the test pattern)
+            return set(), ""        # CatVision's own windows (e.g. the test pattern)
         cls = ctypes.create_unicode_buffer(64)
         u.GetClassNameW(hwnd, cls, 64)
         if cls.value in _SHELL_CLASSES:
-            return set()            # the desktop or taskbar
+            return set(), ""        # the desktop or taskbar
         r = wintypes.RECT()
         if not u.GetWindowRect(hwnd, ctypes.byref(r)):
-            return set()
+            return set(), ""
+        slack = 2
+        filled = {did for did, (left, top, right, bottom) in rects.items()
+                  if r.left <= left + slack and r.top <= top + slack
+                  and r.right >= right - slack and r.bottom >= bottom - slack}
+        if not filled:
+            return filled, ""
+        title = ctypes.create_unicode_buffer(256)
+        u.GetWindowTextW(hwnd, title, 256)
+        return filled, clean_title(title.value)
     except Exception:
-        return None
-    slack = 2
-    return {did for did, (left, top, right, bottom) in rects.items()
-            if r.left <= left + slack and r.top <= top + slack
-            and r.right >= right - slack and r.bottom >= bottom - slack}
+        return None, ""
+
+
+def full_screen_displays(rects: dict[str, Rect]) -> set[str] | None:
+    """Displays that the window in front fills (see window_in_front)."""
+    return window_in_front(rects)[0]
 
 
 # --------------------------------------------------------------------------

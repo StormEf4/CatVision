@@ -178,6 +178,14 @@ display and adjusts it live, the way your eyes adapt:
 - **Keep this look:** when the game looks just right, click **Keep this look**
   (or use its hotkey or the tray menu). Auto levels then aims for that look,
   and brighter or darker scenes are adjusted from there.
+- **Each game remembers its own look.** A look you keep while a full-screen
+  game is in front is saved for that game (recognized by its window title)
+  and used again automatically next time. The Home tab shows *Game: ...* and
+  **Aim for** shows and changes that game's look; **Forget** goes back to the
+  normal Aim for.
+- **Never runs out of room:** if your preset's Shadow boost is already high
+  (Pitch Black is 85), the extra brightening that doesn't fit goes into
+  Exposure instead, and the same when dimming.
 - **How much** sets how far it may move the slider. **Aim for** sets how
   bright it tries to make scenes: higher brightens dark scenes more.
 - **Speed**: Slow, Normal or Fast reaction to darker and brighter scenes.
@@ -185,7 +193,7 @@ display and adjusts it live, the way your eyes adapt:
 - **Only while a game fills the screen** (on by default): on the desktop or in
   a windowed app it pauses and eases back to your preset. Games in fullscreen
   or borderless windowed mode count, and so do full-screen videos. Only the
-  position of the window in front is checked.
+  position and title of the window in front are checked, nothing inside it.
 - **Also tone down bright scenes** (on by default): untick it if you only
   ever want it to brighten.
 - Each ticked display is adjusted on its own, and the Home tab shows what it

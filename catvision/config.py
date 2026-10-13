@@ -45,6 +45,7 @@ class Options:
     auto_speed: str = "normal"      # slow / normal / fast
     auto_game_only: bool = True     # only while a game fills the screen
     auto_dim: bool = True           # also tone down bright scenes (not only brighten)
+    auto_game_looks: dict = field(default_factory=dict)  # game window title -> Aim for
     unlock_requested_at: float = 0.0  # when the user unlocked full strength
 
     @classmethod
@@ -55,6 +56,8 @@ class Options:
                 if key in data and isinstance(data[key], type(default)):
                     setattr(o, key, data[key])
             o.displays = [d for d in o.displays if isinstance(d, str)][:16]
+            o.auto_game_looks = {str(k)[:60]: float(v) for k, v in o.auto_game_looks.items()
+                                 if isinstance(v, (int, float))}
             # version 1-2 stored a single "monitor" ("all" or an id)
             old = data.get("monitor")
             if "displays" not in data and isinstance(old, str) and old != "all":

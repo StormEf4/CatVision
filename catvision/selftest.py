@@ -225,7 +225,7 @@ def _auto_levels_app_check(root, app) -> dict:
         while time.time() < end:
             root.update()
             time.sleep(0.02)
-        out["offsets"] = {k: list(v) for k, v in app.engine.auto_offsets.items()}
+        out["offsets"] = {k: dict(v) for k, v in app.engine.auto_offsets.items()}
         out["info"] = app.auto_info.cget("text")
         out["capture_ms"] = round(app.auto_watch.capture_ms, 1)
         app.handle_action("auto_levels")
