@@ -21,8 +21,13 @@ from .winutil import IS_WINDOWS
 THUMB_W, THUMB_H = 96, 54       # size of the copy that is measured
 INTERVAL_S = 0.2                # five measurements a second
 RISE_S = 1.2                    # brightening is slow and smooth...
-FALL_S = 0.3                    # ...dimming is fast, so flashes never blind you
+RISE_FAST_S = 0.5               # ...but catches up quicker after a big change (into a cave)
+FALL_S = 0.3                    # dimming is fast, so flashes never blind you
 STOPS_FOR_FULL = 3.0            # 3 stops darker/brighter than the target = full strength
+DEAD_ZONE = 0.08                # ignore changes smaller than this share of How much
+CENTER_WEIGHT = 2.0             # the middle of the screen counts up to 3x the edges
+SHADOW_SHARE = 0.35             # how much the darkest quarter of the picture counts
+SPEEDS = {"slow": 0.5, "normal": 1.0, "fast": 2.0}
 
 DEFAULT_STRENGTH = 30.0         # how far (slider points) it may move Shadow boost / Exposure
 DEFAULT_TARGET = 0.12           # the scene brightness it aims for (log-average, 0-1)
@@ -36,30 +41,70 @@ Rect = tuple[int, int, int, int]
 
 @dataclass(frozen=True)
 class Measurement:
-    key: float      # log-average brightness 0-1 (dark areas count fully)
+    key: float      # what auto levels steers by: overall brightness with the
+                    # middle of the screen and the dark areas counting extra (0-1)
+    average: float  # center-weighted log-average brightness (0-1)
+    shadows: float  # how bright the darkest quarter of the picture is (0-1)
     dark: float     # share of the picture that is near-black
     bright: float   # share that is near-white
     black: bool     # completely black: probably can't see the picture
 
 
-def measure(bgra: bytes) -> Measurement:
-    """Brightness of a 32-bit BGRA picture (as Windows hands it over)."""
+_weights_cache: dict[tuple[int, int], list[float]] = {}
+
+
+def _center_weights(width: int, height: int) -> list[float]:
+    """Center-weighted metering, like a camera: what you look at counts
+    most, the HUD and screen edges least."""
+    key = (width, height)
+    if key not in _weights_cache:
+        out = []
+        for y in range(height):
+            dy = (y + 0.5) / height - 0.5
+            for x in range(width):
+                dx = (x + 0.5) / width - 0.5
+                out.append(1.0 + CENTER_WEIGHT * math.exp(-(dx * dx + dy * dy) / 0.06))
+        _weights_cache[key] = out
+    return _weights_cache[key]
+
+
+def measure(bgra: bytes, width: int | None = None) -> Measurement:
+    """Brightness of a 32-bit BGRA picture (as Windows hands it over).
+    With the picture's width, the middle of the screen counts extra."""
     n = len(bgra) // 4
     if n == 0:
-        return Measurement(0.0, 1.0, 0.0, True)
+        return Measurement(0.0, 0.0, 0.0, 1.0, 0.0, True)
     lum = [(54 * r + 183 * g + 19 * b) >> 8
            for b, g, r in zip(bgra[0::4], bgra[1::4], bgra[2::4])]
-    key = math.exp(sum(_LOG[v] for v in lum) / n)
+    if width and n % width == 0:
+        weights = _center_weights(width, n // width)
+    else:
+        weights = [1.0] * n
+    total = sum(weights)
+    average = math.exp(sum(w * _LOG[v] for w, v in zip(weights, lum)) / total)
+    hist = [0.0] * 256
+    for w, v in zip(weights, lum):
+        hist[v] += w
+    seen, shadow_level = 0.0, 0
+    for level, w in enumerate(hist):          # weighted 25th percentile
+        seen += w
+        if seen >= total * 0.25:
+            shadow_level = level
+            break
+    shadows = max(shadow_level, 1) / 255
+    key = math.exp((1 - SHADOW_SHARE) * math.log(average) + SHADOW_SHARE * math.log(shadows))
     dark = sum(1 for v in lum if v < 26) / n
     bright = sum(1 for v in lum if v > 230) / n
-    return Measurement(key, dark, bright, max(lum) == 0)
+    return Measurement(key, average, shadows, dark, bright, max(lum) == 0)
 
 
-def target_offset(key: float, strength: float, target: float) -> float:
+def target_offset(key: float, strength: float, target: float, dim: bool = True) -> float:
     """How far to move the slider for a scene this bright: up to +strength
-    in dark scenes, down to -strength in bright ones, 0 at the target."""
+    in dark scenes, down to -strength in bright ones (only if dim), 0 at the
+    target."""
     stops = math.log2(target / max(key, 1 / 255))
-    return strength * max(-1.0, min(1.0, stops / STOPS_FOR_FULL))
+    amount = strength * max(-1.0, min(1.0, stops / STOPS_FOR_FULL))
+    return amount if dim else max(0.0, amount)
 
 
 @dataclass
@@ -67,13 +112,67 @@ class Controller:
     """Smoothly follows target_offset for one display."""
     offset: float = 0.0
 
-    def step(self, m: Measurement, strength: float, target: float, dt: float) -> float:
+    def step(self, m: Measurement, strength: float, target: float, dt: float,
+             speed: float = 1.0, dim: bool = True) -> float:
         if m.black:  # nothing to see (loading screen, or capture blocked): hold
             return self.offset
-        want = target_offset(m.key, strength, target)
-        tau = RISE_S if want > self.offset else FALL_S
-        self.offset += (want - self.offset) * (1 - math.exp(-max(dt, 0.0) / tau))
+        return self.follow(target_offset(m.key, strength, target, dim), strength, dt, speed)
+
+    def relax(self, dt: float, speed: float = 1.0) -> float:
+        """Drift back to the preset (no game in front)."""
+        return self.follow(0.0, 0.0, dt, speed)
+
+    def follow(self, want: float, strength: float, dt: float, speed: float = 1.0) -> float:
+        gap = want - self.offset
+        if abs(gap) < max(0.5, strength * DEAD_ZONE):
+            return self.offset      # close enough: don't keep "breathing"
+        if gap > 0:
+            tau = RISE_FAST_S if strength and gap > strength * 0.5 else RISE_S
+        else:
+            tau = FALL_S
+        self.offset += gap * (1 - math.exp(-max(dt, 0.0) * max(speed, 0.1) / tau))
         return self.offset
+
+
+# --------------------------------------------------------------------------
+# Is a game in front?  (only the foreground window's position is looked at)
+# --------------------------------------------------------------------------
+
+_SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
+
+
+def full_screen_displays(rects: dict[str, Rect]) -> set[str] | None:
+    """Displays that the window in front fills (a game in fullscreen or
+    borderless mode, a full-screen video...).  None if it can't be told
+    (not Windows), meaning "don't hold anything back"."""
+    if not IS_WINDOWS:
+        return None
+    try:
+        import ctypes
+        import os
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        u.GetForegroundWindow.restype = wintypes.HWND
+        hwnd = u.GetForegroundWindow()
+        if not hwnd:
+            return set()
+        pid = wintypes.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value == os.getpid():
+            return set()            # CatVision's own windows (e.g. the test pattern)
+        cls = ctypes.create_unicode_buffer(64)
+        u.GetClassNameW(hwnd, cls, 64)
+        if cls.value in _SHELL_CLASSES:
+            return set()            # the desktop or taskbar
+        r = wintypes.RECT()
+        if not u.GetWindowRect(hwnd, ctypes.byref(r)):
+            return set()
+    except Exception:
+        return None
+    slack = 2
+    return {did for did, (left, top, right, bottom) in rects.items()
+            if r.left <= left + slack and r.top <= top + slack
+            and r.right >= right - slack and r.bottom >= bottom - slack}
 
 
 # --------------------------------------------------------------------------
@@ -170,13 +269,12 @@ class Watcher:
         return self._thread is not None and self._thread.is_alive()
 
     def watch(self, rects: dict[str, Rect]) -> None:
-        """Start (or keep) measuring these displays; empty stops."""
+        """Measure these displays (starting the thread if needed).  An empty
+        set just idles; stop() ends it."""
         with self._lock:
             self._rects = dict(rects)
             self._latest = {k: v for k, v in self._latest.items() if k in rects}
-        if not rects:
-            self.stop()
-        elif self.available and not self.running:
+        if self.available and not self.running:
             self._stop.clear()
             self._thread = threading.Thread(target=self._run, name="catvision-auto-levels",
                                             daemon=True)
@@ -204,7 +302,7 @@ class Watcher:
                 pixels = self._capture(rect)
             except Exception:
                 pixels = None
-            out[did] = measure(pixels) if pixels else None
+            out[did] = measure(pixels, THUMB_W) if pixels else None
         self.capture_ms = (time.perf_counter() - start) * 1000
         return out
 

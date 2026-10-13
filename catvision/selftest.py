@@ -343,7 +343,7 @@ def run(report_path: str) -> int:
         """Screen capture for auto levels (beta): speed, and whether the
         captured picture includes CatVision's own brightness change."""
         import time
-        from .autolevels import Watcher, gdi_capture, measure
+        from .autolevels import THUMB_W, Watcher, full_screen_displays, gdi_capture, measure
         mons = [m for m in gamma.monitors() if m.rect]
         if not mons:
             return {"skipped": "no display positions"}
@@ -354,7 +354,7 @@ def run(report_path: str) -> int:
                "capture_ms": round((time.perf_counter() - start) * 1000, 1)}
         if pixels is None:
             return out
-        before = measure(pixels)
+        before = measure(pixels, THUMB_W)
         out["key_before"] = round(before.key, 4)
         original = gamma.get_ramp(m.id)
         if original is not None and gamma.set_ramp(
@@ -363,8 +363,10 @@ def run(report_path: str) -> int:
             after = gdi_capture(m.rect)
             gamma.set_ramp(m.id, original)
             if after:
-                out["key_with_boost"] = round(measure(after).key, 4)
+                out["key_with_boost"] = round(measure(after, THUMB_W).key, 4)
                 out["capture_sees_boost"] = abs(out["key_with_boost"] - out["key_before"]) > 0.02
+        found = full_screen_displays({x.id: x.rect for x in mons})
+        out["full_screen_now"] = None if found is None else sorted(found)
         w = Watcher()
         w.watch({m.id: m.rect})
         time.sleep(1.0)

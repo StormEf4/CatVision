@@ -42,6 +42,9 @@ class Options:
     auto_levels: bool = False
     auto_strength: float = 30.0     # how far it may move the slider (points)
     auto_target: float = 0.12       # how bright it aims to make scenes (0-1)
+    auto_speed: str = "normal"      # slow / normal / fast
+    auto_game_only: bool = True     # only while a game fills the screen
+    auto_dim: bool = True           # also tone down bright scenes (not only brighten)
     unlock_requested_at: float = 0.0  # when the user unlocked full strength
 
     @classmethod

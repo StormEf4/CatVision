@@ -163,8 +163,23 @@ display and adjusts it live, the way your eyes adapt:
   never blinded.
 - Your preset stays as it is. Auto levels moves things up or down from your
   preset, and goes back to it when you turn auto levels off.
+- It looks mostly at the **middle of the screen**, where you're looking, so
+  the HUD and screen edges don't throw it off. It also pays extra attention
+  to **dark patches**, so a dark doorway still gets help when the sky is
+  bright.
+- It ignores tiny changes, so the picture doesn't keep "breathing", and it
+  catches up faster after a big change (stepping from daylight into a dark
+  building).
 - **How much** sets how far it may move the slider. **Aim for** sets how
   bright it tries to make scenes: higher brightens dark scenes more.
+- **Speed**: Slow, Normal or Fast reaction to darker and brighter scenes.
+  Flashes are always toned down quickly.
+- **Only while a game fills the screen** (on by default): on the desktop or in
+  a windowed app it pauses and eases back to your preset. Games in fullscreen
+  or borderless windowed mode count, and so do full-screen videos. Only the
+  position of the window in front is checked.
+- **Also tone down bright scenes** (on by default): untick it if you only
+  ever want it to brighten.
 - Each ticked display is adjusted on its own, and the Home tab shows what it
   is doing (for example *Display 1: 3% bright · Shadow boost 66 → 88*).
 

@@ -422,13 +422,55 @@ class CatVisionApp:
                       tip="Beta. How bright it tries to make scenes. Higher brightens dark "
                           "scenes more; lower keeps more of the game's own darkness."),
         ]
+        speed_row = ttk.Frame(box)
+        speed_row.grid(row=3, column=0, sticky="w", pady=(2, 0))
+        speed_label = ttk.Label(speed_row, text="Speed")
+        speed_label.pack(side="left", padx=(0, 10))
+        Tooltip(speed_label, "Beta. How quickly it reacts when a scene gets darker or brighter. "
+                             "Flashes are always toned down quickly.")
+        self.auto_speed_var = tk.StringVar(value=o.auto_speed if o.auto_speed in
+                                           autolevels.SPEEDS else "normal")
+        controls = [chk]
+        for value in autolevels.SPEEDS:
+            rb = ttk.Radiobutton(speed_row, text=value.capitalize(), value=value,
+                                 variable=self.auto_speed_var, command=self._on_auto_option)
+            rb.pack(side="left", padx=(0, 8))
+            controls.append(rb)
+        self.auto_flag_vars = {
+            "auto_game_only": tk.BooleanVar(value=o.auto_game_only),
+            "auto_dim": tk.BooleanVar(value=o.auto_dim),
+        }
+        flags = (
+            ("auto_game_only", "Only while a game fills the screen",
+             "Beta. Pauses on the desktop and in windowed apps and goes back to your preset. "
+             "Games in fullscreen or borderless windowed mode count, and so do full-screen "
+             "videos. Only the position of the window in front is checked."),
+            ("auto_dim", "Also tone down bright scenes",
+             "Beta. Lowers the boost in bright scenes and flashes so you're never blinded. "
+             "Untick it to only ever brighten."),
+        )
+        for i, (key, text, tip) in enumerate(flags):
+            cb = ttk.Checkbutton(box, text=text, variable=self.auto_flag_vars[key],
+                                 command=self._on_auto_option)
+            cb.grid(row=4 + i, column=0, sticky="w")
+            Tooltip(cb, tip)
+            controls.append(cb)
         self.auto_info = ttk.Label(box, text="", style="Muted.TLabel", justify="left",
                                    wraplength=wrap)
-        self.auto_info.grid(row=3, column=0, sticky="ew", pady=(2, 0))
+        self.auto_info.grid(row=6, column=0, sticky="ew", pady=(2, 0))
         if not self.auto_watch.available:
-            chk.state(["disabled"])
+            for c in controls:
+                c.state(["disabled"])
             for r in self.auto_rows:
                 r.set_enabled(False)
+
+    def _on_auto_option(self) -> None:
+        o = self.cfg.options
+        o.auto_speed = self.auto_speed_var.get()
+        for key, var in self.auto_flag_vars.items():
+            setattr(o, key, var.get())
+        self._schedule_save()
+        self._render_auto_info(self._auto_latest)
 
     def _on_auto_slider(self) -> None:
         for r in self.auto_rows:
@@ -451,14 +493,13 @@ class CatVisionApp:
         """Start or stop watching to match the toggle, on/off and displays."""
         if self._auto_active():
             rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
-            self.auto_watch.watch(rects)
             for did in list(self._auto_ctrl):
                 if did not in rects:
                     del self._auto_ctrl[did]
             if self._auto_job is None and not self._closed:
                 self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
         else:
-            self.auto_watch.watch({})
+            self.auto_watch.stop()
             if self._auto_job is not None:
                 self.root.after_cancel(self._auto_job)
                 self._auto_job = None
@@ -474,6 +515,12 @@ class CatVisionApp:
         self._auto_job = None
         if self._closed or not self._auto_active():
             return
+        o = self.cfg.options
+        rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
+        # Only adjust displays a game fills; elsewhere drift back to the preset.
+        in_front = autolevels.full_screen_displays(rects) if o.auto_game_only else None
+        watched = rects if in_front is None else {d: r for d, r in rects.items() if d in in_front}
+        self.auto_watch.watch(watched)
         seq, latest = self.auto_watch.latest()
         if seq != self._auto_seq:
             now = time.monotonic()
@@ -483,22 +530,30 @@ class CatVisionApp:
             if key != self._auto_key:  # the preset switched between Shadow boost and Exposure
                 self._auto_ctrl.clear()
                 self._auto_key = key
-            o = self.cfg.options
+            speed = autolevels.SPEEDS.get(o.auto_speed, 1.0)
             applied = self.engine.auto_offsets
             offsets: dict[str, tuple[str, float]] = {}
-            for did, m in latest.items():
+            shown: dict[str, tuple[str, object]] = {}
+            for did in rects:
                 ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
-                if m is not None:
-                    ctrl.step(m, o.auto_strength, o.auto_target, dt)
+                if did not in watched:
+                    ctrl.relax(dt, speed)
+                    shown[did] = ("waiting", None)
+                else:
+                    m = latest.get(did)
+                    if m is not None:
+                        ctrl.step(m, o.auto_strength, o.auto_target, dt, speed, o.auto_dim)
+                    shown[did] = ("watching", m) if did in latest else ("starting", None)
                 amount = round(ctrl.offset, 1)
                 old = applied.get(did)
                 if old and old[0] == key and abs(old[1] - amount) < 0.5:
                     amount = old[1]  # not worth redoing the display for
-                offsets[did] = (key, amount)
+                if amount or old:
+                    offsets[did] = (key, amount)
             if offsets != applied:
                 self.engine.set_auto_offsets(offsets)
-            self._auto_latest = latest
-            self._render_auto_info(latest)
+            self._auto_latest = shown
+            self._render_auto_info(shown)
         self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
 
     def _auto_setting(self) -> str:
@@ -507,7 +562,7 @@ class CatVisionApp:
         s = self.engine.settings
         return "exposure" if s.exposure > s.shadow_boost else "shadow_boost"
 
-    def _render_auto_info(self, latest: dict) -> None:
+    def _render_auto_info(self, shown: dict) -> None:
         if not hasattr(self, "auto_info"):
             return
         if not self.auto_watch.available:
@@ -516,23 +571,28 @@ class CatVisionApp:
             text = "Off."
         elif not self.engine.enabled:
             text = "Starts when CatVision is on."
-        elif not latest:
+        elif not shown:
             text = "Watching..."
         else:
             key = self._auto_setting()
             label = "Exposure" if key == "exposure" else "Shadow boost"
             names = {m.id: m.short or m.label for m in self.engine.monitors()}
             lines = []
-            for did, m in latest.items():
+            for did, (state, m) in shown.items():
                 name = names.get(did, did)
-                if m is None:
-                    lines.append(f"{name}: can't see the picture. Try borderless windowed mode.")
-                    continue
                 base = getattr(self.engine.settings, key)
                 now = getattr(self.engine.settings_for(did), key)
-                held = "  (black screen: holding)" if m.black else ""
-                lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  "
-                             f"{label} {base:.0f} \u2192 {now:.0f}{held}")
+                change = f"{label} {base:.0f} \u2192 {now:.0f}"
+                if state == "waiting":
+                    back = "" if abs(now - base) < 0.5 else f"  \u00b7  easing back to {base:.0f}"
+                    lines.append(f"{name}: waiting for a full-screen game{back}")
+                elif state == "starting":
+                    lines.append(f"{name}: starting...")
+                elif m is None:
+                    lines.append(f"{name}: can't see the picture. Try borderless windowed mode.")
+                else:
+                    held = "  (black screen: holding)" if m.black else ""
+                    lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  {change}{held}")
             text = "\n".join(lines)
         self.auto_info.configure(text=text)
 

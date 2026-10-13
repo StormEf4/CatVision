@@ -795,3 +795,70 @@ class AutoLevelsTests(unittest.TestCase):
         o = config.Options.from_dict({"auto_levels": True, "auto_strength": 45.0})
         self.assertTrue(o.auto_levels)
         self.assertEqual(o.auto_strength, 45.0)
+
+
+def _split_picture(width: int, height: int, inside: int, outside: int) -> bytes:
+    """Grey picture whose middle third is one level and the rest another."""
+    out = bytearray()
+    for y in range(height):
+        for x in range(width):
+            middle = width / 3 <= x < 2 * width / 3 and height / 3 <= y < 2 * height / 3
+            v = inside if middle else outside
+            out += bytes([v, v, v, 255])
+    return bytes(out)
+
+
+class AutoLevelsEnhancedTests(unittest.TestCase):
+    def test_middle_of_the_screen_counts_more(self):
+        from catvision.autolevels import measure
+        dark_middle = _split_picture(96, 54, 10, 200)
+        bright_middle = _split_picture(96, 54, 200, 10)
+        # Compared with treating every pixel the same, what's in the middle
+        # of the screen pulls the reading its way.
+        self.assertLess(measure(dark_middle, 96).average, measure(dark_middle).average)
+        self.assertGreater(measure(bright_middle, 96).average, measure(bright_middle).average)
+
+    def test_dark_patches_count_even_in_bright_scenes(self):
+        from catvision.autolevels import measure
+        mixed = bytes([8, 8, 8, 255]) * 200 + bytes([230, 230, 230, 255]) * 200
+        m = measure(mixed)
+        self.assertLess(m.shadows, 0.05)
+        self.assertLess(m.key, m.average)   # the dark half pulls the steering value down
+
+    def test_dead_zone_stops_breathing(self):
+        from catvision.autolevels import Controller
+        c = Controller(offset=10.0)
+        self.assertEqual(c.follow(11.0, 30, 0.2), 10.0)     # tiny change: ignored
+        self.assertGreater(c.follow(20.0, 30, 0.2), 10.0)   # real change: follows
+
+    def test_big_changes_catch_up_faster(self):
+        from catvision.autolevels import Controller
+        small, big = Controller(), Controller()
+        small.follow(10.0, 30, 0.2)
+        big.follow(30.0, 30, 0.2)
+        self.assertGreater(big.offset / 30.0, small.offset / 10.0)
+
+    def test_speed_setting(self):
+        from catvision.autolevels import Controller
+        slow, fast = Controller(), Controller()
+        slow.follow(20.0, 30, 0.2, speed=0.5)
+        fast.follow(20.0, 30, 0.2, speed=2.0)
+        self.assertGreater(fast.offset, slow.offset)
+
+    def test_brighten_only(self):
+        from catvision.autolevels import target_offset
+        self.assertEqual(target_offset(0.9, 30, 0.12, dim=False), 0.0)
+        self.assertGreater(target_offset(0.02, 30, 0.12, dim=False), 0.0)
+
+    def test_relax_goes_back_to_the_preset(self):
+        from catvision.autolevels import Controller
+        c = Controller(offset=25.0)
+        for _ in range(30):
+            c.relax(0.2)
+        self.assertLess(abs(c.offset), 1.0)
+
+    def test_full_screen_check_is_skipped_off_windows(self):
+        import sys
+        from catvision.autolevels import full_screen_displays
+        if sys.platform != "win32":
+            self.assertIsNone(full_screen_displays({"a": (0, 0, 10, 10)}))
