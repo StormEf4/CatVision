@@ -106,7 +106,7 @@ hotkeys keep working. Click the cat-eye icon to open the window, or
 right-click it for quick controls:
 
 - **CatVision on**: turn it on or off
-- **Auto levels (beta)**: turn auto levels on or off
+- **Auto levels (beta)** and **keep this look**
 - **Preset**, **Color filter**, **Shadow boost** (+10 / -10), **Displays**
 - **Panic: everything off** and **Reset display to normal**
 - **Quit CatVision**: closes normally and saves your settings
@@ -129,6 +129,7 @@ action and press the keys.
 | More / less boost | Shadow boost, or Exposure for night vision |
 | Next color filter | Cycle color filters |
 | Auto levels on / off (beta) | Turns [auto levels](#auto-levels-beta) on or off |
+| Auto levels: keep this look (beta) | Auto levels aims for how the game looks right now |
 | Show the CatVision window | Brings the window up |
 | Panic: everything off | Everything back to normal |
 
@@ -167,9 +168,16 @@ display and adjusts it live, the way your eyes adapt:
   the HUD and screen edges don't throw it off. It also pays extra attention
   to **dark patches**, so a dark doorway still gets help when the sky is
   bright.
-- It ignores tiny changes, so the picture doesn't keep "breathing", and it
-  catches up faster after a big change (stepping from daylight into a dark
-  building).
+- Changes **fade smoothly** (20 small steps a second), it ignores tiny
+  changes so the picture doesn't keep "breathing", and it catches up faster
+  after a big change (stepping from daylight into a dark building).
+- **Flash guard:** a sudden flash or explosion is toned down at once.
+- **No pumping:** it only brightens once a scene has stayed dark for a
+  moment, so flickering lights, muzzle flashes and lightning don't make the
+  picture bounce.
+- **Keep this look:** when the game looks just right, click **Keep this look**
+  (or use its hotkey or the tray menu). Auto levels then aims for that look,
+  and brighter or darker scenes are adjusted from there.
 - **How much** sets how far it may move the slider. **Aim for** sets how
   bright it tries to make scenes: higher brightens dark scenes more.
 - **Speed**: Slow, Normal or Fast reaction to darker and brighter scenes.
@@ -196,7 +204,8 @@ things out to you.
   exclusive fullscreen can't be seen; the Home tab then says *can't see the
   picture* and auto levels leaves your preset alone.
 - A few games and videos block screen capture and show up black. Auto levels
-  holds still on a black screen instead of over-brightening.
+  holds still on a black screen instead of over-brightening, and if it can't
+  see the picture at all for a couple of seconds it eases back to your preset.
 - It's off by default, and it stops watching whenever CatVision or auto
   levels is turned off.
 

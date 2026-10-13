@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from .winutil import IS_WINDOWS
@@ -28,6 +28,9 @@ DEAD_ZONE = 0.08                # ignore changes smaller than this share of How 
 CENTER_WEIGHT = 2.0             # the middle of the screen counts up to 3x the edges
 SHADOW_SHARE = 0.35             # how much the darkest quarter of the picture counts
 SPEEDS = {"slow": 0.5, "normal": 1.0, "fast": 2.0}
+SETTLE_S = 1.0                  # only brighten once it has stayed dark this long (no pumping)
+FLASH_RATIO = 2.0               # a picture twice as bright as the last one is a flash...
+LOST_S = 2.0                    # ...and a picture lost this long eases back to the preset
 
 DEFAULT_STRENGTH = 30.0         # how far (slider points) it may move Shadow boost / Exposure
 DEFAULT_TARGET = 0.12           # the scene brightness it aims for (log-average, 0-1)
@@ -107,20 +110,68 @@ def target_offset(key: float, strength: float, target: float, dim: bool = True) 
     return amount if dim else max(0.0, amount)
 
 
+def aim_for_current_look(key: float, offset: float, strength: float) -> float:
+    """The Aim for value that makes a scene this bright keep its current
+    adjustment ("Keep this look")."""
+    if strength <= 0:
+        return key
+    stops = max(-1.0, min(1.0, offset / strength)) * STOPS_FOR_FULL
+    return key * 2 ** stops
+
+
 @dataclass
 class Controller:
-    """Smoothly follows target_offset for one display."""
-    offset: float = 0.0
+    """Smoothly follows target_offset for one display.
 
-    def step(self, m: Measurement, strength: float, target: float, dt: float,
+    observe() takes each new measurement and decides where to go; advance()
+    moves there a little at a time (many times a second, so changes fade
+    instead of stepping)."""
+    offset: float = 0.0
+    want: float = 0.0
+    strength: float = 0.0
+    clock: float = 0.0
+    _recent: list = field(default_factory=list)   # (time, key) of the last SETTLE_S
+    _last_key: float = 0.0
+    _missing_since: float | None = None
+
+    def observe(self, m: Measurement | None, strength: float, target: float,
+                dim: bool = True) -> None:
+        self.strength = strength
+        if m is None:  # couldn't capture the picture: hold, then ease back to the preset
+            if self._missing_since is None:
+                self._missing_since = self.clock
+            elif self.clock - self._missing_since >= LOST_S:
+                self.want = 0.0
+            return
+        self._missing_since = None
+        if m.black:  # loading screen, or capture blocked: hold
+            return
+        self._recent = [(t, k) for t, k in self._recent if self.clock - t < SETTLE_S]
+        self._recent.append((self.clock, m.key))
+        # Steer by the brightest recent picture: dimming reacts at once, but
+        # brightening waits until it has stayed dark, so flickering lights,
+        # muzzle flashes and lightning don't make the picture pump.
+        self.want = target_offset(max(k for _t, k in self._recent), strength, target, dim)
+        if self._last_key and m.key >= self._last_key * FLASH_RATIO and self.want < self.offset:
+            self.offset = self.want  # flash or explosion: dim at once, never blind you
+        self._last_key = m.key
+
+    def advance(self, dt: float, speed: float = 1.0) -> float:
+        self.clock += max(dt, 0.0)
+        return self.follow(self.want, self.strength, dt, speed)
+
+    def step(self, m: Measurement | None, strength: float, target: float, dt: float,
              speed: float = 1.0, dim: bool = True) -> float:
-        if m.black:  # nothing to see (loading screen, or capture blocked): hold
-            return self.offset
-        return self.follow(target_offset(m.key, strength, target, dim), strength, dt, speed)
+        """observe() then advance(): one measurement, one move."""
+        self.observe(m, strength, target, dim)
+        return self.advance(dt, speed)
 
     def relax(self, dt: float, speed: float = 1.0) -> float:
         """Drift back to the preset (no game in front)."""
-        return self.follow(0.0, 0.0, dt, speed)
+        self.want = 0.0
+        self._recent.clear()
+        self._last_key = 0.0
+        return self.advance(dt, speed)
 
     def follow(self, want: float, strength: float, dt: float, speed: float = 1.0) -> float:
         gap = want - self.offset

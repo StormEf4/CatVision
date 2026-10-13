@@ -862,3 +862,46 @@ class AutoLevelsEnhancedTests(unittest.TestCase):
         from catvision.autolevels import full_screen_displays
         if sys.platform != "win32":
             self.assertIsNone(full_screen_displays({"a": (0, 0, 10, 10)}))
+
+
+class AutoLevelsRefinedTests(unittest.TestCase):
+    def test_flickering_light_does_not_make_it_pump(self):
+        from catvision.autolevels import Controller, measure
+        c = Controller()
+        dark, bright = measure(_picture(4)), measure(_picture(120))
+        for i in range(60):                       # 12 s of a light flickering on and off
+            c.step(dark if i % 2 else bright, 30, 0.12, 0.2)
+        self.assertLess(c.offset, 3.0)            # never pumped up between flashes
+
+    def test_brightens_once_it_stays_dark(self):
+        from catvision.autolevels import Controller, measure
+        c = Controller()
+        for _ in range(25):
+            c.step(measure(_picture(4)), 30, 0.12, 0.2)
+        self.assertGreater(c.offset, 20)
+
+    def test_flash_dims_at_once(self):
+        from catvision.autolevels import Controller, measure
+        c = Controller()
+        for _ in range(40):
+            c.step(measure(_picture(4)), 30, 0.12, 0.2)
+        c.observe(measure(_picture(250)), 30, 0.12)   # before any time passes
+        self.assertEqual(c.offset, c.want)
+        self.assertLess(c.offset, 0)
+
+    def test_lost_picture_eases_back_to_the_preset(self):
+        from catvision.autolevels import LOST_S, Controller, measure
+        c = Controller()
+        for _ in range(40):
+            c.step(measure(_picture(4)), 30, 0.12, 0.2)
+        held = c.step(None, 30, 0.12, 0.2)
+        self.assertGreater(held, 20)              # a moment's glitch: hold
+        for _ in range(int(LOST_S / 0.2) + 30):
+            c.step(None, 30, 0.12, 0.2)
+        self.assertLess(abs(c.offset), 3.0)       # still gone: back to the preset
+
+    def test_keep_this_look_keeps_the_current_adjustment(self):
+        from catvision.autolevels import aim_for_current_look, target_offset
+        for key, offset in ((0.02, 18.0), (0.3, -10.0), (0.12, 0.0)):
+            aim = aim_for_current_look(key, offset, 30)
+            self.assertAlmostEqual(target_offset(key, 30, aim), offset, places=6)

@@ -72,7 +72,7 @@ TIPS = {
 
 BOOST_STEP = 10
 KEEP_APPLIED_MS = 2000
-AUTO_TICK_MS = 200      # auto levels (beta) follows the picture this often
+AUTO_TICK_MS = 50       # auto levels (beta) moves the displays this often (smooth fades)
 
 
 MONITOR_EMOJI = "\U0001F5A5\uFE0F"   # desktop computer
@@ -214,7 +214,8 @@ class CatVisionApp:
         self._auto_seq = -1
         self._auto_time = 0.0
         self._auto_job = None
-        self._auto_latest: dict = {}
+        self._auto_shown: dict = {}
+        self._auto_watched: set[str] = set()
         # Force quit runs on the tray thread and only needs to put the screen back.
         self.tray = Tray(self._actions.put, on_force_quit=self.engine.restore_now)
         self._build()
@@ -394,6 +395,12 @@ class CatVisionApp:
                          padx=5)
         badge.pack(side="left", padx=(6, 0))
         Tooltip(badge, "New and still being tested. Tell StormEf4 how it works for you.")
+        self.auto_keep_btn = ttk.Button(head, text="Keep this look", command=self._keep_auto_look)
+        self.auto_keep_btn.pack(side="right")
+        Tooltip(self.auto_keep_btn,
+                "Beta. Happy with how the game looks right now? Click this and auto levels "
+                "aims for this look from now on (it sets Aim for to match). Brighter or "
+                "darker scenes are then adjusted from there.")
         self.auto_var = tk.BooleanVar(value=o.auto_levels)
         chk = ttk.Checkbutton(box, text="Adjust to the game automatically", variable=self.auto_var,
                               command=lambda: self.set_auto_levels(self.auto_var.get()))
@@ -430,7 +437,7 @@ class CatVisionApp:
                              "Flashes are always toned down quickly.")
         self.auto_speed_var = tk.StringVar(value=o.auto_speed if o.auto_speed in
                                            autolevels.SPEEDS else "normal")
-        controls = [chk]
+        controls = [chk, self.auto_keep_btn]
         for value in autolevels.SPEEDS:
             rb = ttk.Radiobutton(speed_row, text=value.capitalize(), value=value,
                                  variable=self.auto_speed_var, command=self._on_auto_option)
@@ -470,7 +477,7 @@ class CatVisionApp:
         for key, var in self.auto_flag_vars.items():
             setattr(o, key, var.get())
         self._schedule_save()
-        self._render_auto_info(self._auto_latest)
+        self._render_auto_info(self._auto_shown)
 
     def _on_auto_slider(self) -> None:
         for r in self.auto_rows:
@@ -505,56 +512,90 @@ class CatVisionApp:
                 self._auto_job = None
             self._auto_ctrl.clear()
             self._auto_seq = -1
-            self._auto_latest = {}
+            self._auto_time = 0.0
+            self._auto_watched = set()
+            self._auto_shown = {}
             if self.engine.auto_offsets:
                 self.engine.set_auto_offsets({})
-        self._render_auto_info(self._auto_latest)
+        self._render_auto_info(self._auto_shown)
 
     def _auto_tick(self) -> None:
-        """Follow the latest measurements, a few times a second."""
+        """Feed new measurements in as they arrive (five a second) and move
+        the displays a little every tick, so changes fade smoothly."""
         self._auto_job = None
         if self._closed or not self._auto_active():
             return
         o = self.cfg.options
+        now = time.monotonic()
+        dt = min(0.5, now - self._auto_time) if self._auto_time else AUTO_TICK_MS / 1000
+        self._auto_time = now
+        key = self._auto_setting()
+        if key != self._auto_key:  # the preset switched between Shadow boost and Exposure
+            self._auto_ctrl.clear()
+            self._auto_key = key
         rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
-        # Only adjust displays a game fills; elsewhere drift back to the preset.
-        in_front = autolevels.full_screen_displays(rects) if o.auto_game_only else None
-        watched = rects if in_front is None else {d: r for d, r in rects.items() if d in in_front}
-        self.auto_watch.watch(watched)
         seq, latest = self.auto_watch.latest()
-        if seq != self._auto_seq:
-            now = time.monotonic()
-            dt = min(1.0, now - self._auto_time) if self._auto_seq >= 0 else autolevels.INTERVAL_S
-            self._auto_seq, self._auto_time = seq, now
-            key = self._auto_setting()
-            if key != self._auto_key:  # the preset switched between Shadow boost and Exposure
-                self._auto_ctrl.clear()
-                self._auto_key = key
-            speed = autolevels.SPEEDS.get(o.auto_speed, 1.0)
-            applied = self.engine.auto_offsets
-            offsets: dict[str, tuple[str, float]] = {}
-            shown: dict[str, tuple[str, object]] = {}
-            for did in rects:
-                ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
-                if did not in watched:
-                    ctrl.relax(dt, speed)
-                    shown[did] = ("waiting", None)
-                else:
-                    m = latest.get(did)
-                    if m is not None:
-                        ctrl.step(m, o.auto_strength, o.auto_target, dt, speed, o.auto_dim)
-                    shown[did] = ("watching", m) if did in latest else ("starting", None)
-                amount = round(ctrl.offset, 1)
-                old = applied.get(did)
-                if old and old[0] == key and abs(old[1] - amount) < 0.5:
-                    amount = old[1]  # not worth redoing the display for
-                if amount or old:
-                    offsets[did] = (key, amount)
-            if offsets != applied:
-                self.engine.set_auto_offsets(offsets)
-            self._auto_latest = shown
+        fresh = seq != self._auto_seq
+        if fresh or not self._auto_shown:
+            self._auto_seq = seq
+            # Only adjust displays a game fills; elsewhere drift back to the preset.
+            in_front = autolevels.full_screen_displays(rects) if o.auto_game_only else None
+            self._auto_watched = (set(rects) if in_front is None else set(rects) & in_front)
+            self.auto_watch.watch({d: rects[d] for d in self._auto_watched})
+        speed = autolevels.SPEEDS.get(o.auto_speed, 1.0)
+        shown: dict[str, tuple[str, object]] = {}
+        for did in rects:
+            ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
+            if did not in self._auto_watched:
+                ctrl.relax(dt, speed)
+                shown[did] = ("waiting", None)
+                continue
+            if did in latest:
+                if fresh:
+                    ctrl.observe(latest[did], o.auto_strength, o.auto_target, o.auto_dim)
+                shown[did] = ("watching", latest[did])
+            else:
+                shown[did] = ("starting", None)
+            ctrl.advance(dt, speed)
+        applied = self.engine.auto_offsets
+        offsets: dict[str, tuple[str, float]] = {}
+        for did, ctrl in self._auto_ctrl.items():
+            if did not in rects:
+                continue
+            amount = round(ctrl.offset, 1)
+            old = applied.get(did)
+            if old and old[0] == key and abs(old[1] - amount) < 0.3:
+                amount = old[1]  # too small to be worth redoing the display for
+            if amount or old:
+                offsets[did] = (key, amount)
+        if offsets != applied:
+            self.engine.set_auto_offsets(offsets)
+        if fresh or shown.keys() != self._auto_shown.keys():
+            self._auto_shown = shown
             self._render_auto_info(shown)
         self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
+
+    def _keep_auto_look(self, quiet: bool = False) -> str:
+        """Make auto levels aim for how the game looks right now."""
+        o = self.cfg.options
+        msg = "Auto levels (beta): turn it on and start a game first."
+        if self._auto_active():
+            for did, (state, m) in self._auto_shown.items():
+                ctrl = self._auto_ctrl.get(did)
+                if state != "watching" or m is None or m.black or ctrl is None:
+                    continue
+                lo, hi = autolevels.TARGET_LIMITS
+                aim = autolevels.aim_for_current_look(m.key, ctrl.offset, o.auto_strength)
+                o.auto_target = round(min(hi, max(lo, aim)), 3)
+                self.auto_vars["auto_target"].set(o.auto_target)
+                for r in self.auto_rows:
+                    r.refresh()
+                self._schedule_save()
+                msg = f"Auto levels (beta): keeping this look (Aim for {o.auto_target * 100:.0f}%)"
+                break
+        if not quiet:
+            self.set_status(msg)
+        return msg
 
     def _auto_setting(self) -> str:
         """Auto levels moves whichever of Shadow boost / Exposure the preset
@@ -1340,6 +1381,8 @@ class CatVisionApp:
             if self.cfg.options.auto_levels and not self.engine.enabled:
                 self._set_enabled(True)
             msg = f"Auto levels (beta) {'ON' if self.cfg.options.auto_levels else 'OFF'}"
+        elif action == "auto_keep":
+            msg = self._keep_auto_look(quiet=True)
         elif action.startswith("display:"):
             self._set_displays_from_tray(action)
         elif action == "identify":
