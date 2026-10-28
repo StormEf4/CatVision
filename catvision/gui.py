@@ -73,7 +73,7 @@ TIPS = {
 BOOST_STEP = 10
 KEEP_APPLIED_MS = 2000
 SETTING_NAMES = {"shadow_boost": "Shadow boost", "exposure": "Exposure"}
-AUTO_TICK_MS = 50       # auto levels (beta) moves the displays this often (smooth fades)
+AUTO_TICK_MS = 100      # auto levels (beta) checks for new measurements this often
 
 
 MONITOR_EMOJI = "\U0001F5A5\uFE0F"   # desktop computer
@@ -213,8 +213,9 @@ class CatVisionApp:
         self._auto_ctrl: dict[str, autolevels.Controller] = {}
         self._auto_key = ""
         self._auto_seq = -1
-        self._auto_time = 0.0
+        self._auto_winding_down = False
         self._auto_job = None
+        self._auto_fader = autolevels.Fader(self._auto_ctrl, self._fader_apply)
         self._auto_shown: dict = {}
         self._auto_watched: set[str] = set()
         self._auto_game = ""       # title of the full-screen game in front, if any
@@ -527,10 +528,12 @@ class CatVisionApp:
     def _auto_sync(self) -> None:
         """Start or stop watching to match the toggle, on/off and displays."""
         if self._auto_active():
+            self._auto_winding_down = False
             rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
             for did in list(self._auto_ctrl):
                 if did not in rects:
                     del self._auto_ctrl[did]
+            self._auto_fader.start()
             if self._auto_job is None and not self._closed:
                 self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
         else:
@@ -538,29 +541,49 @@ class CatVisionApp:
             if self._auto_job is not None:
                 self.root.after_cancel(self._auto_job)
                 self._auto_job = None
-            self._auto_ctrl.clear()
             self._auto_seq = -1
-            self._auto_time = 0.0
             self._auto_watched = set()
             self._auto_shown = {}
-            if self.engine.auto_offsets:
-                self.engine.set_auto_offsets({})
+            if self.engine.enabled and any(abs(c.offset) > 0.05 for c in self._auto_ctrl.values()):
+                # Auto levels was turned off while CatVision stays on: glide
+                # back to the preset instead of jumping.
+                for ctrl in self._auto_ctrl.values():
+                    ctrl.release()
+                if not self._auto_winding_down:
+                    self._auto_winding_down = True
+                    self.root.after(100, self._auto_wind_down)
+            else:
+                self._auto_finish()
         self._render_auto_info(self._auto_shown)
 
+    def _auto_wind_down(self) -> None:
+        if not self._auto_winding_down or self._closed:
+            return
+        if self.engine.enabled and any(abs(c.offset) > 0.05 for c in self._auto_ctrl.values()):
+            self.root.after(100, self._auto_wind_down)
+        else:
+            self._auto_finish()
+
+    def _auto_finish(self) -> None:
+        self._auto_winding_down = False
+        self._auto_fader.stop()   # before clearing, so nothing moves the displays again
+        self._auto_ctrl.clear()
+        if self.engine.auto_offsets:
+            self.engine.set_auto_offsets({})
+
     def _auto_tick(self) -> None:
-        """Feed new measurements in as they arrive (five a second) and move
-        the displays a little every tick, so changes fade smoothly."""
+        """Decide where each display should go as new measurements arrive
+        (five a second).  The fader thread does the actual moving, 60 times a
+        second, so the picture glides instead of stepping."""
         self._auto_job = None
         if self._closed or not self._auto_active():
             return
         o = self.cfg.options
-        now = time.monotonic()
-        dt = min(0.5, now - self._auto_time) if self._auto_time else AUTO_TICK_MS / 1000
-        self._auto_time = now
         key = self._auto_setting()
         if key != self._auto_key:  # the preset switched between Shadow boost and Exposure
             self._auto_ctrl.clear()
             self._auto_key = key
+        self._auto_fader.speed = autolevels.SPEEDS.get(o.auto_speed, 1.0)
         rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
         seq, latest = self.auto_watch.latest()
         fresh = seq != self._auto_seq
@@ -573,42 +596,42 @@ class CatVisionApp:
                 in_front = None
             self._auto_watched = (set(rects) if in_front is None else set(rects) & in_front)
             self.auto_watch.watch({d: rects[d] for d in self._auto_watched})
-        speed = autolevels.SPEEDS.get(o.auto_speed, 1.0)
         shown: dict[str, tuple[str, object]] = {}
         for did in rects:
             ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
             if did not in self._auto_watched:
-                ctrl.relax(dt, speed)
+                ctrl.release()
                 shown[did] = ("waiting", None)
-                continue
-            if did in latest:
+            elif did in latest:
                 if fresh:
                     ctrl.observe(latest[did], o.auto_strength, self._auto_aim(), o.auto_dim)
                 shown[did] = ("watching", latest[did])
             else:
                 shown[did] = ("starting", None)
-            ctrl.advance(dt, speed)
-        applied = self.engine.auto_offsets
-        base = {k: getattr(self.engine.settings, k) for k in ("shadow_boost", "exposure")}
-        offsets: dict[str, dict[str, float]] = {}
-        for did, ctrl in self._auto_ctrl.items():
+        for did in list(self._auto_ctrl):
             if did not in rects:
-                continue
-            amounts = {k: round(v, 1) for k, v in
-                       autolevels.split_offset(key, ctrl.offset, base).items()}
-            amounts = {k: v for k, v in amounts.items() if v}
-            old = applied.get(did)
-            if old is not None and old.keys() == amounts.keys() and all(
-                    abs(old[k] - v) < 0.3 for k, v in amounts.items()):
-                amounts = old  # too small to be worth redoing the display for
-            if amounts or old:
-                offsets[did] = amounts
-        if offsets != applied:
-            self.engine.set_auto_offsets(offsets)
+                del self._auto_ctrl[did]
         if fresh or shown.keys() != self._auto_shown.keys():
             self._auto_shown = shown
             self._render_auto_info(shown)
         self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
+
+    def _fader_apply(self, positions: dict[str, float]) -> None:
+        """Runs on the fader thread: share each display's offset between
+        Shadow boost and Exposure and pass it to the engine (which is
+        thread-safe) only when it actually changed."""
+        key = self._auto_key or self._auto_setting()
+        settings = self.engine.settings
+        base = {k: getattr(settings, k) for k in ("shadow_boost", "exposure")}
+        offsets: dict[str, dict[str, float]] = {}
+        for did, offset in positions.items():
+            amounts = {k: round(v, 2) for k, v in
+                       autolevels.split_offset(key, offset, base).items()}
+            amounts = {k: v for k, v in amounts.items() if v}
+            if amounts or did in self.engine.auto_offsets:
+                offsets[did] = amounts
+        if offsets != self.engine.auto_offsets:
+            self.engine.set_auto_offsets(offsets)
 
     def _keep_auto_look(self, quiet: bool = False) -> str:
         """Make auto levels aim for how the game looks right now."""
@@ -1536,6 +1559,7 @@ class CatVisionApp:
         self.hotkeys.stop()
         self.tray.stop()
         self.auto_watch.stop()
+        self._auto_fader.stop()
         self.engine.shutdown()
         self.root.destroy()
 

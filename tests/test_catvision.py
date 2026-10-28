@@ -755,8 +755,9 @@ class AutoLevelsTests(unittest.TestCase):
         before = c.offset
         c.step(measure(_picture(250)), 30, 0.12, 0.2)
         self.assertLess(c.offset, before - 25)  # a flash pulls it back quickly
-        held = c.offset
-        self.assertEqual(c.step(measure(_picture(0)), 30, 0.12, 0.2), held)  # black: hold
+        goal = c.want
+        c.step(measure(_picture(0)), 30, 0.12, 0.2)
+        self.assertEqual(c.want, goal)          # black screen: keeps its goal
 
     def test_engine_adjusts_each_display_on_its_own(self):
         with tempfile.TemporaryDirectory() as d:
@@ -826,10 +827,17 @@ class AutoLevelsEnhancedTests(unittest.TestCase):
         self.assertLess(m.key, m.average)   # the dark half pulls the steering value down
 
     def test_dead_zone_stops_breathing(self):
-        from catvision.autolevels import Controller
-        c = Controller(offset=10.0)
-        self.assertEqual(c.follow(11.0, 30, 0.2), 10.0)     # tiny change: ignored
-        self.assertGreater(c.follow(20.0, 30, 0.2), 10.0)   # real change: follows
+        from catvision.autolevels import Controller, measure
+        c = Controller()
+        for _ in range(30):
+            c.step(measure(_picture(20)), 30, 0.12, 0.2)
+        goal = c.want
+        for _ in range(10):                                  # a slightly different scene
+            c.step(measure(_picture(21)), 30, 0.12, 0.2)
+        self.assertEqual(c.want, goal)                       # tiny change: same goal
+        for _ in range(10):
+            c.step(measure(_picture(5)), 30, 0.12, 0.2)
+        self.assertGreater(c.want, goal + 5)                 # real change: new goal
 
     def test_big_changes_catch_up_faster(self):
         from catvision.autolevels import Controller
@@ -880,13 +888,16 @@ class AutoLevelsRefinedTests(unittest.TestCase):
             c.step(measure(_picture(4)), 30, 0.12, 0.2)
         self.assertGreater(c.offset, 20)
 
-    def test_flash_dims_at_once(self):
+    def test_flash_dims_within_a_fraction_of_a_second(self):
         from catvision.autolevels import Controller, measure
         c = Controller()
         for _ in range(40):
             c.step(measure(_picture(4)), 30, 0.12, 0.2)
-        c.observe(measure(_picture(250)), 30, 0.12)   # before any time passes
-        self.assertEqual(c.offset, c.want)
+        start = c.offset
+        c.observe(measure(_picture(250)), 30, 0.12)
+        for _ in range(15):                           # a quarter of a second at 60 a second
+            c.advance(1 / 60)
+        self.assertLess(c.offset, start - 40)
         self.assertLess(c.offset, 0)
 
     def test_lost_picture_eases_back_to_the_preset(self):
@@ -948,3 +959,53 @@ class AutoLevelsRoomAndGamesTests(unittest.TestCase):
         from catvision.autolevels import window_in_front
         if sys.platform != "win32":
             self.assertEqual(window_in_front({"a": (0, 0, 10, 10)}), (None, ""))
+
+
+class AutoLevelsSmoothnessTests(unittest.TestCase):
+    """Moves made 60 times a second must be too small to see as steps."""
+
+    def _run(self, scenes, seconds_each=4.0):
+        from catvision.autolevels import Controller, measure
+        c = Controller()
+        frames = []
+        frame = 1 / 60
+        for level in scenes:
+            m = measure(_picture(level))
+            for i in range(int(seconds_each * 60)):
+                if i % 12 == 0:                       # a measurement five times a second
+                    c.observe(m, 30, 0.12)
+                before = c.offset
+                c.advance(frame)
+                frames.append((c.offset - before, c.rush))
+        return frames
+
+    def test_normal_fades_move_less_than_a_point_per_update(self):
+        frames = self._run([6, 10, 5, 9, 4, 7])       # scenes changing, but no flashes
+        self.assertFalse(any(rush for _, rush in frames))
+        self.assertLess(max(abs(d) for d, _ in frames), 1.4)
+
+    def test_even_a_flash_fades_instead_of_jumping(self):
+        frames = self._run([4, 250, 4])
+        self.assertLess(max(abs(d) for d, _ in frames), 4.1)
+
+    def test_changes_ease_in(self):
+        frames = self._run([4], seconds_each=0.5)
+        peak = max(abs(d) for d, _ in frames)
+        self.assertLess(abs(frames[0][0]), peak * 0.2)  # starts gently, no lurch
+        self.assertGreater(abs(frames[20][0]), abs(frames[1][0]))
+
+    def test_fader_moves_displays_on_its_own_thread(self):
+        import time
+        from catvision.autolevels import Controller, Fader
+        ctrls = {"a": Controller(want=20.0, strength=30.0)}
+        seen = []
+        f = Fader(ctrls, lambda pos: seen.append(pos["a"]))
+        f.start()
+        deadline = time.time() + 3
+        while (not seen or seen[-1] < 5) and time.time() < deadline:
+            time.sleep(0.02)
+        f.stop()
+        self.assertFalse(f.running)
+        self.assertGreater(seen[-1], 5)
+        steps = [b - a for a, b in zip(seen, seen[1:])]
+        self.assertLess(max(steps), 1.4)

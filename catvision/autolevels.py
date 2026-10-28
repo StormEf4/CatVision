@@ -23,6 +23,15 @@ INTERVAL_S = 0.2                # five measurements a second
 RISE_S = 1.2                    # brightening is slow and smooth...
 RISE_FAST_S = 0.5               # ...but catches up quicker after a big change (into a cave)
 FALL_S = 0.3                    # dimming is fast, so flashes never blind you
+RUSH_S = 0.12                   # a flash fades down in about a tenth of a second
+# Speed limits in slider points per second: with 60 updates a second even
+# the fastest normal fade moves well under one point per update, which the
+# eye can't see as a step.
+MAX_RISE = 25.0
+MAX_RISE_FAST = 40.0
+MAX_FALL = 80.0
+MAX_RUSH = 240.0
+FADER_HZ = 60                   # how often the displays are moved
 STOPS_FOR_FULL = 3.0            # 3 stops darker/brighter than the target = full strength
 DEAD_ZONE = 0.08                # ignore changes smaller than this share of How much
 CENTER_WEIGHT = 2.0             # the middle of the screen counts up to 3x the edges
@@ -145,15 +154,18 @@ def aim_for_current_look(key: float, offset: float, strength: float) -> float:
 
 @dataclass
 class Controller:
-    """Smoothly follows target_offset for one display.
+    """Decides where one display should go and glides it there.
 
-    observe() takes each new measurement and decides where to go; advance()
-    moves there a little at a time (many times a second, so changes fade
-    instead of stepping)."""
+    observe() takes each new measurement (five a second) and sets the goal;
+    advance() moves toward it in tiny steps (60 a second, on the fader
+    thread).  The motion eases in and out like a spring and has a speed
+    limit, so there is never a visible jump."""
     offset: float = 0.0
     want: float = 0.0
     strength: float = 0.0
     clock: float = 0.0
+    velocity: float = 0.0
+    rush: bool = False                             # a flash: fade down extra fast
     _recent: list = field(default_factory=list)   # (time, key) of the last SETTLE_S
     _last_key: float = 0.0
     _missing_since: float | None = None
@@ -175,10 +187,21 @@ class Controller:
         # Steer by the brightest recent picture: dimming reacts at once, but
         # brightening waits until it has stayed dark, so flickering lights,
         # muzzle flashes and lightning don't make the picture pump.
-        self.want = target_offset(max(k for _t, k in self._recent), strength, target, dim)
-        if self._last_key and m.key >= self._last_key * FLASH_RATIO and self.want < self.offset:
-            self.offset = self.want  # flash or explosion: dim at once, never blind you
+        want = target_offset(max(k for _t, k in self._recent), strength, target, dim)
+        flash = bool(self._last_key) and m.key >= self._last_key * FLASH_RATIO
         self._last_key = m.key
+        # Small changes don't set a new goal, so the picture doesn't keep
+        # "breathing"; the glide itself never stops halfway.
+        if abs(want - self.want) >= max(0.5, strength * DEAD_ZONE) or flash:
+            self.want = want
+            self.rush = flash and want < self.offset
+
+    def release(self) -> None:
+        """Head back to the preset (no game in front)."""
+        self.want = 0.0
+        self.rush = False
+        self._recent.clear()
+        self._last_key = 0.0
 
     def advance(self, dt: float, speed: float = 1.0) -> float:
         self.clock += max(dt, 0.0)
@@ -192,21 +215,91 @@ class Controller:
 
     def relax(self, dt: float, speed: float = 1.0) -> float:
         """Drift back to the preset (no game in front)."""
-        self.want = 0.0
-        self._recent.clear()
-        self._last_key = 0.0
+        self.release()
         return self.advance(dt, speed)
 
     def follow(self, want: float, strength: float, dt: float, speed: float = 1.0) -> float:
+        """Glide toward want: a critically damped spring (smooth start and
+        stop, no overshoot) with a speed limit."""
+        dt = max(dt, 0.0)
         gap = want - self.offset
-        if abs(gap) < max(0.5, strength * DEAD_ZONE):
-            return self.offset      # close enough: don't keep "breathing"
+        if abs(gap) < 0.01 and abs(self.velocity) < 0.05:
+            self.offset, self.velocity = want, 0.0
+            return self.offset
+        speed = max(speed, 0.1)
         if gap > 0:
-            tau = RISE_FAST_S if strength and gap > strength * 0.5 else RISE_S
+            fast = bool(strength) and gap > strength * 0.5
+            tau, vmax = (RISE_FAST_S, MAX_RISE_FAST) if fast else (RISE_S, MAX_RISE)
+        elif self.rush:
+            tau, vmax = RUSH_S, MAX_RUSH
         else:
-            tau = FALL_S
-        self.offset += gap * (1 - math.exp(-max(dt, 0.0) * max(speed, 0.1) / tau))
+            tau, vmax = FALL_S, MAX_FALL
+        w = 2.0 * speed / tau
+        c1 = -gap                               # offset - want
+        c2 = self.velocity + w * c1
+        e = math.exp(-w * dt)
+        new = want + (c1 + c2 * dt) * e
+        vel = (c2 - w * (c1 + c2 * dt)) * e
+        limit = vmax * speed
+        if abs(new - self.offset) > limit * dt:  # speed limit: never a visible jump
+            new = self.offset + math.copysign(limit * dt, new - self.offset)
+            vel = math.copysign(min(abs(vel), limit), vel)
+        self.offset, self.velocity = new, vel
+        if self.rush and self.offset <= self.want + 0.01:
+            self.rush = False
         return self.offset
+
+
+class Fader:
+    """Moves every display toward where auto levels wants it, FADER_HZ times
+    a second on its own thread, so fades are smooth and never wait on the
+    window.  apply() gets {display id: offset} whenever something moved."""
+
+    def __init__(self, controllers: dict[str, Controller],
+                 apply: Callable[[dict[str, float]], None], hz: int = FADER_HZ):
+        self.controllers = controllers
+        self.apply = apply
+        self.speed = 1.0
+        self.interval = 1.0 / hz
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.last_error = ""
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="catvision-auto-fader",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+
+    def tick(self, dt: float) -> None:
+        positions = {}
+        for did, ctrl in list(self.controllers.items()):
+            positions[did] = ctrl.advance(dt, self.speed)
+        self.apply(positions)
+
+    def _run(self) -> None:
+        last = time.perf_counter()
+        while not self._stop.is_set():
+            now = time.perf_counter()
+            dt, last = min(now - last, 0.25), now
+            try:
+                self.tick(dt)
+            except Exception as exc:  # keep fading; the window shows nothing breaks
+                self.last_error = repr(exc)
+            spare = self.interval - (time.perf_counter() - now)
+            self._stop.wait(max(spare, 0.002))
 
 
 # --------------------------------------------------------------------------

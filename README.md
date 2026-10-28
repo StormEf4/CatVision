@@ -168,10 +168,14 @@ display and adjusts it live, the way your eyes adapt:
   the HUD and screen edges don't throw it off. It also pays extra attention
   to **dark patches**, so a dark doorway still gets help when the sky is
   bright.
-- Changes **fade smoothly** (20 small steps a second), it ignores tiny
-  changes so the picture doesn't keep "breathing", and it catches up faster
-  after a big change (stepping from daylight into a dark building).
-- **Flash guard:** a sudden flash or explosion is toned down at once.
+- **No visible steps:** changes glide in 60 tiny steps a second on their own
+  background thread, easing in and out with a speed limit, so you never see
+  the picture jump. It ignores tiny changes so the picture doesn't keep
+  "breathing", and it catches up faster after a big change (stepping from
+  daylight into a dark building). Turning auto levels off glides back to your
+  preset too.
+- **Flash guard:** a sudden flash or explosion is toned down within about a
+  tenth of a second, as a very fast fade rather than a jump.
 - **No pumping:** it only brightens once a scene has stayed dark for a
   moment, so flickering lights, muzzle flashes and lightning don't make the
   picture bounce.

@@ -221,6 +221,7 @@ def _auto_levels_app_check(root, app) -> dict:
     try:
         app.handle_action("auto_levels")
         out["watching"] = app.auto_watch.running
+        out["fader_running"] = app._auto_fader.running
         end = time.time() + 2.0
         while time.time() < end:
             root.update()
@@ -228,6 +229,7 @@ def _auto_levels_app_check(root, app) -> dict:
         out["offsets"] = {k: dict(v) for k, v in app.engine.auto_offsets.items()}
         out["info"] = app.auto_info.cget("text")
         out["capture_ms"] = round(app.auto_watch.capture_ms, 1)
+        out["fader_error"] = app._auto_fader.last_error or None
         app.handle_action("auto_levels")
         app.handle_action("off")
         root.update()
@@ -357,6 +359,14 @@ def run(report_path: str) -> int:
         before = measure(pixels, THUMB_W)
         out["key_before"] = round(before.key, 4)
         original = gamma.get_ramp(m.id)
+        if original is not None:
+            # How long one brightness change takes (the fader makes up to 60 a second).
+            ramps = [curves.build_ramp(curves.Settings(shadow_boost=40 + i % 2)) for i in range(2)]
+            start = time.perf_counter()
+            for i in range(20):
+                gamma.set_ramp(m.id, ramps[i % 2])
+            out["set_ramp_ms"] = round((time.perf_counter() - start) / 20 * 1000, 2)
+            gamma.set_ramp(m.id, original)
         if original is not None and gamma.set_ramp(
                 m.id, curves.build_ramp(curves.Settings(shadow_boost=100))):
             time.sleep(0.3)
