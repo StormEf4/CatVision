@@ -152,6 +152,8 @@ ACTION_LABELS: dict[str, str] = {
     "filter_next": "Next color filter",
     "auto_levels": "Auto levels on / off (beta)",
     "auto_keep": "Auto levels: keep this look (beta)",
+    "auto_brighter": "Auto levels: aim brighter (beta)",
+    "auto_darker": "Auto levels: aim darker (beta)",
     "show_window": "Show the CatVision window",
 }
 
@@ -167,6 +169,8 @@ _SUGGESTED_KEYS = {
     "filter_next": "Ctrl+Alt+F",
     "auto_levels": "Ctrl+Alt+A",
     "auto_keep": "Ctrl+Alt+K",
+    "auto_brighter": "Ctrl+Alt+]",
+    "auto_darker": "Ctrl+Alt+[",
     "show_window": "Ctrl+Alt+C",
 }
 

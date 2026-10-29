@@ -130,6 +130,7 @@ action and press the keys.
 | Next color filter | Cycle color filters |
 | Auto levels on / off (beta) | Turns [auto levels](#auto-levels-beta) on or off |
 | Auto levels: keep this look (beta) | Auto levels aims for how the game looks right now |
+| Auto levels: aim brighter / darker (beta) | Nudge Aim for up or down while you play |
 | Show the CatVision window | Brings the window up |
 | Panic: everything off | Everything back to normal |
 
@@ -179,6 +180,9 @@ display and adjusts it live, the way your eyes adapt:
 - **No pumping:** it only brightens once a scene has stayed dark for a
   moment, so flickering lights, muzzle flashes and lightning don't make the
   picture bounce.
+- **Aim brighter / darker hotkeys:** nudge Aim for while you play, without
+  leaving the game (suggested Ctrl+Alt+] and Ctrl+Alt+[). They change the
+  game's own kept look if it has one.
 - **Keep this look:** when the game looks just right, click **Keep this look**
   (or use its hotkey or the tray menu). Auto levels then aims for that look,
   and brighter or darker scenes are adjusted from there.
@@ -218,6 +222,10 @@ things out to you.
 - A few games and videos block screen capture and show up black. Auto levels
   holds still on a black screen instead of over-brightening, and if it can't
   see the picture at all for a couple of seconds it eases back to your preset.
+- Some games in exclusive fullscreen leave Windows with a frozen, old
+  picture. If the picture doesn't change at all for a few seconds, auto
+  levels stops following it and eases back to your preset, and the Home tab
+  says *the picture isn't changing*. Borderless windowed mode avoids this.
 - It's off by default, and it stops watching whenever CatVision or auto
   levels is turned off.
 

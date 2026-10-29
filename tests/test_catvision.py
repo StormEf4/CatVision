@@ -1009,3 +1009,36 @@ class AutoLevelsSmoothnessTests(unittest.TestCase):
         self.assertGreater(seen[-1], 5)
         steps = [b - a for a, b in zip(seen, seen[1:])]
         self.assertLess(max(steps), 1.4)
+
+
+class AutoLevelsStaleAndAimTests(unittest.TestCase):
+    def test_frozen_picture_eases_back_to_the_preset(self):
+        from catvision.autolevels import Controller, measure
+        c = Controller()
+        frames = [measure(_picture(4 + i % 2), 96) for i in range(2)]   # a live, changing picture
+        for i in range(40):
+            c.step(frames[i % 2], 30, 0.12, 0.2)
+        self.assertGreater(c.offset, 20)
+        stuck = measure(_picture(4), 96)                 # then the same picture over and over
+        for _ in range(60):
+            c.step(stuck, 30, 0.12, 0.2)
+        self.assertTrue(c.frozen)
+        self.assertLess(abs(c.offset), 3)
+        for i in range(30):                              # it starts moving again: back to work
+            c.step(frames[i % 2], 30, 0.12, 0.2)
+        self.assertFalse(c.frozen)
+        self.assertGreater(c.offset, 15)
+
+    def test_still_picture_without_tracking_is_not_frozen(self):
+        from catvision.autolevels import Controller, measure
+        c = Controller()
+        for _ in range(60):
+            c.step(measure(_picture(4)), 30, 0.12, 0.2)   # tests and fakes: no signature
+        self.assertFalse(c.frozen)
+
+    def test_aim_brighter_and_darker(self):
+        from catvision.autolevels import TARGET_LIMITS, nudge_aim
+        self.assertAlmostEqual(nudge_aim(0.12, True), 0.15)
+        self.assertAlmostEqual(nudge_aim(0.15, False), 0.12)
+        self.assertEqual(nudge_aim(TARGET_LIMITS[1], True), TARGET_LIMITS[1])
+        self.assertEqual(nudge_aim(TARGET_LIMITS[0], False), TARGET_LIMITS[0])

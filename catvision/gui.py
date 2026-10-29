@@ -662,6 +662,23 @@ class CatVisionApp:
             self.set_status(msg)
         return msg
 
+    def _nudge_auto_aim(self, brighter: bool) -> str:
+        """Aim brighter / darker from a hotkey, without leaving the game.
+        Changes the game's own kept look if it has one."""
+        o = self.cfg.options
+        aim = autolevels.nudge_aim(self._auto_aim(), brighter)
+        if self._auto_game in o.auto_game_looks:
+            o.auto_game_looks[self._auto_game] = aim
+        else:
+            o.auto_target = aim
+        self.auto_vars["auto_target"].set(aim)
+        for r in self.auto_rows:
+            r.refresh()
+        self._schedule_save()
+        word = "brighter" if brighter else "darker"
+        note = "" if o.auto_levels else " (auto levels is off)"
+        return f"Auto levels (beta): aim {word} ({aim * 100:.0f}%){note}"
+
     def _forget_game_look(self) -> None:
         o = self.cfg.options
         if o.auto_game_looks.pop(self._auto_game, None) is not None:
@@ -720,6 +737,9 @@ class CatVisionApp:
                     lines.append(f"{name}: starting...")
                 elif m is None:
                     lines.append(f"{name}: can't see the picture. Try borderless windowed mode.")
+                elif self._auto_ctrl.get(did) and self._auto_ctrl[did].frozen:
+                    lines.append(f"{name}: the picture isn't changing (paused, or exclusive "
+                                 f"fullscreen?)  \u00b7  back to your preset")
                 else:
                     held = "  (black screen: holding)" if m.black else ""
                     lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  {change}{held}")
@@ -1472,6 +1492,8 @@ class CatVisionApp:
             msg = f"Auto levels (beta) {'ON' if self.cfg.options.auto_levels else 'OFF'}"
         elif action == "auto_keep":
             msg = self._keep_auto_look(quiet=True)
+        elif action in ("auto_brighter", "auto_darker"):
+            msg = self._nudge_auto_aim(action == "auto_brighter")
         elif action.startswith("display:"):
             self._set_displays_from_tray(action)
         elif action == "identify":

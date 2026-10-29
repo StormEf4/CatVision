@@ -29,7 +29,7 @@ RUSH_S = 0.12                   # a flash fades down in about a tenth of a secon
 # eye can't see as a step.
 MAX_RISE = 25.0
 MAX_RISE_FAST = 40.0
-MAX_FALL = 80.0
+MAX_FALL = 50.0
 MAX_RUSH = 240.0
 FADER_HZ = 60                   # how often the displays are moved
 STOPS_FOR_FULL = 3.0            # 3 stops darker/brighter than the target = full strength
@@ -40,6 +40,8 @@ SPEEDS = {"slow": 0.5, "normal": 1.0, "fast": 2.0}
 SETTLE_S = 1.0                  # only brighten once it has stayed dark this long (no pumping)
 FLASH_RATIO = 2.0               # a picture twice as bright as the last one is a flash...
 LOST_S = 2.0                    # ...and a picture lost this long eases back to the preset
+FROZEN_S = 3.0                  # a picture that hasn't changed at all this long is stale
+AIM_STEP = 1.25                 # the "aim brighter / darker" hotkeys change Aim for this much
 # When the main slider runs out of room, the rest goes to the other one
 # (Exposure works harder per point, so it gets half as much).
 SPILL = {"shadow_boost": ("exposure", 0.5), "exposure": ("shadow_boost", 1.0)}
@@ -64,6 +66,7 @@ class Measurement:
     dark: float     # share of the picture that is near-black
     bright: float   # share that is near-white
     black: bool     # completely black: probably can't see the picture
+    signature: int = 0  # changes whenever the picture changes (0 = not tracked)
 
 
 _weights_cache: dict[tuple[int, int], list[float]] = {}
@@ -86,7 +89,8 @@ def _center_weights(width: int, height: int) -> list[float]:
 
 def measure(bgra: bytes, width: int | None = None) -> Measurement:
     """Brightness of a 32-bit BGRA picture (as Windows hands it over).
-    With the picture's width, the middle of the screen counts extra."""
+    With the picture's width (a real capture), the middle of the screen
+    counts extra and a stale, unchanging picture can be noticed."""
     n = len(bgra) // 4
     if n == 0:
         return Measurement(0.0, 0.0, 0.0, 1.0, 0.0, True)
@@ -111,7 +115,8 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     key = math.exp((1 - SHADOW_SHARE) * math.log(average) + SHADOW_SHARE * math.log(shadows))
     dark = sum(1 for v in lum if v < 26) / n
     bright = sum(1 for v in lum if v > 230) / n
-    return Measurement(key, average, shadows, dark, bright, max(lum) == 0)
+    signature = (hash(bgra) or 1) if width else 0
+    return Measurement(key, average, shadows, dark, bright, max(lum) == 0, signature)
 
 
 def target_offset(key: float, strength: float, target: float, dim: bool = True) -> float:
@@ -143,6 +148,13 @@ def clean_title(title: str) -> str:
     return " ".join((title or "").split())[:60]
 
 
+def nudge_aim(aim: float, brighter: bool) -> float:
+    """One press of "aim brighter" or "aim darker"."""
+    lo, hi = TARGET_LIMITS
+    aim = aim * AIM_STEP if brighter else aim / AIM_STEP
+    return round(min(hi, max(lo, aim)), 3)
+
+
 def aim_for_current_look(key: float, offset: float, strength: float) -> float:
     """The Aim for value that makes a scene this bright keep its current
     adjustment ("Keep this look")."""
@@ -166,13 +178,25 @@ class Controller:
     clock: float = 0.0
     velocity: float = 0.0
     rush: bool = False                             # a flash: fade down extra fast
+    frozen: bool = False                           # the picture has stopped changing
     _recent: list = field(default_factory=list)   # (time, key) of the last SETTLE_S
     _last_key: float = 0.0
     _missing_since: float | None = None
+    _signature: int = 0
+    _same_since: float = 0.0
 
     def observe(self, m: Measurement | None, strength: float, target: float,
                 dim: bool = True) -> None:
         self.strength = strength
+        if m is not None and m.signature:
+            # Some games in exclusive fullscreen leave Windows with an old,
+            # frozen picture.  One that hasn't changed at all for a few
+            # seconds is treated as not seen, so it can't steer anything.
+            if m.signature != self._signature:
+                self._signature, self._same_since = m.signature, self.clock
+            self.frozen = self.clock - self._same_since >= FROZEN_S
+            if self.frozen:
+                m = None
         if m is None:  # couldn't capture the picture: hold, then ease back to the preset
             if self._missing_since is None:
                 self._missing_since = self.clock
