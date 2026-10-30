@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import curves
@@ -94,9 +94,9 @@ class Engine:
             # ours, not the user's -- fall back to a plain straight line.
             m.original = original or curves.identity_ramp()
         if unclean:
-            for m in self._monitors:
-                self.gamma.set_ramp(m.id, m.original)
-            self._mark_dirty(False)
+            # Keep the mark if Windows refused one (try again next start).
+            refused = [m for m in self._monitors if not self.gamma.set_ramp(m.id, m.original)]
+            self._mark_dirty(bool(refused))
 
     # -- monitors -----------------------------------------------------------
 
@@ -106,6 +106,27 @@ class Engine:
     def _targets(self) -> list[Monitor]:
         chosen = [m for m in self._monitors if m.id in self.displays]
         return chosen or self._monitors  # nothing (still) connected: use all
+
+    def refresh_layout(self) -> bool:
+        """Re-read where each display is and how fast it refreshes (the
+        resolution, arrangement or refresh rate changed while CatVision
+        runs).  True if anything changed.  A backend that can't tell, or a
+        display Windows no longer lists, keeps what it had."""
+        read = getattr(self.gamma, "layout", None)
+        if read is None:
+            return False
+        try:
+            now = read()
+        except Exception:   # a ctypes error too: this must never stop auto levels
+            return False
+        changed = False
+        with self._lock:
+            for m in self._monitors:
+                rect, hz = now.get(m.id, (m.rect, m.hz))
+                if (rect, hz) != (m.rect, m.hz):
+                    m.rect, m.hz = rect, hz
+                    changed = True
+        return changed
 
     def target_monitors(self) -> list[Monitor]:
         """The displays CatVision changes (all of them if none are chosen)."""
@@ -201,9 +222,8 @@ class Engine:
             redo = changed + [m for m in targets if m.id in due and m not in changed]
             if not redo:
                 return
-            tint, _matrix = curves.plan_color(self.settings, self.custom_filters,
-                                              self.custom_tints,
-                                              all_displays=self.all_displays_selected())
+            # Only the tint is needed (the color matrix is not redone).
+            tint = curves.plan_tint(self.settings, self.custom_tints)
             # Displays with no adjustment left get the normal full apply, so
             # they settle exactly where the preset alone would.
             self._apply_gamma(redo, tint, self.status, fading=True, search=due)
@@ -214,12 +234,14 @@ class Engine:
         return self.enabled and not self.status.gamma_ok
 
     def settings_for(self, display_id: str) -> Settings:
-        """The settings a display really gets (the preset plus auto levels)."""
+        """The settings a display really gets (the preset plus auto levels):
+        replace(...).clamped() in one pass (this runs on every auto levels
+        update)."""
         amounts = {k: v for k, v in self.auto_offsets.get(display_id, {}).items() if v}
         if not amounts:
             return self.settings
-        return replace(self.settings, **{k: getattr(self.settings, k) + v
-                                         for k, v in amounts.items()}).clamped()
+        s = self.settings
+        return s.clamped({k: getattr(s, k) + v for k, v in amounts.items()})
 
     def _apply_gamma(self, monitors, tint, status: Status, fading: bool = False,
                      search: set[str] = frozenset()) -> None:
@@ -240,11 +262,22 @@ class Engine:
             if adjusted:
                 result: GammaResult = apply_ramp_with_fallback(
                     self.gamma, m.id, ramp, self._fallback, search=m.id in search)
+                if m.id in search and result.ok and result.limited:
+                    # Windows may have started taking changes again partway
+                    # through that search, so what it found can be weaker than
+                    # Windows allows now, and a fade at rest sends nothing
+                    # more to climb back with: look once for the strongest.
+                    full = apply_ramp_with_fallback(self.gamma, m.id, ramp, None)
+                    if full.ok:
+                        result = full
+                        self._fallback[m.id] = shown_memory(full.applied or ramp)
             else:
                 result = self._apply_rest(m.id, ramp) if fading else None
                 if result is None:
                     result = apply_ramp_with_fallback(self.gamma, m.id, ramp, None)
-                if result.ok:
+                if result.ok and not any(self.auto_offsets.get(m.id, {}).values()):
+                    # Only the preset's own look (a full apply during a boost
+                    # shows the boosted one).
                     self._rest[m.id] = (ramp, result.applied or ramp)
                 # Remember what is on screen so the next fading update
                 # starts from it (no dip when it is refused).
@@ -279,17 +312,36 @@ class Engine:
         return None
 
     def check_and_reapply(self) -> bool:
-        """Re-apply if a game, driver or Windows reset the gamma ramp.
+        """Re-apply if a game, driver or Windows reset the gamma ramp, or
+        offer a change Windows refused again (nothing else would).
 
         Returns True if something had to be fixed.
         """
-        if not self.enabled or not self.gamma.available:
+        if not self.gamma.available:
             return False
         with self._lock:
+            if not self.enabled:
+                if not self._applied:
+                    return False
+                self._restore_gamma()   # Windows refused putting a display back
+                return True
             return self._check_and_reapply()
 
     def _check_and_reapply(self) -> bool:
+        refused = [m for m in self._targets() if not self._gamma_state.get(m.id, (True,))[0]]
+        retried = set()
+        if refused and not self.auto_offsets:
+            # Auto levels offers refused changes again while it runs; once it
+            # has stopped (or was never on), this is the only retry.  The
+            # screen may still show an old look, such as an ending boost.
+            tint, _matrix = curves.plan_color(self.settings, self.custom_filters,
+                                              self.custom_tints,
+                                              all_displays=self.all_displays_selected())
+            self._apply_gamma(refused, tint, self.status)
+            retried = {m.id for m in refused}
         for m in self._targets():
+            if m.id in retried:
+                continue   # (a display that always refuses mustn't stop the others' check)
             want = self._applied.get(m.id)
             have = self.gamma.get_ramp(m.id)
             if want is None or have is None:
@@ -302,7 +354,7 @@ class Engine:
             if drifted:
                 self._apply()
                 return True
-        return False
+        return bool(retried)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -315,28 +367,39 @@ class Engine:
         """Put the displays back immediately (safe to call from any thread).
 
         Used by Force quit, which must work even if the window is frozen.
-        Color filters end by themselves when the process exits.
+        Color filters end by themselves when the process exits.  CatVision
+        counts as off from here on, so an auto levels fade that is still
+        running (the fader thread isn't frozen with the window) can't put a
+        boost back before the process ends: the "display changed" mark is
+        already gone, so the next start would take that boost as the
+        display's own look.
         """
         if self._lock.acquire(timeout=1.0):
             try:
+                self.enabled = False
+                self.auto_generation += 1
                 self._restore_gamma()
             finally:
                 self._lock.release()
         else:  # something is stuck holding the lock: restore without it
-            for m in self._monitors:
-                self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())
-            self._mark_dirty(False)
+            self.enabled = False
+            self.auto_generation += 1
+            refused = [m for m in self._monitors
+                       if not self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())]
+            self._mark_dirty(bool(refused))
 
     # -- internals ----------------------------------------------------------
 
     def _restore_gamma(self) -> None:
-        for m in self._monitors:
-            if m.id in self._applied:
-                self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())
-        self._applied.clear()
+        # A display Windows refused to put back (a fullscreen switch, say)
+        # stays ours: it is tried again, and the "display changed" mark stays
+        # so the next start doesn't take our look as the display's own.
+        self._applied = {m.id: self._applied[m.id] for m in self._monitors
+                         if m.id in self._applied
+                         and not self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())}
         self._gamma_state.clear()
         self._rest.clear()
-        self._mark_dirty(False)
+        self._mark_dirty(bool(self._applied))
 
     def _mark_dirty(self, dirty: bool) -> None:
         if self._flag is None:

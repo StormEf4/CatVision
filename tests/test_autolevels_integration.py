@@ -202,6 +202,81 @@ class AutoLevelsEndTests(unittest.TestCase):
         self.assertEqual(g.ramps[D1], curves.build_ramp(Settings(shadow_boost=30)))
         e.shutdown()
 
+    def test_auto_off_while_windows_refuses_still_ends_the_boost(self):
+        g = CountingGamma()
+        e = Engine(g, NullColorBackend(), self.dir)
+        e.settings = Settings(shadow_boost=30)
+        e.set_enabled(True)
+        preset = g.get_ramp(D1)
+        run = e.auto_generation
+        e.set_auto_offsets({D1: {"shadow_boost": 30.0}}, generation=run)
+        g.limit = -1    # a fullscreen switch: Windows refuses everything for a moment
+        e.set_auto_offsets({D1: {}}, generation=run)   # the fade's last step, refused
+        g.limit = None
+        e.retire_auto_offsets()   # auto levels stops at once: no fader left to retry
+        self.assertNotEqual(g.ramps[D1], preset)
+        self.assertTrue(e.check_and_reapply())        # keep-applied offers it again
+        self.assertEqual(g.ramps[D1], preset)
+        self.assertTrue(e.status.gamma_ok)
+        self.assertFalse(e.check_and_reapply())
+        e.shutdown()
+
+    def test_a_display_that_always_refuses_doesnt_stop_keep_applied(self):
+        # Display 2 never takes a change (HDR, say); a game resets display 1.
+        class OneRefuses(CountingGamma):
+            def set_ramp(self, mid, ramp):
+                return mid != D2 and super().set_ramp(mid, ramp)
+        D2 = "\\\\.\\DISPLAY2"
+        g = OneRefuses()
+        e = Engine(g, NullColorBackend(), self.dir)
+        e.settings = Settings(shadow_boost=30)
+        e.set_enabled(True)
+        self.assertFalse(e.status.gamma_ok)
+        preset = g.get_ramp(D1)
+        g.ramps[D1] = curves.identity_ramp()
+        self.assertTrue(e.check_and_reapply())
+        self.assertEqual(g.ramps[D1], preset)
+        e.shutdown()
+
+    def test_refused_restore_keeps_the_display_changed_mark(self):
+        flag = self.dir / "display_modified.flag"
+        g = CountingGamma()
+        e = Engine(g, NullColorBackend(), self.dir)
+        e.settings = Settings(shadow_boost=30)
+        e.set_enabled(True)
+        boosted = g.get_ramp(D1)
+        g.limit = -1               # Windows refuses everything just as CatVision quits
+        e.shutdown()
+        self.assertEqual(g.ramps[D1], boosted)
+        self.assertTrue(flag.exists())   # so the next start doesn't take it as the user's own
+        Engine(g, NullColorBackend(), self.dir)     # still refused: the mark stays
+        self.assertTrue(flag.exists())
+        g.limit = None
+        e2 = Engine(g, NullColorBackend(), self.dir)
+        self.assertTrue(curves.is_identity_ramp(g.ramps[D1]))
+        self.assertFalse(flag.exists())
+        e2.set_enabled(True)
+        e2.set_enabled(False)
+        self.assertTrue(curves.is_identity_ramp(g.ramps[D1]))
+        e2.shutdown()
+
+    def test_off_while_windows_refuses_puts_the_display_back_later(self):
+        flag = self.dir / "display_modified.flag"
+        g = CountingGamma()
+        e = Engine(g, NullColorBackend(), self.dir)
+        e.settings = Settings(shadow_boost=30)
+        e.set_enabled(True)
+        g.limit = -1
+        e.set_enabled(False)       # the off hotkey at a bad moment
+        self.assertFalse(curves.is_identity_ramp(g.ramps[D1]))
+        self.assertTrue(flag.exists())
+        g.limit = None
+        self.assertTrue(e.check_and_reapply())     # keep-applied tries again
+        self.assertTrue(curves.is_identity_ramp(g.ramps[D1]))
+        self.assertFalse(flag.exists())
+        self.assertFalse(e.check_and_reapply())
+        e.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

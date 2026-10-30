@@ -151,6 +151,45 @@ class LeavingDarkTests(unittest.TestCase):
         self.assertLess(_too_bright_s(frames, 3), 0.45)
         self.assertLess(_largest_step(frames), 4.1)
 
+    def test_coming_out_of_a_cave_in_steps_fades_like_a_flash(self):
+        # Brightening over 1.5 s: each measurement is under FLASH_RATIO
+        # brighter, but it keeps brightening while the display is still
+        # boosted far too much, so it fades at the flash pace (it used to
+        # glare for about 0.7 s).
+        frames = _run(_gradual(DARK, BRIGHT, 3, 1.5), 8, start=DARK)
+        self.assertLess(_too_bright_s(frames, 3), 0.45)
+        self.assertEqual(_reversals(frames, 3), 0)
+        self.assertLess(_largest_step(frames), 4.1)
+        self.assertLess(abs(frames[-1][1] - _settled(BRIGHT)), 1.0)
+
+    def test_one_brighter_picture_still_dims_at_the_normal_pace(self):
+        def settled_at(level):
+            c = Controller()
+            c.offset = c.want = _settled(level)
+            c.observe(_m(level), STRENGTH, AIM)
+            return c
+
+        def wait(c):
+            for _ in range(12):
+                c.advance(FRAME)
+        # A light flickering on (less than a flash) dims as far as before,
+        # at the normal pace, so flicker never dims more than it used to...
+        for ratio in (1.25, 1.4, 1.6, 1.9):
+            c = settled_at(20)
+            wait(c)
+            c.observe(_m(int(round(20 * ratio))), STRENGTH, AIM)
+            self.assertLess(c.want, c.offset)
+            self.assertFalse(c.rush, ratio)
+        # ...but brightening again while that fade is still going is the
+        # way out of the dark: the rest fades at the flash pace.
+        c = settled_at(20)
+        wait(c)
+        c.observe(_m(32), STRENGTH, AIM)
+        wait(c)
+        self.assertFalse(c.rush)
+        c.observe(_m(51), STRENGTH, AIM)
+        self.assertTrue(c.rush)
+
 
 class NoPumpingTests(unittest.TestCase):
     def test_a_strobe_never_lets_it_brighten_between_flashes(self):

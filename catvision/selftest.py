@@ -239,6 +239,304 @@ def _auto_levels_app_check(root, app) -> dict:
     return out
 
 
+def _thumbnail() -> bytes:
+    """A picture like one auto levels captures (96x54 BGRA): a dim scene
+    with a brighter middle and some texture, so measure() does its full work."""
+    from .autolevels import THUMB_H, THUMB_W
+    out = bytearray()
+    for y in range(THUMB_H):
+        for x in range(THUMB_W):
+            v = 20 + (x * 7 + y * 13) % 40 + (60 if abs(x - THUMB_W // 2) < 20 else 0)
+            out += bytes((v, v + 5, v + 10, 255))
+    return bytes(out)
+
+
+def _gap_stats(stamps: list[float], hz: float) -> dict:
+    """How evenly spaced the fader's steps were (gaps in ms)."""
+    gaps = sorted((b - a) * 1000 for a, b in zip(stamps, stamps[1:]))
+    if not gaps:
+        return {"steps": len(stamps)}
+    beat = 1000 / hz
+
+    def pick(share):
+        return round(gaps[min(len(gaps) - 1, int(len(gaps) * share))], 2)
+    return {"steps": len(stamps), "hz": round(len(gaps) / (sum(gaps) / 1000), 1),
+            "median_ms": pick(0.5), "p95_ms": pick(0.95), "max_ms": round(gaps[-1], 2),
+            "late_steps": sum(1 for g in gaps if g > beat * 1.5)}
+
+
+def fader_steps_under_load(seconds: float, load: str, switch_s: float | None = None,
+                           hz: float | None = None) -> dict:
+    """Auto levels (beta): how evenly the fader steps while other threads
+    run Python.  ``load``: "watcher" (the real Watcher measuring a captured
+    picture five times a second, plus window-like work every 50 ms) or
+    "busy" (a thread measuring pictures back to back: the worst case).
+    ``switch_s``: Python's thread switch interval for the run (restored
+    afterwards).  Each step builds a real brightness table (its usual cost)
+    but no display is changed.  Never raises: problems go in "error"."""
+    import threading
+    import time
+    from . import autolevels, curves
+    hz = hz or autolevels.FADER_MAX_HZ
+    out: dict = {"load": load, "switch_ms": None}
+    old_switch = sys.getswitchinterval()
+    stop = threading.Event()
+    threads: list = []
+    watcher = fader = None
+    measure_ms: list[float] = []
+    try:
+        if switch_s is not None:
+            sys.setswitchinterval(switch_s)
+        out["switch_ms"] = round(sys.getswitchinterval() * 1000, 2)
+        thumb = _thumbnail()
+
+        def busy():
+            while not stop.is_set():
+                start = time.perf_counter()
+                autolevels.measure(thumb, autolevels.THUMB_W)
+                measure_ms.append((time.perf_counter() - start) * 1000)
+
+        def window_like():   # the window's 50 ms tick: a little Python work
+            ctrl = autolevels.Controller()
+            m = autolevels.measure(thumb, autolevels.THUMB_W)
+            while not stop.is_set():
+                for _ in range(20):
+                    ctrl.observe(m, 30.0, 0.12)
+                    autolevels.split_offset("shadow_boost", 12.5, {"shadow_boost": 50.0})
+                stop.wait(0.05)
+
+        if load == "busy":
+            threads.append(threading.Thread(target=busy, daemon=True))
+        else:
+            watcher = autolevels.Watcher(capture=lambda rect: thumb)
+            watcher.watch({"test": (0, 0, autolevels.THUMB_W, autolevels.THUMB_H)})
+            threads.append(threading.Thread(target=window_like, daemon=True))
+        for t in threads:
+            t.start()
+        stamps: list[float] = []
+
+        def apply(positions):
+            curves.build_ramp(curves.Settings(shadow_boost=20 + len(stamps) % 40 * 0.25))
+            stamps.append(time.perf_counter())   # about when the display would change
+
+        fader = autolevels.Fader({"test": autolevels.Controller(want=1e6, strength=1e6)},
+                                 apply)
+        fader.set_rate(hz)
+        fader.start()
+        time.sleep(seconds)
+        fader.stop()
+        out.update(_gap_stats(stamps, hz))
+        if watcher is not None:
+            out["measurements"] = watcher.latest()[0]
+        if measure_ms:
+            out["measure_ms"] = round(sorted(measure_ms)[len(measure_ms) // 2], 2)
+        if fader.last_error:
+            out["error"] = fader.last_error
+    except Exception as exc:
+        out["error"] = repr(exc)
+    finally:
+        stop.set()
+        for stopper in (fader, watcher):
+            try:
+                if stopper is not None:
+                    stopper.stop()
+            except Exception as exc:
+                out.setdefault("error", repr(exc))
+        for t in threads:
+            t.join(timeout=1.0)
+        sys.setswitchinterval(old_switch)
+    return out
+
+
+def gamma_call_cost(gamma, calls: int = 200) -> dict:
+    """Auto levels (beta): where one brightness change's time goes on this
+    PC (every fade step makes one per display, two when Windows limits the
+    strength).  ``dc_ms``: opening and closing the display's device context
+    (set_ramp does that on every call); ``set_only_ms``: SetDeviceGammaRamp
+    on a context kept open; ``set_ramp_ms``: the whole set_ramp; the
+    ``*_cpu_ms`` values are CPU time (Windows counts it in 15.6 ms ticks,
+    hence the many calls); ``refused_ms``: a call Windows turns down;
+    ``set_ramp_quick_ms``: the way fading updates set it (a kept context),
+    and ``quick_readback_max_diff``: a slight look set that way and read
+    back through a fresh context (0, or driver rounding: it reached the
+    display); ``layout_reread_keeps_dc``: reading the refresh rate again
+    (nothing changed) keeps that context.  The timed ramps differ from the
+    display's own by one 16-bit unit in one entry, which nobody can see,
+    and the display gets its own ramp back.
+    Information only: never raises, problems go in "error"."""
+    out: dict = {}
+    if not hasattr(gamma, "_gdi32") or not hasattr(gamma, "_with_dc"):
+        return {"skipped": "not the Windows gamma backend"}
+    original = None
+    monitor = None
+    try:   # (imports too: a problem here must never fail the self-test)
+        import statistics
+        import time
+        from . import curves
+        from .backends import fill_ramp_buffer
+        monitors = gamma.monitors()
+        if not monitors:
+            return {"skipped": "no displays"}
+        monitor = monitors[0].id
+        original = gamma.get_ramp(monitor)
+        if original is None:
+            return {"skipped": "the display's ramp can't be read"}
+        nudged = [list(ch) for ch in original]
+        green = nudged[1]
+        if len(green) > 129:   # one unit up or down, still never going down
+            if green[128] < green[129]:
+                green[128] += 1
+            elif green[128] > green[127]:
+                green[128] -= 1
+        ramps = (nudged, original)
+
+        def timed(fn, n: int = calls) -> tuple[float, float]:
+            """Median wall ms per call, and CPU ms per call over all of them."""
+            walls = []
+            cpu = time.thread_time()
+            for i in range(n):
+                start = time.perf_counter()
+                fn(i)
+                walls.append(time.perf_counter() - start)
+            cpu = time.thread_time() - cpu
+            return (round(statistics.median(walls) * 1000, 3), round(cpu / n * 1000, 3))
+
+        out["calls"] = calls
+        out["dc_ms"], out["dc_cpu_ms"] = timed(lambda i: gamma._with_dc(monitor, lambda hdc: 1))
+        out["set_ramp_ms"], out["set_ramp_cpu_ms"] = timed(
+            lambda i: gamma.set_ramp(monitor, ramps[i % 2]))
+        buffers = []
+        for ramp in ramps:
+            buf = gamma._RAMP()
+            fill_ramp_buffer(buf, ramp)
+            buffers.append(buf)
+        gdi, byref = gamma._gdi32, gamma._ctypes.byref
+        hdc = gdi.CreateDCW(monitor, None, None, None)
+        if hdc:
+            try:
+                accepted = []
+                out["set_only_ms"], out["set_only_cpu_ms"] = timed(
+                    lambda i: accepted.append(bool(gdi.SetDeviceGammaRamp(
+                        hdc, byref(buffers[i % 2])))))
+                out["set_only_accepted"] = sum(accepted)
+            finally:
+                gdi.DeleteDC(hdc)
+        quick = getattr(gamma, "set_ramp_quick", None)
+        if quick is not None:
+            # Fading updates reuse the display's device context (see
+            # backends.DC_REUSE_S): what that costs, and whether a ramp set
+            # through a kept one is really what the display holds (read back
+            # through a fresh one: a slight look, then the display's own).
+            from .backends import DC_REUSE_S
+            out["set_ramp_quick_ms"], out["set_ramp_quick_cpu_ms"] = timed(
+                lambda i: quick(monitor, ramps[i % 2]))
+            look = curves.build_ramp(curves.Settings(shadow_boost=3))
+            out["quick_ok"] = bool(quick(monitor, look))
+            back = gamma.get_ramp(monitor)
+            gamma.set_ramp(monitor, original)
+            if back is not None:   # 0 (or driver rounding): it reached the display
+                out["quick_readback_max_diff"] = max(
+                    abs(a - b) for x, y in zip(back, look) for a, b in zip(x, y))
+                out["quick_look_vs_own_max_diff"] = max(
+                    abs(a - b) for x, y in zip(original, look) for a, b in zip(x, y))
+            time.sleep(DC_REUSE_S + 0.05)
+            out["quick_renewed_ok"] = bool(quick(monitor, original))
+            # Reading the refresh rate again with nothing changed keeps the
+            # kept context (a different reading is a display change, which
+            # closes it: see backends' _note_layout).
+            rate = getattr(gamma, "_refresh_rate", None)
+            if rate is not None:
+                # (Only when a context is kept to begin with: a CreateDC
+                # failure would otherwise read as a display change.)
+                kept = monitor in getattr(gamma, "_dcs", {})
+                out["refresh_hz"] = rate(monitor)
+                rate(monitor)
+                if kept:
+                    out["layout_reread_keeps_dc"] = monitor in getattr(gamma, "_dcs", {})
+        # A ramp far from a straight line: Windows refuses it unless full
+        # strength is unlocked.  Timed again only while it is refused (an
+        # accepted one would flash on screen).
+        strong = curves.build_ramp(curves.Settings(shadow_boost=100, gamma=3.0))
+        out["strong_accepted"] = bool(gamma.set_ramp(monitor, strong))
+        if out["strong_accepted"]:
+            gamma.set_ramp(monitor, original)
+        else:
+            out["refused_ms"], _cpu = timed(lambda i: gamma.set_ramp(monitor, strong), 20)
+    except Exception as exc:
+        out["error"] = repr(exc)
+    finally:
+        try:
+            if original is not None and monitor is not None:
+                out["restored"] = bool(gamma.set_ramp(monitor, original))
+        except Exception as exc:
+            out.setdefault("error", repr(exc))
+        try:   # the contexts set_ramp_quick kept (the backend still works)
+            if getattr(gamma, "set_ramp_quick", None) is not None:
+                gamma.close()
+        except Exception as exc:
+            out.setdefault("error", repr(exc))
+    return out
+
+
+def _median_ms(fn, n: int) -> float:
+    """Median time of ``fn(i)`` for i in range(n), in ms."""
+    import statistics
+    import time
+    times = []
+    for i in range(n):
+        start = time.perf_counter()
+        fn(i)
+        times.append(time.perf_counter() - start)
+    return round(statistics.median(times) * 1000, 3)
+
+
+def capture_costs(gamma) -> dict:
+    """See run()'s capture_cost."""
+    import ctypes
+    from .autolevels import gdi_capture
+    mons = [m for m in gamma.monitors() if m.rect]
+    if not mons:
+        return {"skipped": "no display positions"}
+    rect = mons[0].rect
+    left, top, right, bottom = rect
+    out: dict = {"size": [right - left, bottom - top]}
+    gdi_capture(rect)   # the first one sets things up
+    out["capture_ms"] = _median_ms(lambda i: gdi_capture(rect), 8)
+    # The same display copied at full size, without HALFTONE averaging.
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    vp, cint = ctypes.c_void_p, ctypes.c_int
+    user32.GetDC.restype, user32.GetDC.argtypes = vp, [vp]
+    user32.ReleaseDC.argtypes = [vp, vp]
+    gdi32.CreateCompatibleDC.restype, gdi32.CreateCompatibleDC.argtypes = vp, [vp]
+    gdi32.CreateCompatibleBitmap.restype = vp
+    gdi32.CreateCompatibleBitmap.argtypes = [vp, cint, cint]
+    gdi32.SelectObject.restype, gdi32.SelectObject.argtypes = vp, [vp, vp]
+    gdi32.DeleteObject.argtypes = [vp]
+    gdi32.DeleteDC.argtypes = [vp]
+    gdi32.BitBlt.argtypes = [vp, cint, cint, cint, cint, vp, cint, cint, ctypes.c_uint32]
+    w, h = right - left, bottom - top
+    screen = user32.GetDC(None)
+    if not screen:
+        return out
+    mem = bmp = None
+    try:
+        mem = gdi32.CreateCompatibleDC(screen)
+        bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+        if mem and bmp:
+            old = gdi32.SelectObject(mem, bmp)
+            out["full_copy_ms"] = _median_ms(
+                lambda i: gdi32.BitBlt(mem, 0, 0, w, h, screen, left, top, 0x00CC0020), 8)
+            gdi32.SelectObject(mem, old)
+    finally:
+        if mem:
+            gdi32.DeleteDC(mem)
+        if bmp:
+            gdi32.DeleteObject(bmp)
+        user32.ReleaseDC(None, screen)
+    return out
+
+
 def run(report_path: str) -> int:
     report: dict = {"platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
                     "checks": {}, "errors": []}
@@ -269,6 +567,12 @@ def run(report_path: str) -> int:
                     gamma, m.id, curves.build_ramp(curves.Settings(shadow_boost=60)))
                 entry["apply_ok"] = result.ok
                 entry["limited"] = result.limited
+                try:   # does the driver hold what was set?  (information only)
+                    back = gamma.get_ramp(m.id)
+                    entry["readback_max_diff"] = None if back is None or not result.ok else max(
+                        abs(a - b) for x, y in zip(back, result.applied) for a, b in zip(x, y))
+                except Exception as exc:
+                    entry["readback_error"] = repr(exc)
                 entry["restored"] = gamma.set_ramp(m.id, original)
             out.append(entry)
         return out
@@ -311,6 +615,10 @@ def run(report_path: str) -> int:
             e.settings = curves.Settings(shadow_boost=40, color_filter="night_vision")
             st = e.set_enabled(True)
             out.append({"per_display_apply": st.gamma_ok, "screen_wide_color": st.color_all_displays})
+            # Re-reading the layout right away finds nothing changed.
+            layout = gamma.layout() if hasattr(gamma, "layout") else {}
+            out.append({"layout": {k: [list(r), hz] for k, (r, hz) in layout.items()},
+                        "layout_changed": e.refresh_layout()})
             e.restore_now()
         return out
 
@@ -415,9 +723,86 @@ def run(report_path: str) -> int:
             out["error"] = repr(exc)
         return out
 
+    def update_cost():
+        """Auto levels (beta): CPU milliseconds for one fade step on this PC
+        (medians; the fader makes up to 120 a second per display).  Uses a
+        stand-in display, so nothing on screen changes.  Information only."""
+        import statistics
+        import time
+        out = {}
+
+        def median_ms(fn, n=60):
+            times = []
+            for i in range(n):
+                start = time.perf_counter()
+                fn(i)
+                times.append(time.perf_counter() - start)
+            return round(statistics.median(times) * 1000, 3)
+        try:   # (imports too: a problem here must never fail the self-test)
+            import ctypes
+            from .backends import NullColorBackend, NullGammaBackend, fill_ramp_buffer
+            from .engine import Engine
+            look = curves.Settings(shadow_boost=40, exposure=6, anti_glare=100, gamma=1.1)
+            out["build_ramp_ms"] = median_ms(
+                lambda i: curves.build_ramp(curves.Settings(shadow_boost=40 + i * 0.37)))
+            ramp = curves.build_ramp(curves.Settings(shadow_boost=100, gamma=2))
+            out["limit_ramp_ms"] = median_ms(lambda i: curves.limit_ramp_deviation(ramp, 96))
+            buffer_type = (ctypes.c_ushort * 256) * 3
+            out["copy_ramp_ms"] = median_ms(lambda i: fill_ramp_buffer(buffer_type(), ramp))
+            engine = Engine(NullGammaBackend(), NullColorBackend())
+            engine.set_settings(look)
+            engine.set_enabled(True)
+            did = engine.monitors()[0].id
+            out["engine_update_ms"] = median_ms(
+                lambda i: engine.set_auto_offsets({did: {"shadow_boost": 5 + i * 0.37}}))
+            # Night vision: auto levels moves Exposure, three tinted channels.
+            engine.set_settings(curves.Settings(
+                exposure=40, anti_glare=100, gamma=1.3, contrast=1.1, black_floor=0.015,
+                white_cap=0.88, color_filter="night_vision"))
+            out["engine_update_night_vision_ms"] = median_ms(
+                lambda i: engine.set_auto_offsets({did: {"exposure": 5 + i * 0.37}}))
+        except Exception as exc:
+            out["error"] = repr(exc)
+        return out
+
+    def fader_load():
+        """Auto levels (beta): how evenly the fader steps at 120 a second
+        while the Watcher measures and the window works, with CatVision's
+        thread switch interval and Python's own (5 ms) for comparison; and
+        with a thread measuring back to back (the worst case).  Information
+        only: never fails the test."""
+        out: dict = {}
+        try:
+            from . import autolevels
+            out["app_switch_ms"] = autolevels.THREAD_SWITCH_S * 1000
+            for name, seconds, load, switch in (
+                    ("watcher", 0.6, "watcher", autolevels.THREAD_SWITCH_S),
+                    ("watcher_python_default", 0.6, "watcher", 0.005),
+                    ("busy", 0.3, "busy", autolevels.THREAD_SWITCH_S),
+                    ("busy_python_default", 0.3, "busy", 0.005)):
+                out[name] = fader_steps_under_load(seconds, load, switch)
+        except Exception as exc:
+            out["error"] = repr(exc)
+        return out
+
+    def capture_cost():
+        """Auto levels (beta): what one picture capture costs (median ms of
+        several, after the first), and how much of it is copying the whole
+        display without shrinking it.  Information only."""
+        out: dict = {}
+        try:
+            out.update(capture_costs(gamma))
+        except Exception as exc:
+            out["error"] = repr(exc)
+        return out
+
     check("gamma", gamma_roundtrip)
     check("auto_levels", auto_levels)
     check("fader", fader_timing)
+    check("update_cost", update_cost)
+    check("gamma_calls", lambda: gamma_call_cost(gamma))
+    check("capture_cost", capture_cost)
+    check("fader_load", fader_load)
     check("color_filter", color_filter)
     check("hotkeys", hotkeys)
     def full_strength():

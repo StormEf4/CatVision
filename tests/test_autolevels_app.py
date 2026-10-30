@@ -351,6 +351,8 @@ class AutoLevelsAppStress(unittest.TestCase):
         for _ in range(30):
             self.app.handle_action("auto_brighter")
         self.assertEqual(self.app.cfg.options.auto_game_looks["Game A"], hi)
+        # At the limit a press says so instead of claiming a change.
+        self.assertIn("already at its brightest", self.app._nudge_auto_aim(True))
         self.assertEqual(self.app.cfg.options.auto_target, default)
 
         self.front["title"] = "Game B"
@@ -575,6 +577,289 @@ class AutoLevelsAppStress(unittest.TestCase):
         self.assertEqual(self.app.cfg.options.auto_game_looks, {}, msg)
         self.assertIn("can't see the picture", msg)
         self.screen.release.set()
+        self.assert_clean()
+
+    def test_own_window_in_front_holds_the_game_look(self):
+        # The player switches to CatVision to click "Keep this look" (the
+        # tray menu brings CatVision to the front too): the game's look is
+        # held, not eased back, and the picture (now CatVision's own window)
+        # doesn't steer anything.
+        self.start_fade()
+        self.assertTrue(self.pump_until(lambda: abs(self.app._auto_ctrl[D1].offset
+                                                    - self.app._auto_ctrl[D1].want) < 0.5, 8))
+        ctrl = self.app._auto_ctrl[D1]
+        held, want = ctrl.offset, ctrl.want
+        self.front["title"] = autolevels.OWN_WINDOW
+        self.front["displays"] = set()
+        self.screen.mode = "bright"
+        self.pump(1.5)
+        self.assertEqual(self.app._auto_shown.get(D1, ("?", None))[0], "watching", self.info())
+        self.assertEqual(ctrl.want, want)
+        self.assertAlmostEqual(ctrl.offset, held, delta=0.5)
+        msg = self.app._keep_auto_look(quiet=True)
+        self.assertIn("keeping this look for Game A", msg)
+        self.assertIn("Game A", self.app.cfg.options.auto_game_looks)
+        # Back in the game: it follows the picture again.
+        self.front["title"], self.front["displays"] = "Game A", {D1}
+        self.assertTrue(self.pump_until(lambda: ctrl.want < want - 1, 4), self.info())
+        self.assert_clean()
+
+    def test_keep_look_just_after_leaving_the_game(self):
+        # The tray menu is reached through the taskbar, which releases the
+        # game's displays: Keep then keeps the look from just before.
+        from catvision import gui as gui_mod
+        self.start_fade()
+        self.front["title"] = ""     # the taskbar is in front
+        self.assertTrue(self.pump_until(
+            lambda: self.app._auto_shown.get(D1, ("?", None))[0] == "waiting", 3))
+        self.front["title"] = autolevels.OWN_WINDOW   # the tray menu
+        self.front["displays"] = set()
+        self.pump(0.5)
+        msg = self.app._keep_auto_look(quiet=True)
+        self.assertIn("for Game A", msg)
+        self.assertIn("Game A", self.app.cfg.options.auto_game_looks)
+        # ...but not long after.
+        self.app.cfg.options.auto_game_looks.clear()
+        old = gui_mod.AUTO_KEEP_RECENT_S
+        gui_mod.AUTO_KEEP_RECENT_S = 0.0
+        try:
+            msg = self.app._keep_auto_look(quiet=True)
+        finally:
+            gui_mod.AUTO_KEEP_RECENT_S = old
+        self.assertEqual(self.app.cfg.options.auto_game_looks, {}, msg)
+        self.assert_clean()
+
+    def test_own_window_hold_ends(self):
+        # The hold is time-limited, so a closed game can't stay boosted just
+        # because CatVision's window came to the front.
+        from catvision import gui as gui_mod
+        old = gui_mod.AUTO_OWN_HOLD_S, gui_mod.AUTO_KEEP_RECENT_S
+        # (the hold outlasts the "just left the game" time, as it does for real)
+        gui_mod.AUTO_OWN_HOLD_S, gui_mod.AUTO_KEEP_RECENT_S = 0.6, 0.3
+        try:
+            self.start_fade()
+            self.front["title"] = autolevels.OWN_WINDOW
+            self.front["displays"] = set()
+            ctrl = self.app._auto_ctrl[D1]
+            self.assertTrue(self.pump_until(lambda: ctrl.offset == 0
+                                            and not self.engine.auto_offsets.get(D1), 8))
+            self.assertEqual(self.app._auto_shown.get(D1, ("?", None))[0], "waiting")
+            msg = self.app._keep_auto_look(quiet=True)
+            self.assertIn("no game picture", msg)
+        finally:
+            gui_mod.AUTO_OWN_HOLD_S, gui_mod.AUTO_KEEP_RECENT_S = old
+        self.assert_clean()
+
+    def test_test_pattern_shows_the_preset_alone(self):
+        # The test pattern is CatVision's own window too, but it is for
+        # judging the preset: no game look is held while it is open.
+        from catvision.gui_testpattern import open_test_pattern
+        self.start_fade()
+        ctrl = self.app._auto_ctrl[D1]
+        tp = open_test_pattern(self.app)
+        try:
+            self.front["title"] = autolevels.OWN_WINDOW
+            self.front["displays"] = set()
+            self.assertTrue(self.pump_until(lambda: ctrl.offset == 0
+                                            and not self.engine.auto_offsets.get(D1), 8),
+                            self.info())
+        finally:
+            tp.close()
+        self.assert_clean()
+
+    def test_display_resolution_change_is_followed(self):
+        # The player (or a game) changes the resolution while CatVision runs:
+        # the new screen area is measured, and the faster refresh rate used.
+        from catvision import gui as gui_mod
+        old = gui_mod.AUTO_LAYOUT_S
+        gui_mod.AUTO_LAYOUT_S = 0.1
+        layout = {D1: ((0, 0, 1920, 1080), 240), D2: ((1920, 0, 2720, 600), 60)}
+        self.gamma.layout = lambda: dict(layout)
+        try:
+            self.start_fade()
+            self.assertTrue(self.pump_until(
+                lambda: self.app.auto_watch._rects.get(D1) == (0, 0, 1920, 1080), 3))
+            self.assertAlmostEqual(self.app._auto_fader.interval,
+                                   1.0 / autolevels.fader_rate([240]))
+        finally:
+            gui_mod.AUTO_LAYOUT_S = old
+        self.assert_clean()
+
+    def _settled(self, did=D1):
+        ctrl = self.app._auto_ctrl[did]
+        self.assertTrue(self.pump_until(lambda: abs(ctrl.offset - ctrl.want) < 0.5
+                                        and abs(ctrl.velocity) < 0.05, 8), self.info())
+        return ctrl
+
+    def test_auto_off_while_windows_refuses_ends_the_boost(self):
+        # Auto levels is turned off just as Windows refuses every change for
+        # a moment (a fullscreen switch): once Windows takes changes again,
+        # keep-applied puts the preset back and clears the warning.
+        from catvision import gui as gui_mod
+        self.start_fade()
+        self.assertTrue(self.pump_until(lambda: self.app._auto_ctrl[D1].offset > 15, 8))
+        self.gamma.limit = -1
+        self.app.handle_action("auto_levels")
+        self.assertTrue(self.pump_until(lambda: not self.app._auto_winding_down
+                                        and not self.engine.auto_offsets, 8))
+        self.assertIn("gamma_refused", [n.key for n in self.app.warning.notices])
+        self.gamma.limit = None
+        self.assertTrue(self.pump_until(lambda: self.gamma.ramps[D1] == self.preset_ramp(),
+                                        gui_mod.KEEP_APPLIED_MS / 1000 * 2 + 1))
+        self.pump(0.2)
+        self.assertNotIn("gamma_refused", [n.key for n in self.app.warning.notices])
+        self.assert_clean()
+
+    def test_keep_applied_shows_a_refusal(self):
+        # Auto levels off: a game changes the ramp and Windows refuses ours.
+        from catvision import gui as gui_mod
+        self.app.activate_preset_by_name("Pitch Black")
+        self.app._set_enabled(True)
+        self.pump(0.3)
+        self.assertEqual([n.key for n in self.app.warning.notices], [])
+        self.gamma.ramps[D1] = curves.identity_ramp()
+        self.gamma.limit = -1
+        self.assertTrue(self.pump_until(
+            lambda: "gamma_refused" in [n.key for n in self.app.warning.notices],
+            gui_mod.KEEP_APPLIED_MS / 1000 + 1))
+        self.gamma.limit = None
+        self.assertTrue(self.pump_until(
+            lambda: "gamma_refused" not in [n.key for n in self.app.warning.notices],
+            gui_mod.KEEP_APPLIED_MS / 1000 + 1))
+        self.assertEqual(self.gamma.ramps[D1], self.preset_ramp())
+        self.assert_clean()
+
+    def test_settings_changes_show_while_the_look_is_held(self):
+        # The player switches to CatVision to change How much or untick
+        # "tone down": that shows at once, not after the hold.
+        self.start_fade()
+        ctrl = self._settled()
+        self.front["title"], self.front["displays"] = autolevels.OWN_WINDOW, set()
+        self.pump(0.6)
+        self.app.auto_vars["auto_target"].set(0.06)
+        self.app._on_auto_slider()
+        self.assertTrue(self.pump_until(lambda: ctrl.want < 15, 2), self.info())
+        self.app.auto_vars["auto_strength"].set(0)
+        self.app._on_auto_slider()
+        self.assertTrue(self.pump_until(lambda: abs(ctrl.offset) < 0.5
+                                        and not self.engine.auto_offsets.get(D1), 4), self.info())
+        self.assertIn("Shadow boost 85 \u2192 85", self.info())
+        self.assert_clean()
+
+    def test_untick_tone_down_while_the_look_is_held(self):
+        self.screen.mode = "bright"
+        self.app.activate_preset_by_name("Pitch Black")
+        self.app.handle_action("auto_levels")
+        self.assertTrue(self.pump_until(lambda: D1 in self.app._auto_ctrl
+                                        and self.app._auto_ctrl[D1].offset < -2, 8))
+        ctrl = self._settled()
+        self.front["title"], self.front["displays"] = autolevels.OWN_WINDOW, set()
+        self.pump(0.6)
+        self.app.auto_flag_vars["auto_dim"].set(False)
+        self.app._on_auto_option()
+        self.assertTrue(self.pump_until(lambda: ctrl.offset >= -0.5, 4), self.info())
+        self.assert_clean()
+
+    def test_keep_at_full_boost_leaves_aim_for(self):
+        # A pitch-dark scene uses up How much: a lower Aim for would give the
+        # same look here, but less help everywhere else.
+        o = self.app.cfg.options
+        self.app.auto_vars["auto_target"].set(0.30)
+        self.app._on_auto_slider()
+        self.start_fade()
+        ctrl = self._settled()
+        self.assertGreater(ctrl.offset, o.auto_strength - 0.5)
+        msg = self.app._keep_auto_look(quiet=True)
+        self.assertIn("keeping this look for Game A (Aim for 30%)", msg)
+        self.assertEqual(o.auto_game_looks.get("Game A"), 0.30)
+        self.assert_clean()
+
+    def _game_only_off(self, level_for=lambda rect: 6):
+        """Watch every display (see _pictures)."""
+        self.app.auto_flag_vars["auto_game_only"].set(False)
+        self.app._on_auto_option()
+        self._pictures(level_for)
+
+    def _pictures(self, level_for):
+        """Each display its own flickering picture (one shared counter would
+        show each display the same picture every time: a frozen picture)."""
+        counts = {}
+
+        def capture(rect):
+            level = level_for(rect)
+            counts[rect] = n = counts.get(rect, 0) + 1
+            return bytes([level] * 3 + [255]) * 399 + bytes([level + n % 2] * 3 + [255])
+        self.app.auto_watch._capture = capture
+
+    def test_keep_uses_the_game_display_when_game_only_is_off(self):
+        # Two displays, both watched: the game on display 2, a near-black
+        # desktop on display 1.  The game's look comes from display 2.
+        o = self.app.cfg.options
+        self._game_only_off(lambda rect: 60 if rect[0] >= 800 else 2)
+        self.front["title"], self.front["displays"] = "Game A", {D2}
+        self.app.activate_preset_by_name("Pitch Black")
+        self.app.handle_action("auto_levels")
+        self.assertTrue(self.pump_until(lambda: D2 in self.app._auto_ctrl
+                                        and abs(self.app._auto_ctrl[D2].offset) > 2, 8))
+        self._settled(D1)
+        c2 = self._settled(D2)
+        msg = self.app._keep_auto_look(quiet=True)
+        lo, hi = autolevels.TARGET_LIMITS
+        want = autolevels.aim_for_current_look(c2.key, c2.offset, o.auto_strength)
+        self.assertAlmostEqual(o.auto_game_looks.get("Game A"), min(hi, max(lo, want)),
+                               delta=0.01, msg=msg)
+        self.assert_clean()
+
+    def test_keep_never_takes_another_display_for_the_game(self):
+        # As above, but the game's display is black (loading): the desktop
+        # on display 1 is not the game's look.
+        o = self.app.cfg.options
+        self._game_only_off(lambda rect: 60)
+        capture = self.app.auto_watch._capture
+        self.app.auto_watch._capture = (lambda rect: bytes(1600) if rect[0] >= 800
+                                        else capture(rect))
+        self.front["title"], self.front["displays"] = "Game A", {D2}
+        self.app.activate_preset_by_name("Pitch Black")
+        self.app.handle_action("auto_levels")
+        self.assertTrue(self.pump_until(lambda: all(
+            self.app._auto_shown.get(d, ("",))[0] == "watching" for d in (D1, D2)), 8))
+        self._settled(D1)
+        msg = self.app._keep_auto_look(quiet=True)
+        self.assertIn("black", msg)
+        self.assertNotIn("Game A", o.auto_game_looks)
+        self.assert_clean()
+
+    def test_own_window_holds_the_game_look_when_game_only_is_off(self):
+        self._game_only_off()
+        self.start_fade()
+        ctrl = self._settled()
+        want = ctrl.want
+        self.front["title"], self.front["displays"] = autolevels.OWN_WINDOW, set()
+        self._pictures(lambda rect: 200)   # CatVision's window over the game
+        self.pump(1.5)
+        self.assertAlmostEqual(ctrl.want, want, delta=0.5)
+        self.assert_clean()
+
+    def test_test_pattern_shows_the_preset_alone_when_game_only_is_off(self):
+        from catvision.gui_testpattern import open_test_pattern
+        self._game_only_off()
+        self.start_fade()
+        tp = open_test_pattern(self.app)
+        try:
+            self.front["title"], self.front["displays"] = autolevels.OWN_WINDOW, set()
+            self.assertTrue(self.pump_until(lambda: not self.app._auto_watched, 1.5))
+            self.assertTrue(self.pump_until(lambda: not any(
+                self.engine.auto_offsets.values()), 8), self.info())
+        finally:
+            tp.close()
+        self.assert_clean()
+
+    def test_aim_hotkey_while_catvision_is_off_says_so(self):
+        self.app.activate_preset_by_name("Pitch Black")
+        self.app.handle_action("auto_levels")
+        self.app._set_enabled(False)
+        self.pump(0.2)
+        self.assertIn("(CatVision is off)", self.app._nudge_auto_aim(True))
         self.assert_clean()
 
     def test_settings_changed_at_runtime_stay_in_range(self):

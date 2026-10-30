@@ -17,8 +17,10 @@ Two kinds of output are produced from a :class:`Settings` object:
 from __future__ import annotations
 
 import math
+import operator
 from bisect import bisect_right
 from dataclasses import asdict, dataclass, fields
+from itertools import accumulate, islice
 
 RAMP_SIZE = 256
 RAMP_MAX = 65535
@@ -110,8 +112,16 @@ class Settings:
                 setattr(s, f.name, value)
         return s.clamped()
 
-    def clamped(self) -> "Settings":
-        data = asdict(self)
+    def clamped(self, changes: dict | None = None) -> "Settings":
+        """A copy with every value inside its limits.  ``changes``: values
+        to use instead of this object's (``dataclasses.replace`` and then
+        clamped, in one pass: auto levels does this on every update)."""
+        # The fields straight into a dict: what asdict gives for these plain
+        # values, without its deep copy (this runs several times per auto
+        # levels update).
+        data = {name: getattr(self, name) for name in _SETTINGS_FIELDS}
+        if changes:
+            data.update(changes)
         for name, (lo, hi) in LIMITS.items():
             data[name] = min(hi, max(lo, float(data[name])))
         if not is_valid_filter_key(data["color_filter"]):
@@ -120,6 +130,9 @@ class Settings:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+_SETTINGS_FIELDS = tuple(f.name for f in fields(Settings))
 
 
 def is_valid_filter_key(key) -> bool:
@@ -231,6 +244,138 @@ class Gradient:
 Tint = TintCurve | Gradient
 
 
+# The inputs of the brightness table (0..1), worked out once.
+_RAMP_XS = tuple(i / (RAMP_SIZE - 1) for i in range(RAMP_SIZE))
+
+
+def _tone_table(s: Settings) -> list[float]:
+    """``[tone_curve(x, s) for x in _RAMP_XS]`` for clamped settings, fast.
+
+    Auto levels rebuilds the brightness table up to 120 times a second while
+    the game needs the CPU, so this works out every constant once instead of
+    256 times.  Each value goes through exactly the same arithmetic, in the
+    same order, as tone_curve and exposure_curve, so the results are
+    bit-for-bit the same (the tests compare them over thousands of looks).
+    """
+    ys = _exposure_tones(s.exposure, s.anti_glare, s.gamma)
+    a = shadow_boost_factor(s.shadow_boost)
+    gain, contrast, floor = s.brightness, s.contrast, s.black_floor
+    rest = 1.0 - floor
+    # The last stages in one pass (z: the value before it is clamped).
+    if a > 0:
+        log1p, scale = math.log1p, math.log1p(a)
+        return [floor + rest * (0.0 if (z := (log1p(a * y) / scale * gain - 0.5) * contrast
+                                        + 0.5) < 0.0 else 1.0 if z > 1.0 else z)
+                for y in ys]
+    return [floor + rest * (0.0 if (z := (y * gain - 0.5) * contrast + 0.5) < 0.0
+                            else 1.0 if z > 1.0 else z)
+            for y in ys]
+
+
+# _exposure_tones' results for the last few (exposure, anti_glare, gamma).
+# Auto levels mostly moves only Shadow boost, which comes after these
+# stages, so they come out the same on every step of a fade.  Emptied when
+# it holds this many (about 8 KB each).
+_EXPOSURE_TONES: dict[tuple, tuple] = {}
+_EXPOSURE_TONES_MAX = 16
+
+
+def _exposure_tones(exposure: float, anti_glare: float, gamma: float) -> tuple:
+    """The exposure and gamma stages of _tone_table: one value per entry.
+
+    Kept in _EXPOSURE_TONES (read-only tuples).  Values that compare equal
+    give the same table (5 and 5.0, 0.0 and -0.0 both do), so they may share
+    an entry."""
+    key = (exposure, anti_glare, gamma)
+    ys = _EXPOSURE_TONES.get(key)
+    if ys is not None:
+        return ys
+    k = min(max(exposure, 0.0), 100.0) / 100.0 * 20.0
+    if k < 1e-6:
+        ys = _RAMP_XS
+    else:
+        nk, exp, full = -k, math.exp, 1.0 - math.exp(-k)
+        room = min(max(anti_glare, 0.0), 100.0) / 100.0 * ANTI_GLARE_MAX_ROOM
+        if room <= 0.0:
+            ys = [(1.0 - exp(nk * x)) / full for x in _RAMP_XS]
+        else:
+            knee = min(0.5, 1.6 / k)
+            top = 1.0 - room
+            at_knee = (1.0 - exp(nk * knee)) / full
+            span, log1p, scale = 1.0 - knee, math.log1p, math.log1p(_HIGHLIGHT_CURVE)
+            ys = [top * ((1.0 - exp(nk * x)) / full) / at_knee if x <= knee
+                  else top + room * log1p(_HIGHLIGHT_CURVE * ((x - knee) / span)) / scale
+                  for x in _RAMP_XS]
+    if gamma != 1.0:
+        inv = 1.0 / gamma
+        ys = [y ** inv for y in ys]
+    if len(_EXPOSURE_TONES) >= _EXPOSURE_TONES_MAX:
+        _EXPOSURE_TONES.clear()
+    ys = _EXPOSURE_TONES[key] = tuple(ys)
+    return ys
+
+
+def _gradient_columns(gradient: Gradient, tone: list[float]) -> list[list[float]]:
+    """``[gradient.color(y)[c] for y in tone]`` for each channel c, with the
+    stops looked at once instead of for every entry (same arithmetic)."""
+    stops = gradient.stops
+    if len(stops) < 2:   # not a real gradient: leave it to color()
+        colors = [gradient.color(y) for y in tone]
+        return [[col[c] for col in colors] for c in range(3)]
+    positions = [p for p, _c in stops]
+    last = len(stops) - 2
+    segments = []
+    for (p0, c0), (p1, c1) in zip(stops, stops[1:]):
+        segments.append((p0, p1 <= p0, p1 - p0, c0[0], c0[1], c0[2],
+                         c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2]))
+    k = gradient.strength
+    keep = 1 - k
+    reds, greens, blues = [], [], []
+    add_red, add_green, add_blue = reds.append, greens.append, blues.append
+    for y in tone:   # (the clamps written out: a function call per entry costs more)
+        y = 0.0 if y < 0.0 else 1.0 if y > 1.0 else y
+        i = bisect_right(positions, y) - 1
+        i = 0 if i < 0 else last if i > last else i
+        p0, flat, span, r0, g0, b0, dr, dg, db = segments[i]
+        if flat:
+            t = 0.0
+        else:
+            t = (y - p0) / span
+            t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+        grey = keep * y
+        add_red(grey + k * (r0 + dr * t))
+        add_green(grey + k * (g0 + dg * t))
+        add_blue(grey + k * (b0 + db * t))
+    return [reds, greens, blues]
+
+
+def _ramp_channel(outs, white_cap: float) -> list[int]:
+    """Brightness levels (0..1) -> 16-bit table entries that never go down."""
+    scaled = [(0.0 if o < 0.0 else 1.0 if o > 1.0 else o) * white_cap * RAMP_MAX for o in outs]
+    # round() on a float is float.__round__ (the same rounding, the same
+    # errors for nan and inf), but mapping it straight is about a fifth
+    # cheaper than calling round() per entry: this runs for every channel
+    # of every auto levels update.  (A float white cap makes every value a
+    # float.)
+    values = list(map(_ROUND_FLOAT if type(white_cap) is float else round, scaled))
+    # Graphics drivers expect non-decreasing ramps.  The table almost always
+    # is already, and checking is cheaper than raising each entry to the
+    # one before (which then changes nothing).
+    if values and values[0] >= 0 and all(map(operator.le, values, islice(values, 1, None))):
+        return values
+    channel = list(accumulate(values, max, initial=0))
+    del channel[0]
+    return channel
+
+
+_ROUND_FLOAT = float.__round__
+
+# Tint powers for which ``y ** power`` is a finite number for every tone
+# value (0..1, give or take a rounding unit), so an even tint's term
+# (hi - lo) * y ** power is exactly 0 and needs no powers worked out.
+_EVEN_POWERS = (0.0, 64.0)
+
+
 def build_ramp(s: Settings, tint: Tint | None = None) -> list[list[int]]:
     """Return ``[red, green, blue]`` 256-entry tables of 16-bit values.
 
@@ -240,22 +385,45 @@ def build_ramp(s: Settings, tint: Tint | None = None) -> list[list[int]]:
     s = s.clamped()
     gradient = tint if isinstance(tint, Gradient) else None
     lo, hi, power = NO_TINT if gradient else (tint or NO_TINT)
-    tone = [tone_curve(i / (RAMP_SIZE - 1), s) for i in range(RAMP_SIZE)]
-    colors = [gradient.color(y) for y in tone] if gradient else None
-    ramp = []
+    tone = _tone_table(s)
+    columns = _gradient_columns(gradient, tone) if gradient else None
+    ramp: list[list[int]] = []
+    done: list[tuple] = []   # (what decides a channel, its table)
+    # y ** 1.0 is y (tone values are finite): no need to raise anything.
+    unit_power = type(power) in (float, int) and power == 1.0
+    # Night vision's green channel is even (lo == hi) under a power of 2:
+    # with y ** power finite its tint term is a constant too.
+    tame_power = unit_power or (type(power) in (float, int)
+                                and _EVEN_POWERS[0] <= power <= _EVEN_POWERS[1])
+    lifts = None   # y ** power for each entry, the same for every channel
     for c, gain in enumerate((s.red, s.green, s.blue)):
-        channel = []
-        prev = 0
-        for i, y in enumerate(tone):
-            if colors:
-                out = colors[i][c] * gain
+        # Channels with the same gain and tint come out the same (a plain
+        # grey look, the usual case): work the table out once and copy it.
+        key = (gain, columns[c]) if columns else (gain, lo[c], hi[c])
+        same = next((table for k, table in done if k == key), None)
+        if same is not None:
+            ramp.append(list(same))
+            continue
+        if columns:
+            col = columns[c]
+            outs = col if gain == 1.0 else [v * gain for v in col]
+        elif hi[c] == lo[c] and tame_power and math.isfinite(lo[c]):
+            # An even tint: (hi - lo) is 0 and y ** power is finite, so the
+            # tint term is the constant lo + 0.0 (and * 1.0 changes nothing).
+            even = lo[c] + 0.0
+            if even == 1.0:
+                outs = tone if gain == 1.0 else [y * gain for y in tone]
             else:
-                out = y * gain * (lo[c] + (hi[c] - lo[c]) * y ** power)
-            v = int(round(_clamp01(out) * s.white_cap * RAMP_MAX))
-            v = max(prev, v)  # graphics drivers expect non-decreasing ramps
-            channel.append(v)
-            prev = v
-        ramp.append(channel)
+                outs = [y * gain * even for y in tone]
+        else:
+            if lifts is None:
+                lifts = tone if unit_power else [y ** power for y in tone]
+            low, rise = lo[c], hi[c] - lo[c]
+            scaled = tone if gain == 1.0 else [y * gain for y in tone]
+            outs = [g * (low + rise * z) for g, z in zip(scaled, lifts)]
+        table = _ramp_channel(outs, s.white_cap)
+        done.append((key, table))
+        ramp.append(table)
     return ramp
 
 
@@ -279,19 +447,39 @@ def limit_ramp_deviation(ramp: list[list[int]], max_steps: int = 127) -> list[li
     By default Windows rejects gamma ramps that stray too far from a straight
     line.  This keeps as much of the effect as Windows allows.
     """
-    out = []
+    out: list[list[int]] = []
+    done: list[tuple] = []   # (channel, its result): identical channels clamp the same
     for channel in ramp:
-        new = []
-        prev = 0
-        for i, v in enumerate(channel):
-            lo = max(0, i - max_steps) * 257
-            hi = min(255, i + max_steps) * 257
-            v = min(hi, max(lo, v))
-            v = max(prev, v)
-            new.append(v)
-            prev = v
+        same = next((new for old, new in done if old == channel), None)
+        if same is not None:
+            out.append(list(same))
+            continue
+        lows, highs = _limit_bounds(len(channel), max_steps)
+        # Entry by entry: min(hi, max(lo, v)), then never below the one before.
+        new = list(accumulate(map(min, highs, map(max, lows, channel)), max, initial=0))
+        del new[0]
+        done.append((channel, new))
         out.append(new)
     return out
+
+
+# limit_ramp_deviation's bounds per (length, max_steps): the fades ask for the
+# same few limits over and over.  Emptied when it holds this many (~18 KB each).
+_LIMIT_BOUNDS: dict[tuple, tuple[list, list]] = {}
+_LIMIT_BOUNDS_MAX = 64
+
+
+def _limit_bounds(length: int, max_steps) -> tuple[list, list]:
+    """The lowest and highest value allowed for each entry (16-bit)."""
+    key = (length, max_steps, type(max_steps))   # 96 and 96.0 give different types
+    bounds = _LIMIT_BOUNDS.get(key)
+    if bounds is None:
+        if len(_LIMIT_BOUNDS) >= _LIMIT_BOUNDS_MAX:
+            _LIMIT_BOUNDS.clear()
+        bounds = _LIMIT_BOUNDS[key] = (
+            [max(0, i - max_steps) * 257 for i in range(length)],
+            [min(255, i + max_steps) * 257 for i in range(length)])
+    return bounds
 
 
 def blend_ramp(ramp: list[list[int]], t: float) -> list[list[int]]:
@@ -437,20 +625,38 @@ def plan_color(s: Settings, custom: dict[str, Matrix] | None = None,
     chosen that step is skipped, so the tint keeps some of the game's color.
     """
     s = s.clamped()
-    tint = filter_tint(s.color_filter, custom_tints)
-    if tint is None or s.filter_strength <= 0:
+    curve = _tint_curve(s.color_filter, s.filter_strength, custom_tints)
+    if curve is None:
         return None, color_matrix(s, custom)
     k = s.filter_strength
-    if isinstance(tint, Gradient):
-        curve = Gradient(tint.stops, k)
-    else:
-        lo, hi, power = tint
-        curve = (tuple(1.0 + (t - 1.0) * k for t in lo), tuple(1.0 + (t - 1.0) * k for t in hi),
-                 power)
     m = saturation_matrix(s.saturation)
     if all_displays:
         m = mat_mul(mat_lerp(IDENTITY3, filter_matrix("grayscale"), k), m)
     return curve, m
+
+
+def plan_tint(s: Settings, custom_tints: dict[str, tuple] | None = None) -> Tint | None:
+    """Just the tint curve of ``plan_color`` (the same on all or some
+    displays), without working out the color matrix: auto levels needs only
+    this on every update.  Only the two settings it uses are clamped, the
+    way clamped() does it (that would copy every setting)."""
+    lo, hi = LIMITS["filter_strength"]
+    key = s.color_filter if is_valid_filter_key(s.color_filter) else "none"
+    return _tint_curve(key, min(hi, max(lo, float(s.filter_strength))), custom_tints)
+
+
+def _tint_curve(key: str, k: float, custom_tints: dict[str, tuple] | None) -> Tint | None:
+    """The tint curve of a (valid) filter key, scaled by the (clamped)
+    filter strength ``k``."""
+    tint = filter_tint(key, custom_tints)
+    if tint is None or k <= 0:
+        return None
+    if isinstance(tint, Gradient):
+        return Gradient(tint.stops, k)
+    lo, hi, power = tint
+    # (lists, not generators, inside tuple(): quicker, on every auto levels update)
+    return (tuple([1.0 + (t - 1.0) * k for t in lo]), tuple([1.0 + (t - 1.0) * k for t in hi]),
+            power)
 
 
 def split_for_displays(s: Settings, custom: dict[str, Matrix] | None = None,

@@ -375,7 +375,10 @@ class AutoTextTest(unittest.TestCase):
         self.assertIn("**Auto levels (beta)**", README)
 
     def test_readme_glide_rate_matches_fader(self):
-        self.assertIn(f"{autolevels.FADER_HZ} tiny steps a second", self.sec)
+        # One step per refresh of the display, from FADER_HZ up to FADER_MAX_HZ.
+        self.assertIn(f"from {autolevels.FADER_HZ} up to {autolevels.FADER_MAX_HZ})", self.sec)
+        self.assertEqual(autolevels.fader_rate([30]), autolevels.FADER_HZ)
+        self.assertEqual(autolevels.fader_rate([240]), autolevels.FADER_MAX_HZ)
 
     def test_readme_measure_rate_matches_watcher(self):
         self.assertAlmostEqual(1 / autolevels.INTERVAL_S, 5.0)

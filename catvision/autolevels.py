@@ -4,26 +4,37 @@ or Exposure to match, the way your eyes adapt.
 How it stays safe: it only takes a tiny, low-resolution copy of what Windows
 is already showing on the ticked displays (the same screen-capture route
 recording and streaming apps use).  It never touches the game, never saves
-or sends the pictures, and only measures overall brightness: it does not
-look for anything in the picture.
+or sends the pictures, and only measures brightness (overall, and in a few
+large blocks to tell turning to a new view from a light going on or off):
+it does not look for anything in the picture.
 """
 
 from __future__ import annotations
 
 import math
+import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from .winutil import IS_WINDOWS
 
 THUMB_W, THUMB_H = 96, 54       # size of the copy that is measured
-INTERVAL_S = 0.2                # five measurements a second
+INTERVAL_S = 0.2                # five measurements a second...
+BURST_S = 0.1                   # ...and ten while the brightness is changing a lot
 RISE_S = 1.2                    # brightening is slow and smooth...
 RISE_FAST_S = 0.4               # ...but catches up quicker after a big change (into a cave)
 FALL_S = 0.3                    # dimming is fast, so flashes never blind you
-RUSH_S = 0.12                   # a flash fades down in about a tenth of a second
+RUSH_S = 0.12                   # a flash fades down in about a tenth of a second...
+LEAVING_GAP = 0.2               # ...and so does walking out of the dark: a picture STEADY_RATIO
+                                # brighter while a fade down is under way (or a different,
+                                # brighter view) and the display is still this share of
+                                # How much too bright
+LEAVING_UNDERWAY = 0.5          # (under way: its goal is at least this many points below)
+RUSH_VIEW_S = 0.06              # turning or walking out to a brighter view fades at the speed
+                                # limit from the start (the view change hides the fade); a
+                                # light flashing on keeps RUSH_S's gentler start
 # Speed limits in slider points per second: with 60 updates a second (more
 # on faster screens) even the fastest normal fade moves well under one point
 # per update, which the eye can't see as a step.
@@ -33,12 +44,36 @@ MAX_FALL = 50.0
 MAX_RUSH = 240.0
 # Whatever speed is chosen, a fade never moves more than this per second
 # (about 1.3 points per update outside a flash, 4 in one), so "fast" is
-# quicker but still below the step the eye notices.
+# quicker but still below the step the eye notices.  (The quick fade into a
+# new darker view is capped per update instead: see CEILING_STEP.)
 CEILING = 80.0
 CEILING_RUSH = 240.0
 FADER_HZ = 60                   # how often the displays are moved (a 60 Hz screen)...
 FADER_MAX_HZ = 120              # ...and on faster screens up to this, so each step is smaller
+# Not 240 on a 240 Hz screen: the eye can't follow brightness changes much
+# faster than 60-90 a second (why flicker above that looks steady), so
+# 120 steps a second already blend into one glide, even in a 0.1 s flash
+# fade.  Every step costs a Windows call per display (and the game needs
+# the CPU), so 240 would double what a fade costs for nothing visible.
 IDLE_S = 0.1                    # how often the fader checks for a new goal while at rest
+# The fader passes a move on once some display has gone this far (slider
+# points) since the last move it passed on.  The slow end of a glide moves a
+# few thousandths of a point per step.  Even the most visible point (Exposure
+# near 0 with strong contrast, about 8 L* of lightness per point) then
+# changes the picture by under 0.2 L*, far below what the eye notices
+# (about 0.4 at mid-grey), so passing on each of those would only cost CPU.
+# A display coming to rest always gets its exact final value.
+FADER_MIN_STEP = 0.02
+# The fader shares Python with the picture measuring (a few ms, five times a
+# second) and the window.  Python lets a busy thread run on for 5 ms before
+# one that is waiting gets its turn, so a fader step that wakes during a
+# measurement could come up to 5 ms late: more than half a step at 120 a
+# second.  1 ms keeps that to about a millisecond (Windows may round the
+# wait up to its clock tick; the self-test's "fader_load" shows both).  It
+# is process-wide, but only costs anything while two threads want to run
+# Python at the same time (a few ms a second here): then the extra
+# handovers cost a few percent of those milliseconds.
+THREAD_SWITCH_S = 0.001
 STOPS_FOR_FULL = 3.0            # 3 stops darker/brighter than the target = full strength
 DEAD_ZONE = 0.08                # ignore changes smaller than this share of How much
 CENTER_WEIGHT = 2.0             # the middle of the screen counts up to 3x the edges
@@ -51,6 +86,36 @@ STEADY_S = 0.15                 #  at least two, this far apart)
 CALM_S = 2.0                    # unless a light went on (STEADY_RATIO brighter) this recently
 DARKENING_COUNT = 3             # this many measurements in a row, each darker than the last...
 DARKER = 0.9                    # ...by this much, start brightening early (on the way in)
+# Turning or running into the dark (into a building, away from the sky): a
+# different view is told from a light going off by how unevenly the parts of
+# the picture changed and by its changed layout, so it can be followed after
+# two measurements instead of waiting out SETTLE_FAST_S (a light going off
+# still waits: it may flicker).
+REGION_COLS, REGION_ROWS = 8, 4  # the coarse grid each picture's parts are measured on
+VIEW_SPREAD = 0.6               # parts changing this unevenly (stops) = a different view...
+VIEW_LAYOUT = 0.6               # ...if its layout is less alike than this (a light going off
+                                # keeps where the bright and dark parts are, even when a
+                                # window it doesn't light stays the same and the parts
+                                # change unevenly)
+VIEW_SETTLED_S = 1.0            # brightness held this long is settled (not a flash or a glance)
+VIEW_STEADY_S = 0.08            # a new view seen this long (two measurements) is followed...
+VIEW_TURN_S = 2.0               # ...if it came this soon after the settled one (a turn, a walk in)
+# Back from a quick look at a brighter, different view (glancing out of a
+# door, a door opened and shut, a menu opened for a moment): the settled
+# view it left is followed again once it has been back a little while, at
+# the new-view pace, instead of waiting out SETTLE_S as if a light had
+# flashed (a light flashing keeps the layout, so it still waits).
+RETURN_HOLD_S = 0.6             # back this long (the dark spells running past windows are
+                                # shorter: shorter holds pump there)...
+RETURN_LAYOUT = 0.8             # ...laid out this much like the settled view (the same view)
+ALTERNATE_S = 2.0               # a brighter view back this soon after = turning back and forth...
+ALTERNATE_HOLD_S = 4.0          # ...so new views wait the usual way until that stops this long
+RISE_VIEW_S = 0.15              # a new darker view is caught up with quicker still (too dark
+                                # hides far more than a moment too bright, and the view
+                                # change hides the fade)...
+MAX_RISE_VIEW = 160.0           # ...up to this many points a second (120 updates a second)...
+CEILING_STEP = 4 / 3            # ...but never more than this per update (80 a second at 60 Hz,
+                                # under the 2 points of a flash's fade at 120 Hz)
 FLASH_RATIO = 2.0               # a picture twice as bright as the last one is a flash...
 LOST_S = 2.0                    # ...and a picture lost this long eases back to the preset
 BLACK_HOLD_S = 30.0             # a black screen holds the look this long (loading screens)
@@ -61,6 +126,13 @@ AIM_STEP = 1.25                 # the "aim brighter / darker" hotkeys change Aim
 # (Exposure works harder per point, so it gets half as much).
 SPILL = {"shadow_boost": ("exposure", 0.5), "exposure": ("shadow_boost", 1.0)}
 SLIDER_RANGE = (0.0, 100.0)
+# Anti-glare only works while Exposure is above 0, and then at once at full
+# strength: Exposure 0.01 with Anti-glare is a different picture from 0 (up
+# to about 22 L* of lightness, a visible jump in one fade step).  So with
+# Anti-glare on, auto levels keeps Exposure at least this high when the
+# preset has it on (0.01 survives the rounding to 2 decimals), and leaves it
+# off when the preset has it off.
+EXPOSURE_FLOOR = 0.01
 
 DEFAULT_STRENGTH = 30.0         # how far (slider points) it may move Shadow boost / Exposure
 DEFAULT_TARGET = 0.12           # the scene brightness it aims for (log-average, 0-1)
@@ -68,6 +140,7 @@ STRENGTH_LIMITS = (0.0, 60.0)
 TARGET_LIMITS = (0.04, 0.30)
 
 _LOG = [math.log(max(i, 1) / 255.0) for i in range(256)]
+_LN2 = math.log(2.0)
 
 Rect = tuple[int, int, int, int]
 
@@ -82,6 +155,15 @@ class Measurement:
     bright: float   # share that is near-white
     black: bool     # completely black: probably can't see the picture
     signature: int = 0  # changes whenever the picture changes (0 = not tracked)
+    # Average brightness (log2) of each part of a coarse REGION_COLS x
+    # REGION_ROWS grid, left to right, top to bottom, for telling a turn to
+    # another view from a light changing (see view_spread).  Only brightness:
+    # nothing is looked for in the parts.  Empty if not known.
+    regions: tuple = ()
+    # When it was captured (time.perf_counter(); 0 = not known).  The
+    # controller's own clock only moves in IDLE_S steps while the fader
+    # rests, so how far apart two pictures were is taken from these.
+    at: float = 0.0
 
 
 _weights_cache: dict[tuple[int, int], list[float]] = {}
@@ -102,6 +184,54 @@ def _center_weights(width: int, height: int) -> list[float]:
     return _weights_cache[key]
 
 
+def _regions(lum: list[int], width: int, height: int) -> tuple:
+    """Log2 average brightness of each grid part (see Measurement.regions)."""
+    logs = list(map(_LOG.__getitem__, lum))
+    cols = [c * width // REGION_COLS for c in range(REGION_COLS + 1)]
+    sums = [0.0] * (REGION_COLS * REGION_ROWS)
+    counts = [0] * (REGION_COLS * REGION_ROWS)
+    for y in range(height):
+        row, first = y * width, (y * REGION_ROWS // height) * REGION_COLS
+        for c in range(REGION_COLS):
+            a, b = row + cols[c], row + cols[c + 1]
+            sums[first + c] += sum(logs[a:b])
+            counts[first + c] += b - a
+    return tuple(s / n / _LN2 for s, n in zip(sums, counts))
+
+
+def view_spread(a: Measurement, b: Measurement) -> float | None:
+    """How unevenly the picture changed from a to b, in stops (the spread of
+    the change across the grid parts).  A light going on or off, or the
+    sun going behind a cloud, changes every part of the view much alike;
+    turning to look somewhere else (into a doorway, out of a cave) changes
+    each part differently.  None if either picture's parts aren't known."""
+    ra, rb = a.regions, b.regions
+    if not ra or len(ra) != len(rb):
+        return None
+    change = [y - x for x, y in zip(ra, rb)]
+    mean = sum(change) / len(change)
+    return math.sqrt(sum((c - mean) ** 2 for c in change) / len(change))
+
+
+def view_layout(a: Measurement, b: Measurement) -> float | None:
+    """How alike the layout of a and b is: where the bright and dark parts
+    are, as the correlation of their grid parts' brightness (1 = the same
+    layout, 0 = unrelated, below 0 = swapped round).  A light going off
+    keeps the layout even where it lights the parts unevenly (a lamp-lit
+    room with a window); turning to look somewhere else changes it.  A
+    picture that is even all over has no layout and counts as alike (1).
+    None if either picture's parts aren't known."""
+    ra, rb = a.regions, b.regions
+    if not ra or len(ra) != len(rb):
+        return None
+    ma, mb = sum(ra) / len(ra), sum(rb) / len(rb)
+    da, db = [x - ma for x in ra], [y - mb for y in rb]
+    norm = math.sqrt(sum(x * x for x in da) * sum(y * y for y in db))
+    if norm < 1e-9:
+        return 1.0
+    return sum(x * y for x, y in zip(da, db)) / norm
+
+
 def measure(bgra: bytes, width: int | None = None) -> Measurement:
     """Brightness of a 32-bit BGRA picture (as Windows hands it over).
     With the picture's width (a real capture), the middle of the screen
@@ -111,8 +241,11 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
         return Measurement(0.0, 0.0, 0.0, 1.0, 0.0, True)
     lum = [(54 * r + 183 * g + 19 * b) >> 8
            for b, g, r in zip(bgra[0::4], bgra[1::4], bgra[2::4])]
+    regions: tuple = ()
     if width and n % width == 0:
         weights = _center_weights(width, n // width)
+        if width >= REGION_COLS and n // width >= REGION_ROWS:
+            regions = _regions(lum, width, n // width)
     else:
         weights = [1.0] * n
     total = sum(weights)
@@ -131,7 +264,17 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     dark = sum(1 for v in lum if v < 26) / n
     bright = sum(1 for v in lum if v > 230) / n
     signature = (hash(bgra) or 1) if width else 0
-    return Measurement(key, average, shadows, dark, bright, max(lum) == 0, signature)
+    return Measurement(key, average, shadows, dark, bright, max(lum) == 0, signature, regions)
+
+
+def capture_interval(prev: Measurement | None, m: Measurement | None) -> float:
+    """Seconds until the next measurement: BURST_S right after the
+    brightness changed a lot (so a new view is confirmed, and followed, a
+    tenth of a second sooner), else INTERVAL_S."""
+    if (prev is not None and m is not None and not prev.black and not m.black
+            and max(prev.key, m.key) > min(prev.key, m.key) * STEADY_RATIO):
+        return BURST_S
+    return INTERVAL_S
 
 
 def target_offset(key: float, strength: float, target: float, dim: bool = True) -> float:
@@ -143,16 +286,30 @@ def target_offset(key: float, strength: float, target: float, dim: bool = True) 
     return amount if dim else max(0.0, amount)
 
 
+def _slider_range(name: str, base: dict[str, float]) -> tuple[float, float]:
+    """Where auto levels may take this slider (see EXPOSURE_FLOOR)."""
+    lo, hi = SLIDER_RANGE
+    if name == "exposure" and base.get("anti_glare", 0.0) > 0:
+        start = base[name]
+        if start <= 0:
+            return start, start   # stays off: switching it on would jump
+        lo = min(start, EXPOSURE_FLOOR)
+    return lo, hi
+
+
 def split_offset(key: str, offset: float, base: dict[str, float]) -> dict[str, float]:
     """Share an adjustment between Shadow boost and Exposure: the preset's
     main slider first, and whatever doesn't fit (it's already near the top or
-    bottom) goes to the other one, so auto levels keeps its full range."""
-    lo, hi = SLIDER_RANGE
+    bottom) goes to the other one, so auto levels keeps its full range.
+    With the preset's "anti_glare" in ``base``, Exposure never crosses 0
+    (see EXPOSURE_FLOOR)."""
+    lo, hi = _slider_range(key, base)
     main = max(lo - base[key], min(hi - base[key], offset))
     out = {key: main}
     rest = offset - main
     if abs(rest) > 0.05:
         other, ratio = SPILL[key]
+        lo, hi = _slider_range(other, base)
         extra = max(lo - base[other], min(hi - base[other], rest * ratio))
         if abs(extra) > 0.05:
             out[other] = extra
@@ -172,30 +329,46 @@ def nudge_aim(aim: float, brighter: bool) -> float:
     return round(min(hi, max(lo, aim)), 3)
 
 
-def aim_for_current_look(key: float, offset: float, strength: float) -> float:
+def aim_for_current_look(key: float, offset: float, strength: float,
+                         current: float | None = None, dim: bool = True) -> float:
     """The Aim for value that makes a scene this bright keep its current
-    adjustment ("Keep this look")."""
+    adjustment ("Keep this look").  ``current`` (the Aim for in use) is kept
+    if it already gives this look: at full boost, say, many values do, and
+    moving it would change every other scene."""
+    if current is not None and abs(target_offset(key, strength, current, dim) - offset) < 0.5:
+        return current
     if strength <= 0:
         return key
     stops = max(-1.0, min(1.0, offset / strength)) * STOPS_FOR_FULL
     return key * 2 ** stops
 
 
+def _apart(a: tuple, b: tuple) -> float:
+    """Seconds between two (clock time, Measurement) entries: by when the
+    pictures were captured if both are known, else by the controller's
+    clock."""
+    if a[1].at and b[1].at:
+        return b[1].at - a[1].at
+    return b[0] - a[0]
+
+
 @dataclass
 class Controller:
     """Decides where one display should go and glides it there.
 
-    observe() takes each new measurement (five a second) and sets the goal;
-    advance() moves toward it in tiny steps (60-120 a second, on the fader
-    thread).  The motion eases in and out like a spring and has a speed
-    limit, so there is never a visible jump."""
+    observe() takes each new measurement (five a second, ten while the
+    brightness changes a lot) and sets the goal; advance() moves toward it
+    in tiny steps (60-120 a second, on the fader thread).  The motion eases
+    in and out like a spring and has a speed limit, so there is never a
+    visible jump."""
     offset: float = 0.0
     want: float = 0.0
     strength: float = 0.0
     clock: float = 0.0
     velocity: float = 0.0
-    rush: bool = False                             # a flash: fade down extra fast
+    rush: bool = False                             # a flash (or walking out of the dark): fade down extra fast
     frozen: bool = False                           # the picture has stopped changing
+    key: float = 0.0                               # the brightness the goal follows
     _catch_up: bool = False                        # a big brightening: quick pace to the end
     _recent: list = field(default_factory=list)   # (time, key) of the last SETTLE_S
     _last_key: float = 0.0
@@ -205,20 +378,35 @@ class Controller:
     _same_since: float = 0.0
     _black_since: float | None = None
     _settings: tuple = ()                          # (strength, target, dim) last seen
+    _stretch: list = field(default_factory=list)  # (time, Measurement) since the last big change
+    _settled: tuple | None = None                  # (since, until, newest) of the last settled stretch
+    _away: Measurement | None = None               # the brightest view looked at since (2+ pictures)
+    _quick_at: float = -ALTERNATE_S                # when the last view followed early began
+    _alternate_until: float = 0.0                  # turning back and forth: no early start till then
+    _view_rise: bool = False                       # brightening for a new darker view: quickest pace
+    _estimate: bool = False                        # the goal is a halfway guess (into a cave)
+    _rush_view: bool = False                       # the fast fade-down is for a new, brighter view
 
     def observe(self, m: Measurement | None, strength: float, target: float,
-                dim: bool = True) -> None:
+                dim: bool = True, now: float | None = None) -> None:
+        """``now``: the clock as it is right now (Fader.now_for); by default
+        the clock as of the fader's last step."""
         self.strength = strength
+        clock = self.clock if now is None else max(now, self.clock)
+        # A lower How much or an unticked "tone down" brings the goal inside
+        # its new limits at once, even while a black or lost picture holds.
+        self.want = min(strength, max(-strength if dim else 0.0, self.want))
         if m is not None and m.black:
             # Loading screen, or capture blocked: hold the look.  A black
             # screen is pixel-identical every time, so it must not count as
             # a frozen picture either; only a very long one eases back.
             self._missing_since = None
-            self._signature, self._same_since = m.signature, self.clock
+            self._signature, self._same_since = m.signature, clock
             self.frozen = False
+            self._stretch = []
             if self._black_since is None:
-                self._black_since = self.clock
-            elif self.clock - self._black_since >= BLACK_HOLD_S:
+                self._black_since = clock
+            elif clock - self._black_since >= BLACK_HOLD_S:
                 self.want, self.rush = 0.0, False
             return
         if m is not None:
@@ -228,30 +416,41 @@ class Controller:
             # frozen picture.  One that hasn't changed at all for a few
             # seconds is treated as not seen, so it can't steer anything.
             if m.signature != self._signature:
-                self._signature, self._same_since = m.signature, self.clock
-            self.frozen = self.clock - self._same_since >= FROZEN_S
+                self._signature, self._same_since = m.signature, clock
+            self.frozen = clock - self._same_since >= FROZEN_S
             if self.frozen:
                 m = None
         if m is None:  # couldn't capture the picture: hold, then ease back to the preset
+            self._stretch = []
             if self._missing_since is None:
-                self._missing_since = self.clock
-            elif self.clock - self._missing_since >= LOST_S:
+                self._missing_since = clock
+            elif clock - self._missing_since >= LOST_S:
                 self.want = 0.0
             return
         self._missing_since = None
-        now = self.clock
+        now = clock
         self._recent = [(t, k) for t, k in self._recent if now - t < SETTLE_S]
         self._recent.append((now, m.key))
         if self._last_key and m.key > self._last_key * STEADY_RATIO:
             self._jump_at = now
+            if now - self._quick_at < ALTERNATE_S or now < self._alternate_until:
+                # Back to a brighter view soon after a darker one was followed
+                # early (running past windows, in and out of a doorway):
+                # following every turn would pump, so new views wait the
+                # usual way until the turning has stopped for a while.
+                self._alternate_until = now + ALTERNATE_HOLD_S
+        last = self._stretch[-1][1] if self._stretch else None
+        self._track_stretch(now, m)
         # Steer by the brightest recent picture: dimming reacts at once, but
         # brightening waits until it has stayed dark, so flickering lights,
         # muzzle flashes and lightning don't make the picture pump.
-        calm = now - self._jump_at >= CALM_S
+        # (Turning back and forth between a bright and a dark view counts as
+        # a light flashing too: see ALTERNATE_HOLD_S.)
+        calm = now - self._jump_at >= CALM_S and now >= self._alternate_until
         lately = [(t, k) for t, k in self._recent if now - t < SETTLE_FAST_S]
         steady = [k for _t, k in lately]
         newest = [k for _t, k in self._recent[-DARKENING_COUNT:]]
-        early = None
+        early, halfway = None, False
         if (calm and now - lately[0][0] >= STEADY_S
                 and max(steady) <= min(steady) * STEADY_RATIO):
             # Steadily dark with no light flashing lately (walked into a
@@ -262,13 +461,42 @@ class Controller:
             # Getting darker and darker (walking into a cave): start
             # brightening gently on the way, halfway (in stops) to the newest picture.
             early = math.sqrt(max(k for _t, k in self._recent) * newest[-1])
+            halfway = True
+        view_key = self._new_darker_view(now, m)
+        if view_key is None:
+            view_key = self._back_to_settled_view(now, m)
+        if view_key is not None and (early is None or view_key < early):
+            # Turned or ran into a darker view, or back to the one it was
+            # settled in after a quick look out: follow it now.
+            early, halfway = view_key, False
+            self._quick_at = self._stretch[0][0]
         if early is not None:
             # Brightening granted early is kept: the older, brighter pictures
             # can't take it back (that would pump), only a brighter new one can.
             self._recent = [(t, min(k, early)) for t, k in self._recent]
-        key = max(k for _t, k in self._recent)
+        key = self.key = max(k for _t, k in self._recent)
         want = target_offset(key, strength, target, dim)
         flash = bool(self._last_key) and m.key >= self._last_key * FLASH_RATIO
+        # Coming out of the dark (a cave mouth, a door swinging open onto
+        # daylight) the picture brightens over several measurements, each
+        # less than a flash.  Brightening again while the display is still
+        # fading down, and still boosted far too much, is that walk out: the
+        # rest fades at the flash pace, so the way out doesn't glare.  One
+        # brighter picture on its own (a light flickering on) still dims at
+        # the normal pace, so flicker never dims more than it used to.
+        # Unless it is a different view: a brighter picture whose parts
+        # changed unevenly and whose layout changed (turning toward the sky,
+        # the first step out of a cave mouth) is the way out too, so it
+        # fades at the flash pace from the first picture.  A light coming
+        # on keeps the layout, so it still dims at the normal pace.  Walking
+        # out over half a second or so, each picture is laid out much like
+        # the one before; it is told by comparing with the dark view it was
+        # settled in a moment ago instead.
+        new_view = self._new_brighter_view(last, m) or self._left_for_brighter_view(now, m)
+        glaring = self.offset - want > strength * LEAVING_GAP
+        leaving = glaring and (new_view or (
+            bool(self._last_key) and m.key >= self._last_key * STEADY_RATIO
+            and self.want < self.offset - LEAVING_UNDERWAY))
         self._last_key = m.key
         # Small changes don't set a new goal, so the picture doesn't keep
         # "breathing"; the glide itself never stops halfway.  Near black a
@@ -279,14 +507,161 @@ class Controller:
         # (A changed How much / Aim for / dim always applies at once.)
         settings, before = (strength, target, dim), self._settings
         self._settings = settings
-        noise = settings == before and near <= self.want <= far
-        if not noise and abs(want - self.want) >= max(0.5, strength * DEAD_ZONE) or flash:
+        # A halfway guess was never measured, so it isn't held by the noise
+        # filter: near black that band is wide enough to leave the cave
+        # several points too dark for good.
+        noise = settings == before and not self._estimate and near <= self.want <= far
+        if (settings != before or flash
+                or not noise and abs(want - self.want) >= max(0.5, strength * DEAD_ZONE)):
             # A flash fades down fast; so does a picture that keeps getting
             # brighter while that fast fade is still going (walking out into
             # daylight takes several measurements, not one).
             brighter = self.rush and want < self.want
+            if want < self.want:
+                self._view_rise = False
+            elif (view_key is not None and early == view_key) or (
+                    halfway and self._estimate and self._left_settled_view(m)):
+                # A new darker view is caught up with at the quickest pace;
+                # so is walking into one, once it has kept getting darker
+                # for a second halfway step (the first may be a quick turn
+                # that is about to end, or to come back).
+                self._view_rise = True
             self.want = want
-            self.rush = (flash or brighter) and want < self.offset
+            rush = (flash or brighter or leaving) and want < self.offset
+            # A new view (or a fade for one that keeps getting brighter)
+            # fades at the speed limit from the start: see RUSH_VIEW_S.  Set
+            # before rush, so the fader thread never pairs a new fast fade
+            # with the pace of an old one.
+            self._rush_view = rush and (new_view or (brighter and self._rush_view))
+            self.rush = rush
+            self._estimate = halfway
+
+    def _track_stretch(self, now: float, m: Measurement) -> None:
+        """Keep track of how long the brightness has held: pictures in a row
+        within STEADY_RATIO of each other (the camera may move) are one
+        stretch, and one that lasted VIEW_SETTLED_S is settled."""
+        stretch = self._stretch
+        prev = stretch[-1][1] if stretch else None
+        if prev is not None and max(prev.key, m.key) <= min(prev.key, m.key) * STEADY_RATIO:
+            stretch.append((now, m))
+            del stretch[1:-2]       # only its start and newest two matter
+        else:
+            # A view seen for two pictures in a row (not a single flash) since
+            # the settled stretch ended is remembered if it is the brightest
+            # one looked at (see _back_to_settled_view).
+            if (stretch and _apart(stretch[0], stretch[-1]) >= VIEW_STEADY_S
+                    and (self._settled is None or stretch[0][0] > self._settled[1])):
+                top = max(stretch[0][1], stretch[-1][1], key=lambda x: x.key)
+                if self._away is None or top.key > self._away.key:
+                    self._away = top
+            self._stretch = stretch = [(now, m)]
+        if now - stretch[0][0] >= VIEW_SETTLED_S:
+            self._settled, self._away = (stretch[0][0], now, m), None
+
+    @staticmethod
+    def _new_brighter_view(last: Measurement | None, m: Measurement) -> bool:
+        """m is at least STEADY_RATIO brighter than the picture just before
+        it and a different view: its parts changed unevenly and its layout
+        changed (turned toward the sky or a window, stepped out of a cave
+        mouth), not a light going on, which brightens the view much alike
+        and keeps where the bright and dark parts are."""
+        if last is None or m.key < last.key * STEADY_RATIO:
+            return False
+        spread, layout = view_spread(last, m), view_layout(last, m)
+        return (spread is not None and spread >= VIEW_SPREAD
+                and layout is not None and layout < VIEW_LAYOUT)
+
+    def _left_for_brighter_view(self, now: float, m: Measurement) -> bool:
+        """m is a different, much brighter view than the settled stretch
+        that ended within VIEW_TURN_S (see _new_brighter_view): walking out
+        of a cave mouth or a doorway, where each picture is only a little
+        brighter than the one before and laid out much like it."""
+        if self._settled is None:
+            return False
+        _since, until, seen = self._settled
+        return now - until <= VIEW_TURN_S and self._new_brighter_view(seen, m)
+
+    def _new_darker_view(self, now: float, m: Measurement) -> float | None:
+        """The newest two pictures, VIEW_STEADY_S apart, show the same new
+        view (alike, and within STEADY_RATIO), much darker than the settled
+        stretch it came right after and unlike it, both in how unevenly the
+        parts changed and in layout (turned or ran into the dark, not a
+        light going off), with no light going on since: the
+        brightness to steer by now (the brighter of the two).  None
+        otherwise."""
+        ref, stretch = self._settled, self._stretch
+        if ref is None or len(stretch) < 2 or now < self._alternate_until:
+            return None
+        since, until, seen = ref
+        if (since >= stretch[0][0] or _apart(stretch[-2], (now, m)) < VIEW_STEADY_S
+                or stretch[0][0] - until > VIEW_TURN_S or self._jump_at > until):
+            return None
+        prev = stretch[-2][1]
+        key = max(prev.key, m.key)
+        spread, alike = view_spread(seen, m), view_spread(prev, m)
+        layout = view_layout(seen, m)
+        if (spread is None or spread < VIEW_SPREAD or alike is None or alike >= VIEW_SPREAD
+                or layout is None or layout >= VIEW_LAYOUT or seen.key <= key * STEADY_RATIO):
+            return None
+        return key
+
+    def _left_settled_view(self, m: Measurement) -> bool:
+        """m is a much darker, different view than the settled stretch (laid
+        out unlike it and changed unevenly: walking into a cave, not a light
+        dimming), with no light going on since."""
+        if self._settled is None:
+            return False
+        _since, until, seen = self._settled
+        spread, layout = view_spread(seen, m), view_layout(seen, m)
+        return (self._jump_at <= until and seen.key > m.key * STEADY_RATIO
+                and spread is not None and spread >= VIEW_SPREAD
+                and layout is not None and layout < VIEW_LAYOUT)
+
+    def _back_to_settled_view(self, now: float, m: Measurement) -> float | None:
+        """Back in the settled view after a quick look at a much brighter,
+        different one (glanced out of a doorway, a door opened and shut, a
+        menu opened for a moment): the newest two pictures are alike, as
+        dark as the settled view and laid out like it, and have been back
+        RETURN_HOLD_S.  A light flashing in the same view never counts (its
+        bright pictures keep the layout), and the hold outlasts the dark
+        spells of running past windows, so neither can pump.  The brightness
+        to steer by now (never boosting more than the settled view had).
+        None otherwise."""
+        ref, stretch, away = self._settled, self._stretch, self._away
+        if ref is None or away is None or len(stretch) < 2 or now < self._alternate_until:
+            return None
+        since, until, seen = ref
+        start = stretch[0][0]
+        if (since >= start or start - until > VIEW_TURN_S
+                or _apart(stretch[0], (now, m)) < RETURN_HOLD_S):
+            return None
+        prev = stretch[-2][1]
+        key = max(prev.key, m.key, seen.key)
+        if (away.key <= key * STEADY_RATIO
+                or max(seen.key, m.key) > min(seen.key, m.key) * STEADY_RATIO):
+            return None
+        out, out_layout = view_spread(seen, away), view_layout(seen, away)
+        back, back_layout = view_spread(seen, m), view_layout(seen, m)
+        alike = view_spread(prev, m)
+        if (out is None or out < VIEW_SPREAD or out_layout is None or out_layout >= VIEW_LAYOUT
+                or back is None or back >= VIEW_SPREAD or back_layout is None
+                or back_layout < RETURN_LAYOUT or alike is None or alike >= VIEW_SPREAD):
+            return None
+        return key
+
+    def hold(self, strength: float, target: float, dim: bool = True) -> None:
+        """No new game picture (CatVision's own window is in front): keep the
+        goal, but show a changed How much, Aim for or "tone down" on the last
+        picture at once."""
+        self.strength = strength
+        self.want = min(strength, max(-strength if dim else 0.0, self.want))
+        settings = (strength, target, dim)
+        if (settings != self._settings and self.key
+                and self._missing_since is None and self._black_since is None):
+            # (Not once a lost or black picture has eased back to the preset.)
+            self._settings = settings
+            self.want = target_offset(self.key, strength, target, dim)
+            self.rush = False
 
     @property
     def black_too_long(self) -> bool:
@@ -296,11 +671,14 @@ class Controller:
     def release(self) -> None:
         """Head back to the preset (no game in front)."""
         self.want = 0.0
-        self.rush = False
+        self.rush = self._rush_view = False
         self._recent.clear()
         self._last_key = 0.0
         self._black_since = None
         self._jump_at = self.clock - CALM_S
+        self._stretch, self._settled, self._estimate = [], None, False
+        self._away = None
+        self._view_rise = False     # back to the preset at the usual pace
 
     def advance(self, dt: float, speed: float = 1.0) -> float:
         self.clock += max(dt, 0.0)
@@ -324,10 +702,17 @@ class Controller:
         gap = want - self.offset
         if abs(gap) < 0.01 and abs(self.velocity) < 0.05:
             self.offset, self.velocity, self._catch_up = want, 0.0, False
+            self._view_rise = False
             return self.offset
         if gap < 0:
             self._catch_up = False
+            self._view_rise = False
         speed = max(speed, 0.1)
+        if self.rush and gap < 0 < self.velocity:
+            # A flash while still brightening: stop rising at once (the
+            # picture doesn't jump, it just turns round without first
+            # carrying on up into the glare).
+            self.velocity = 0.0
         if gap > 0:
             # A big change (into a cave) catches up quicker, all the way:
             # dropping to the slow pace for the last stretch would leave the
@@ -335,10 +720,16 @@ class Controller:
             if strength and gap > strength * 0.5:
                 self._catch_up = True
             tau, vmax = (RISE_FAST_S, MAX_RISE_FAST) if self._catch_up else (RISE_S, MAX_RISE)
+            per_update = self._view_rise
+            if per_update:
+                # Turned into a darker view (see observe): the player needs
+                # to see in there now, and a view change hides the fade.
+                tau, vmax = RISE_VIEW_S, MAX_RISE_VIEW
         elif self.rush:
-            tau, vmax = RUSH_S, MAX_RUSH
+            tau = RUSH_VIEW_S if self._rush_view else RUSH_S
+            vmax, per_update = MAX_RUSH, False
         else:
-            tau, vmax = FALL_S, MAX_FALL
+            tau, vmax, per_update = FALL_S, MAX_FALL, False
         w = 2.0 * speed / tau
         c1 = -gap                               # offset - want
         velocity = self.velocity
@@ -353,7 +744,14 @@ class Controller:
         e = math.exp(-w * dt)
         new = want + (c1 + c2 * dt) * e
         vel = (c2 - w * (c1 + c2 * dt)) * e
-        limit = min(vmax * speed, CEILING_RUSH if vmax == MAX_RUSH else CEILING)
+        if per_update:
+            # Its cap is per update, so a 60 Hz screen fades at 80 points a
+            # second and only faster screens (smaller steps) go quicker; a
+            # stalled update can't make a bigger step.
+            ceiling = CEILING_STEP / max(dt, 1.0 / FADER_MAX_HZ)
+        else:
+            ceiling = CEILING_RUSH if vmax == MAX_RUSH else CEILING
+        limit = min(vmax * speed, ceiling)
         if abs(new - self.offset) > limit * dt:  # speed limit: never a visible jump
             new = self.offset + math.copysign(limit * dt, new - self.offset)
             vel = math.copysign(min(abs(vel), limit), vel)
@@ -365,6 +763,14 @@ class Controller:
         return self.offset
 
 
+def quick_thread_switches() -> None:
+    """Let a waiting thread (the fader) have its turn sooner: see
+    THREAD_SWITCH_S.  Process-wide, so only the app's entry point calls
+    it; a shorter interval set elsewhere is kept."""
+    if sys.getswitchinterval() > THREAD_SWITCH_S:
+        sys.setswitchinterval(THREAD_SWITCH_S)
+
+
 def fader_rate(refresh_rates) -> int:
     """Fader updates a second for these displays: their fastest refresh
     rate, from FADER_HZ up to FADER_MAX_HZ."""
@@ -372,9 +778,10 @@ def fader_rate(refresh_rates) -> int:
 
 
 class Fader:
-    """Moves every display toward where auto levels wants it, FADER_HZ times
-    a second on its own thread, so fades are smooth and never wait on the
-    window.  apply() gets {display id: offset} whenever something moved."""
+    """Moves every display toward where auto levels wants it, at the
+    displays' refresh rate (see fader_rate) on its own thread, so fades are
+    smooth and never wait on the window.  apply() gets {display id:
+    offset} whenever something moved."""
 
     def __init__(self, controllers: dict[str, Controller],
                  apply: Callable[[dict[str, float]], None], hz: int = FADER_HZ):
@@ -385,6 +792,7 @@ class Fader:
         self._stop = threading.Event()
         self._wake = threading.Event()   # a new goal: stop resting at once
         self._thread: threading.Thread | None = None
+        self._ticked_at: float | None = None   # real time the clocks were last moved to
         self.last_error = ""
         self._applied: dict[str, float] = {}
 
@@ -401,6 +809,7 @@ class Fader:
         # is still finishing reports through its own (outdated) callback.
         stop = self._stop = threading.Event()
         self.last_error = ""
+        self._ticked_at = None   # (an earlier run's last step says nothing about this one)
         self._thread = threading.Thread(target=self._run, args=(stop, self.apply),
                                         name="catvision-auto-fader", daemon=True)
         self._thread.start()
@@ -420,6 +829,15 @@ class Fader:
         """Updates a second (the displays' refresh rate; see fader_rate)."""
         self.interval = 1.0 / max(1.0, hz)
 
+    def now_for(self, ctrl: Controller) -> float:
+        """ctrl's clock as it is right now.  The clock moves only when the
+        fader steps, which at rest is only every IDLE_S, so on its own it
+        can be a whole measurement behind when a picture arrives."""
+        at = self._ticked_at
+        if at is None or not self.running:
+            return ctrl.clock
+        return ctrl.clock + max(0.0, min(time.perf_counter() - at, 0.25))
+
     def settled(self) -> bool:
         """Every display is where it wants to be and has stopped moving."""
         return all(abs(c.want - c.offset) <= 0.001 and abs(c.velocity) < 1e-3
@@ -428,9 +846,9 @@ class Fader:
     def tick(self, dt: float, motion_dt: float | None = None, force: bool = False,
              apply: Callable[[dict[str, float]], None] | None = None) -> bool:
         """Move every display one step.  apply() is called only when some
-        position moved noticeably (or force), and always once more when a
-        display comes to rest, so its exact final value is applied.  Returns
-        True if apply() was called."""
+        position moved FADER_MIN_STEP since the last call (or force), and
+        always once more when a display comes to rest, so its exact final
+        value is applied.  Returns True if apply() was called."""
         motion = dt if motion_dt is None else min(motion_dt, dt)
         # One snapshot: the window may add or remove displays meanwhile.
         items = list(self.controllers.items())
@@ -445,7 +863,7 @@ class Fader:
         if not changed:
             for did, pos in positions.items():
                 gap = abs(pos - last[did])
-                if gap > 0.001 or (gap > 0 and wants[did] == pos):
+                if gap >= FADER_MIN_STEP or (gap > 0 and wants[did] == pos):
                     changed = True
                     break
         if changed:
@@ -461,6 +879,7 @@ class Fader:
         while not stop.is_set():
             now = time.perf_counter()
             dt, last = min(now - last, 0.25), now
+            self._ticked_at = now
             try:
                 # Coming out of a rest, the first step is a normal 60 Hz step,
                 # so a fade starts exactly as it would have anyway.  At rest it
@@ -743,15 +1162,18 @@ class Watcher:
         out: dict[str, Measurement | None] = {}
         start = time.perf_counter()
         for did, rect in rects.items():
+            taken = time.perf_counter()
             try:
                 pixels = self._capture(rect)
             except Exception:
                 pixels = None
-            out[did] = measure(pixels, THUMB_W) if pixels else None
+            out[did] = replace(measure(pixels, THUMB_W), at=taken) if pixels else None
         self.capture_ms = (time.perf_counter() - start) * 1000
         return out
 
     def _run(self, stop: threading.Event) -> None:
+        due = time.perf_counter()
+        before: dict[str, Measurement | None] = {}
         while not stop.is_set():
             results = self.measure_once()
             with self._lock:
@@ -759,4 +1181,13 @@ class Watcher:
                     # watch() may have changed the displays while this ran.
                     self._latest = {k: v for k, v in results.items() if k in self._rects}
                     self._seq += 1
-            stop.wait(INTERVAL_S)
+            # The next measurement on a steady beat (the capture's own time
+            # doesn't add to the gap), sooner while the brightness changes.
+            gap = min([capture_interval(before.get(did), m) for did, m in results.items()],
+                      default=INTERVAL_S)
+            before = results
+            due += gap
+            now = time.perf_counter()
+            if due <= now:      # a slow capture: start the beat again, never back to back
+                due = now + gap
+            stop.wait(due - now)

@@ -765,6 +765,26 @@ class RetryRefusedTest(unittest.TestCase):
         self.assertEqual(_deviation(g.get_ramp(D1)), 40)
         self.assertEqual(g.bad, [])
 
+    def test_windows_taking_changes_again_mid_search_gets_the_full_look(self):
+        """Windows starts taking changes again partway through a retry's
+        search: the display still ends with the full look, not a weak one
+        that a fade at rest would never climb back from."""
+        offsets = {D1: {"shadow_boost": 20.0}}
+        g, e = self._refused_then_stopped(None, offsets)
+        real, refusals = g.set_ramp, [2]
+
+        def flaky(mid, ramp):          # refuses two more calls, then takes everything
+            g.limit = -1 if refusals[0] > 0 else None
+            refusals[0] -= 1
+            return real(mid, ramp)
+        g.set_ramp = flaky
+        self.clock.now += self.engine_mod._RETRY_S
+        e.set_auto_offsets(offsets, generation=e.auto_generation)
+        self.assertTrue(e.status.gamma_ok)
+        self.assertFalse(e.status.gamma_limited, e.status.summary())
+        self.assertEqual(g.get_ramp(D1), _expected_full(e, D1))
+        self.assertEqual(g.bad, [])
+
     def test_retry_back_to_the_preset(self):
         """The fade ended at the preset while Windows refused: the preset
         itself is put back."""
@@ -857,6 +877,18 @@ class ReturnToRestTest(unittest.TestCase):
                 g, e, preset = self._faded(limit)
                 n = len(g.log)
                 e.retire_auto_offsets()
+                self._check_last_update(g, e, preset, n)
+
+    def test_return_to_rest_after_a_reapply_while_boosted(self):
+        # A game reset the ramp during a boost and keep-applied put it back:
+        # that full apply shows the boosted look, which is not the rest look.
+        for limit in (40, 10):
+            with self.subTest(limit=limit):
+                g, e, preset = self._faded(limit)
+                g.ramps[D1] = [list(c) for c in g.originals[D1]]
+                self.assertTrue(e.check_and_reapply())
+                n = len(g.log)
+                e.set_auto_offsets({D1: {}}, generation=e.auto_generation)
                 self._check_last_update(g, e, preset, n)
 
     def test_empty_and_all_zero_adjustments_are_the_same(self):

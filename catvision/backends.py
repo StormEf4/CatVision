@@ -17,11 +17,19 @@ from __future__ import annotations
 import operator
 import platform
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 
 from . import curves
 
 IS_WINDOWS = sys.platform == "win32"
+# Fading updates (60-120 a second per display) keep each display's device
+# context open for this long instead of opening and closing one every time
+# (two Windows calls fewer per update, each a chance for another thread to
+# take Python from the fader).  A fresh one at least this often, so after a
+# display change updates can't go to an outdated one for longer than this.
+DC_REUSE_S = 0.5
 
 
 @dataclass
@@ -111,8 +119,12 @@ class WindowsGammaBackend:
         g.SetDeviceGammaRamp.restype = wintypes.BOOL
         g.GetDeviceGammaRamp.argtypes = [wintypes.HDC, ctypes.c_void_p]
         g.GetDeviceGammaRamp.restype = wintypes.BOOL
+        self._dcs: dict[str, tuple[int, float]] = {}   # fading updates: id -> (DC, opened at)
+        self._dc_lock = threading.Lock()
+        self._layout_seen: dict = {}   # what the last layout reads returned (see _note_layout)
 
     def monitors(self) -> list[Monitor]:
+        self._drop_dcs()   # the displays may have changed
         ctypes = self._ctypes
         rects = self._monitor_rects()
         result = []
@@ -139,6 +151,13 @@ class WindowsGammaBackend:
                                   hz=self._refresh_rate(name)))
         result.sort(key=lambda m: (not m.primary, m.id))
         return result
+
+    def layout(self) -> dict[str, tuple[tuple[int, int, int, int], int]]:
+        """Where each display is now and how fast it refreshes, by device
+        name: (rect, hz).  The resolution, arrangement or refresh rate can
+        change while CatVision runs (a game switching modes, a TV turned on)."""
+        return {name: (rect, self._refresh_rate(name))
+                for name, rect in self._monitor_rects().items()}
 
     def _monitor_rects(self) -> dict[str, tuple[int, int, int, int]]:
         """Screen position of every display, by device name."""
@@ -171,7 +190,7 @@ class WindowsGammaBackend:
             u.EnumDisplayMonitors(None, None, proc_type(callback), 0)
         except OSError:
             pass
-        return rects
+        return self._note_layout("rects", rects)
 
     def _refresh_rate(self, monitor_id: str) -> int:
         """How many times a second the display refreshes (60 if Windows
@@ -179,8 +198,19 @@ class WindowsGammaBackend:
         try:
             hz = self._with_dc(monitor_id, lambda hdc: self._gdi32.GetDeviceCaps(hdc, 116))
         except (OSError, AttributeError, ValueError):   # 116 = VREFRESH
-            return 60
-        return hz if isinstance(hz, int) and 1 < hz < 1000 else 60
+            hz = None
+        return self._note_layout(monitor_id, hz if isinstance(hz, int) and 1 < hz < 1000 else 60)
+
+    def _note_layout(self, key: str, value):
+        """Remember a display position or refresh rate just read and return
+        it.  When it differs from the last read, the displays changed: the
+        device contexts kept for fading updates are closed now instead of
+        after up to DC_REUSE_S, so no update goes to an outdated one."""
+        old = self._layout_seen.get(key, value)
+        self._layout_seen[key] = value
+        if old != value:
+            self._drop_dcs()
+        return value
 
     def _with_dc(self, monitor_id: str, fn):
         hdc = self._gdi32.CreateDCW(monitor_id, None, None, None)
@@ -193,13 +223,40 @@ class WindowsGammaBackend:
 
     def set_ramp(self, monitor_id: str, ramp: list[list[int]]) -> bool:
         buf = self._RAMP()
-        for c in range(3):
-            for i in range(256):
-                buf[c][i] = ramp[c][i]
+        fill_ramp_buffer(buf, ramp)
         ok = self._with_dc(
             monitor_id,
             lambda hdc: self._gdi32.SetDeviceGammaRamp(hdc, self._ctypes.byref(buf)))
         return bool(ok)
+
+    def set_ramp_quick(self, monitor_id: str, ramp: list[list[int]]) -> bool:
+        """set_ramp for a fading update: reuses the display's device context
+        (see DC_REUSE_S).  When it doesn't take the ramp, a fresh one decides,
+        so the answer is always set_ramp's (a refusal means what it always
+        did, never an outdated context).  Normal applies and putting the
+        displays back always use set_ramp."""
+        if not self._dc_lock.acquire(blocking=False):   # another thread is here: the usual way
+            return self.set_ramp(monitor_id, ramp)
+        try:
+            buf = self._RAMP()
+            fill_ramp_buffer(buf, ramp)
+            g, ref = self._gdi32, self._ctypes.byref(buf)
+            now = time.monotonic()
+            held = self._dcs.pop(monitor_id, None)
+            if held is not None:
+                if now - held[1] < DC_REUSE_S and g.SetDeviceGammaRamp(held[0], ref):
+                    self._dcs[monitor_id] = held
+                    return True
+                g.DeleteDC(held[0])
+            hdc = g.CreateDCW(monitor_id, None, None, None)
+            if not hdc:
+                return False
+            # Kept even when refused: a PC where Windows limits the strength
+            # refuses the full ramp on every update, then takes a weaker one.
+            self._dcs[monitor_id] = (hdc, now)
+            return bool(g.SetDeviceGammaRamp(hdc, ref))
+        finally:
+            self._dc_lock.release()
 
     def get_ramp(self, monitor_id: str) -> list[list[int]] | None:
         buf = self._RAMP()
@@ -210,8 +267,31 @@ class WindowsGammaBackend:
             return None
         return [list(buf[c]) for c in range(3)]
 
+    def _drop_dcs(self) -> None:
+        """Close the device contexts kept for fading updates.  If another
+        thread is using them, leave them (they are renewed every DC_REUSE_S)."""
+        if not self._dc_lock.acquire(timeout=0.5):
+            return
+        try:
+            dcs, self._dcs = self._dcs, {}
+            for hdc, _opened in dcs.values():
+                self._gdi32.DeleteDC(hdc)
+        finally:
+            self._dc_lock.release()
+
     def close(self) -> None:
-        pass
+        self._drop_dcs()
+
+
+def fill_ramp_buffer(buf, ramp: list[list[int]]) -> None:
+    """Copy a ramp into a ctypes ``WORD[3][256]`` buffer.
+
+    One slice copy per channel: ctypes stores each value exactly as an
+    entry-by-entry copy would, in a quarter of the CPU time (auto levels
+    sets up to 120 ramps a second per display).
+    """
+    for c in range(3):
+        buf[c][:] = ramp[c][:256]
 
 
 _TIERS = (127, 120, 96)   # usual Windows limits (8-bit levels from a straight line)
@@ -221,17 +301,26 @@ _FADE_TARGETS = (0.8, 0.64, 0.5, 0.4, 0.3, 0.2, 0.12, 0.06, 0.03)
 # Fading updates (60-120 a second): forget a refusal after this many, so
 # a brief burst of refusals (a fullscreen switch) can't weaken the look for good.
 _FORGET_AFTER = 60
+# The 16-bit value where each 8-bit level starts (256 * i), for ramp_deviation.
+_LEVEL_STARTS = tuple(range(0, 256 * curves.RAMP_SIZE, 256))
 
 
 def ramp_deviation(ramp: list[list[int]]) -> int:
-    """How far (8-bit levels) a ramp strays from a straight line at most."""
+    """How far (8-bit levels) a ramp strays from a straight line at most.
+
+    That is the largest ``abs((v >> 8) - i)``.  For whole numbers
+    ``(v >> 8) - i`` is exactly ``(v - 256 * i) >> 8``, so one subtraction
+    per entry gives both extremes (every fading update measures its ramp).
+    """
     dev = 0
+    seen: list = []
     for ch in ramp:
-        if ch:
-            levels = [v >> 8 for v in ch]
-            index = range(len(levels))
-            dev = max(dev, max(map(operator.sub, levels, index)),
-                      max(map(operator.sub, index, levels)))
+        if ch and ch not in seen:   # identical channels (a grey look) stray the same
+            seen.append(ch)
+            offsets = (_LEVEL_STARTS if len(ch) <= len(_LEVEL_STARTS)
+                       else range(0, 256 * len(ch), 256))
+            diffs = list(map(operator.sub, ch, offsets))
+            dev = max(dev, max(diffs) >> 8, -(min(diffs) >> 8))
     return dev
 
 
@@ -316,12 +405,14 @@ def _apply_fading(backend, monitor_id: str, ramp, memory: dict,
         bad, age = None, 0
 
     tried: list = []
+    # The Windows backend can reuse the display's device context here.
+    set_ramp = getattr(backend, "set_ramp_quick", None) or backend.set_ramp
 
     def offer(candidate) -> bool:
         if candidate in tried:
             return False
         tried.append(candidate)
-        return bool(backend.set_ramp(monitor_id, candidate))
+        return bool(set_ramp(monitor_id, candidate))
 
     dev = ramp_deviation(ramp)
     if offer(ramp):

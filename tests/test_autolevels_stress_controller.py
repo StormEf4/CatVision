@@ -381,6 +381,86 @@ class SceneScenarioTests(unittest.TestCase):
         self._settle(ctrl, 8, 60.0, 0.04, 2.0)
         self.assertLess(ctrl.want, goal - 5.0)
 
+    def test_keep_this_look_on_any_frame_of_flickering_light(self):
+        """Keep this look uses the brightness the goal follows (the brightest
+        recent picture), not the newest one, so pressing it on a dark frame
+        of a flickering light leaves the look where it is."""
+        rng = random.Random(14)
+        for dark, bright in ((20, 45), (12, 22), (40, 75)):
+            for last in (dark, bright):
+                ctrl = Controller()
+                flicker = [PICS.get(bright if i % 2 else dark, rng.randrange(VARIANTS))
+                           for i in range(60)]
+                _run(ctrl, flicker + [PICS.get(last, 1)], 30.0, 0.12)
+                aim = aim_for_current_look(ctrl.key, ctrl.offset, 30.0)
+                self.assertTrue(TARGET_LIMITS[0] <= aim <= TARGET_LIMITS[1], aim)
+                kept = ctrl.offset
+                _run(ctrl, flicker, 30.0, aim)
+                self.assertLess(abs(ctrl.want - kept), 30.0 * 0.08, (dark, bright, last))
+                self.assertLess(abs(ctrl.offset - kept), 30.0 * 0.08, (dark, bright, last))
+
+    def test_held_look_follows_settings_changes(self):
+        """CatVision's own window is in front (no new game picture): the
+        game's look is held, but a changed How much, Aim for or "tone
+        down" shows on it at once."""
+        ctrl = Controller()
+        self._settle(ctrl, 6, 30.0, 0.12)
+        held = ctrl.want
+        ctrl.hold(30.0, 0.12)
+        self.assertEqual(ctrl.want, held)            # nothing changed: held as is
+        ctrl.hold(0.0, 0.12)
+        self.assertEqual(ctrl.want, 0.0)             # How much 0: back to the preset
+        ctrl.hold(30.0, 0.12)
+        self.assertAlmostEqual(ctrl.want, held, delta=30.0 * 0.08)
+        ctrl.hold(30.0, 0.06)
+        self.assertAlmostEqual(ctrl.want, target_offset(ctrl.key, 30.0, 0.06))
+        self.assertLess(ctrl.want, held)
+        ctrl = Controller()
+        self._settle(ctrl, 230, 30.0, 0.12)
+        self.assertLess(ctrl.want, -10.0)
+        ctrl.hold(30.0, 0.12, dim=False)
+        self.assertEqual(ctrl.want, 0.0)             # tone down unticked
+        # A picture that went black long ago (eased back) is not brought back.
+        ctrl = Controller()
+        self._settle(ctrl, 6, 30.0, 0.12)
+        _run(ctrl, [PICS.get(0, 0, 0)] * int(BLACK_HOLD_S / INTERVAL_S + 3), 30.0, 0.12)
+        self.assertEqual(ctrl.want, 0.0)
+        ctrl.hold(30.0, 0.2)
+        self.assertEqual(ctrl.want, 0.0)
+
+    def test_settings_change_brings_the_goal_inside_the_new_limits(self):
+        """Unticking "Also tone down bright scenes" or lowering How much
+        applies at once, even for a small goal and while a black or lost
+        picture holds the look."""
+        ctrl = Controller()
+        self._settle(ctrl, 50, 60.0, 0.12)
+        self._settle(ctrl, 35, 60.0, 0.12)
+        self.assertLess(ctrl.want, 0.0)      # a small dimming, inside the dead zone of 0
+        self._settle(ctrl, 35, 60.0, 0.12, 0.2, dim=False)
+        self.assertGreaterEqual(ctrl.want, 0.0)
+        self._settle(ctrl, 35, 60.0, 0.12, 6.0, dim=False)
+        self.assertGreaterEqual(ctrl.offset, -1e-9)   # glides back to the preset
+        for hold in ([PICS.get(0, 0, 0)] * 5, [None] * 5):
+            ctrl = Controller()
+            self._settle(ctrl, 4, 60.0, 0.12)
+            _run(ctrl, hold, 10.0, 0.12)
+            self.assertLessEqual(ctrl.want, 10.0)
+            ctrl = Controller()
+            self._settle(ctrl, 230, 30.0, 0.04)
+            self.assertLess(ctrl.want, -10.0)
+            _run(ctrl, hold, 30.0, 0.04, dim=False)
+            self.assertGreaterEqual(ctrl.want, 0.0)
+        ctrl = Controller()
+        self._settle(ctrl, 4, 5.0, 0.12)
+        self._settle(ctrl, 27, 5.0, 0.12)
+        self.assertGreater(ctrl.want, 0.0)   # a small boost, inside the dead zone of 0
+        _run(ctrl, [PICS.get(27, 1)], 0.0, 0.12)
+        self.assertEqual(ctrl.want, 0.0)
+        ctrl = Controller()
+        self._settle(ctrl, 4, 1.0, 0.12)
+        _run(ctrl, [PICS.get(4, 1)], 0.6, 0.12)
+        self.assertLessEqual(ctrl.want, 0.6)
+
     def test_speeds_scale_monotonically(self):
         def time_to(goal_level, start_level, speed, strength=30.0):
             ctrl = Controller()
@@ -480,6 +560,20 @@ class PureFunctionTests(unittest.TestCase):
     def test_aim_for_current_look_with_zero_strength(self):
         self.assertEqual(aim_for_current_look(0.2, 5.0, 0.0), 0.2)
 
+    def test_keep_leaves_aim_for_alone_when_it_already_gives_this_look(self):
+        """At full boost (or full dimming, or none with "tone down" off) many
+        Aim for values give the same look: Keep this look must not move Aim
+        for, which would change every other scene."""
+        for key, aim, dim in ((0.02, 0.30, True), (0.02, 0.2, True), (0.9, 0.04, True),
+                              (0.4, 0.12, False), (0.3, 0.05, False)):
+            offset = target_offset(key, 30.0, aim, dim)
+            self.assertEqual(aim_for_current_look(key, offset, 30.0, aim, dim), aim)
+        self.assertEqual(aim_for_current_look(0.2, 0.0, 0.0, 0.1), 0.1)
+        # Another look: the nearest Aim for that gives it.
+        self.assertAlmostEqual(aim_for_current_look(0.02, 30.0, 30.0, 0.1), 0.02 * 8)
+        self.assertAlmostEqual(aim_for_current_look(0.05, 10.0, 30.0, 0.3),
+                               aim_for_current_look(0.05, 10.0, 30.0))
+
     def test_target_offset_monotone_and_bounded(self):
         rng = random.Random(23)
         for _ in range(3000):
@@ -574,6 +668,35 @@ class FaderThreadStressTests(unittest.TestCase):
     def _faders_alive(self):
         return [t for t in threading.enumerate()
                 if t.name == "catvision-auto-fader" and t.is_alive()]
+
+    def test_now_for_keeps_up_with_real_time_at_rest(self):
+        """At rest the fader steps only every IDLE_S, so a controller's own
+        clock lags real time; observe() is given the real time instead, so
+        the settle and calm rules count from when pictures really arrived."""
+        ctrl = Controller()
+        fader = Fader({"a": ctrl}, lambda pos: None)
+        t0 = time.perf_counter()
+        fader.start()
+        try:
+            errors = []
+            for _ in range(15):
+                time.sleep(0.037)
+                errors.append(abs(fader.now_for(ctrl) - (time.perf_counter() - t0)))
+        finally:
+            fader.stop()
+        self.assertLess(max(errors), 0.05, errors)
+        self.assertEqual(Fader({}, lambda pos: None).now_for(ctrl), ctrl.clock)
+
+    def test_observe_uses_the_time_it_is_given(self):
+        ctrl = Controller()
+        ctrl.observe(PICS.get(30, 0), 30.0, 0.12, now=4.0)
+        self.assertEqual(ctrl._recent[-1][0], 4.0)
+        ctrl.want = 20.0
+        ctrl.observe(PICS.get(0, 0, 0), 30.0, 0.12, now=5.0)
+        ctrl.observe(PICS.get(0, 0, 0), 30.0, 0.12, now=4.9 + BLACK_HOLD_S)
+        self.assertEqual(ctrl.want, 20.0)
+        ctrl.observe(PICS.get(0, 0, 0), 30.0, 0.12, now=5.0 + BLACK_HOLD_S)
+        self.assertEqual(ctrl.want, 0.0)
 
     def test_random_start_stop_wake_and_displays(self):
         rng = random.Random(41)

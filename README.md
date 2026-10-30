@@ -169,24 +169,53 @@ display and adjusts it live, the way your eyes adapt:
   the HUD and screen edges don't throw it off. It also pays extra attention
   to **dark patches**, so a dark doorway still gets help when the sky is
   bright.
-- **No visible steps:** changes glide in 60 tiny steps a second on their own
-  background thread, easing in and out with a speed limit, so you never see
-  the picture jump. It ignores tiny changes so the picture doesn't keep
+- **No visible steps:** changes glide in tiny steps (as many a second as
+  your display refreshes, from 60 up to 120) on their own background
+  thread, easing in and out with a speed limit, so you never see the
+  picture jump. It ignores tiny changes so the picture doesn't keep
   "breathing", and it catches up faster after a big change (stepping from
   daylight into a dark building), keeping that quicker pace all the way, and
   it starts brightening on the way into a cave instead of waiting until you
-  are inside. Turning auto levels off glides back to your preset too.
+  are inside. Turning auto levels off glides back to your preset too. At
+  the slow end of a glide, where single steps are too small to see, it
+  updates less often to save CPU.
+- **Quick into the dark:** when you turn or run somewhere darker (into a
+  building or a cave, away from the sky, closing a bright menu) it can tell
+  the whole view changed, not just a light, and starts brightening within
+  about a third of a second, with an even quicker fade (walking into a cave
+  gets that quicker fade too, on the way in).
+- **Quick back into the dark:** after a quick look at something bright from a
+  dark place (a glance out of a doorway, a door opened and shut, a menu
+  opened for a moment), it goes back to how it was once you have been back
+  for just over half a second, with the same quick fade, instead of waiting
+  as if a light had flashed.
 - **Flash guard:** a sudden flash or explosion is toned down within a
-  fraction of a second, as a very fast fade rather than a jump.
-- **No pumping:** it only brightens once a scene has stayed dark for a
-  moment, so flickering lights, muzzle flashes and lightning don't make the
-  picture bounce.
+  fraction of a second, as a very fast fade rather than a jump. Stepping
+  out of the dark into daylight gets the same quick fade, even when it
+  brightens over a few steps (a cave mouth, a door swinging open). When it
+  can tell the whole view changed (turning toward the sky or a window) that
+  fade starts at full speed from the first brighter picture; walking out
+  gets the same full-speed start once the view no longer looks like the
+  dark one you were in. A light coming on in the same view doesn't count.
+- **No pumping:** apart from turning into a new, darker view (or back to the
+  one you just looked away from), it only brightens once a scene has stayed
+  dark for a moment, so flickering lights, muzzle flashes and lightning don't
+  make the picture bounce. Glimpses of something bright (running past
+  windows) don't count as a new view or as looking away, and if you keep
+  turning back and forth between bright and dark it waits the usual way until
+  you stop for a few seconds.
 - **Aim brighter / darker hotkeys:** nudge Aim for while you play, without
   leaving the game (suggested Ctrl+Alt+] and Ctrl+Alt+[). They change the
   game's own kept look if it has one.
 - **Keep this look:** when the game looks just right, click **Keep this look**
   (or use its hotkey or the tray menu). Auto levels then aims for that look,
-  and brighter or darker scenes are adjusted from there.
+  and brighter or darker scenes are adjusted from there. While CatVision's
+  own window is in front, the game's look is held (for up to 30 seconds), so
+  the look you keep is the one you were just playing with. Changes to How
+  much, Aim for and Also tone down still show on it straight away. Used from
+  the tray menu just after leaving the game, it keeps the look from just
+  before. If Aim for already gives this look (at full boost, say), it stays
+  as it is.
 - **Each game remembers its own look.** A look you keep while a full-screen
   game is in front is saved for that game (recognized by its window title)
   and used again automatically next time. The Home tab shows *Game: ...* and
@@ -194,11 +223,14 @@ display and adjusts it live, the way your eyes adapt:
   normal Aim for.
 - **Never runs out of room:** if your preset's Shadow boost is already high
   (Pitch Black is 85), the extra brightening that doesn't fit goes into
-  Exposure instead, and the same when dimming.
+  Exposure instead, and the same when dimming. (With Anti-glare on, it never
+  takes Exposure from 0 up or down to 0: Anti-glare only works while
+  Exposure is above 0, so the picture would jump.)
 - **How much** sets how far it may move the slider. **Aim for** sets how
   bright it tries to make scenes: higher brightens dark scenes more.
 - **Speed**: Slow, Normal or Fast reaction to darker and brighter scenes.
-  Flashes are always toned down much faster than other changes.
+  Flashes and stepping out into daylight are always toned down much faster
+  than other changes.
 - **Only while a game fills the screen** (on by default): on the desktop or in
   a windowed app it pauses and eases back to your preset. Games in fullscreen
   or borderless windowed mode count, and so do full-screen videos. A normal
@@ -210,12 +242,14 @@ display and adjusts it live, the way your eyes adapt:
 - Each ticked display is adjusted on its own, and the Home tab shows what it
   is doing (for example *Display 1: 3% bright · Shadow boost 66 → 88*).
 
-**How it stays safe:** five times a second it takes a tiny, low-resolution
-copy of what Windows is already showing (the same screen-capture route
-recording and streaming apps use) and measures only how bright it is. It
-never touches the game, never saves or sends the pictures, and never looks
-for anything in them. It only changes brightness, nothing that would point
-things out to you.
+**How it stays safe:** five times a second (ten while the brightness is
+changing a lot) it takes a tiny, low-resolution copy of what Windows is
+already showing (the same screen-capture route recording and streaming apps
+use) and measures only how bright it is: overall, and in 32 large blocks of
+the picture (8 across, 4 down) to tell turning to a new view from a light
+going off. It never touches the game, never saves or sends the pictures, and
+never looks for anything in them. It only changes brightness, nothing that
+would point things out to you.
 
 **Things to know:**
 

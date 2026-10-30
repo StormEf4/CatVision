@@ -36,6 +36,11 @@ def main(argv: list[str] | None = None) -> int:
             message_box(text)
         return 0
 
+    # Auto levels (beta): the fader thread gets its turn within about a
+    # millisecond while another thread is busy (see THREAD_SWITCH_S).
+    from .autolevels import quick_thread_switches
+    quick_thread_switches()
+
     if args.selftest:
         from .selftest import run
         return run(args.selftest)

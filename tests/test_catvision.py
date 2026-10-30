@@ -274,6 +274,53 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(curves.is_identity_ramp(g.ramps["\\\\.\\DISPLAY1"]))
         self.assertFalse((self.dir / "display_modified.flag").exists())
 
+    def test_restore_now_stops_a_running_fade(self):
+        # Force quit while auto levels fades: the fader thread keeps sending
+        # updates until the process ends, and none may boost the display again
+        # (the mark is gone, so the next start would take it as the original).
+        g = FakeGamma()
+        e = Engine(g, NullColorBackend(), self.dir)
+        e.settings = Settings(shadow_boost=40)
+        e.set_enabled(True)
+        gen = e.auto_generation
+        d1 = "\\\\.\\DISPLAY1"
+        e.set_auto_offsets({d1: {"shadow_boost": 20}}, generation=gen)
+        e.restore_now()
+        e.set_auto_offsets({d1: {"shadow_boost": 25}}, generation=gen)
+        e.set_auto_offsets({d1: {"shadow_boost": 25}})
+        self.assertFalse(e.check_and_reapply())
+        self.assertTrue(curves.is_identity_ramp(g.ramps[d1]))
+        self.assertFalse((self.dir / "display_modified.flag").exists())
+
+    def test_refresh_layout_follows_resolution_and_refresh_rate(self):
+        # A changed resolution, arrangement or refresh rate while CatVision
+        # runs: auto levels must see the new screen area, not the old one.
+        d1, d2 = "\\\\.\\DISPLAY1", "\\\\.\\DISPLAY2"
+
+        class Moving(FakeGamma):
+            now = {d1: ((0, 0, 2560, 1440), 144), d2: ((2560, 0, 4480, 1080), 60)}
+
+            def monitors(self):
+                return [Monitor(k, k, k == d1, rect=r, hz=hz) for k, (r, hz) in self.now.items()]
+
+            def layout(self):
+                return dict(self.now)
+
+        g = Moving()
+        e = Engine(g, NullColorBackend(), self.dir)
+        self.assertFalse(e.refresh_layout())
+        g.now = {d1: ((0, 0, 1920, 1080), 240)}      # display 2 no longer listed
+        self.assertTrue(e.refresh_layout())
+        mons = {m.id: m for m in e.monitors()}
+        self.assertEqual((mons[d1].rect, mons[d1].hz), ((0, 0, 1920, 1080), 240))
+        self.assertEqual((mons[d2].rect, mons[d2].hz), ((2560, 0, 4480, 1080), 60))
+        self.assertFalse(e.refresh_layout())
+        # Backends that can't tell (or fail) change nothing.
+        self.assertFalse(Engine(FakeGamma(), NullColorBackend(), self.dir).refresh_layout())
+        for exc in (OSError("gone"), RuntimeError("ctypes")):
+            g.layout = lambda exc=exc: (_ for _ in ()).throw(exc)
+            self.assertFalse(e.refresh_layout())
+
     def test_unavailable_color_backend_reports_reason(self):
         e = Engine(FakeGamma(), NullColorBackend(), self.dir)
         e.settings = Settings(color_filter="grayscale")

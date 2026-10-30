@@ -54,8 +54,11 @@ class FaderIdleTests(unittest.TestCase):
         self.assertFalse(f.tick(1 / 60))         # at rest: nothing to apply
         self.assertTrue(f.tick(1 / 60, force=True))
         ctrls["a"].want = 10.0
-        self.assertTrue(f.tick(1 / 60))
-        self.assertEqual(len(calls), 3)
+        # A new goal is passed on as soon as the move is worth showing
+        # (FADER_MIN_STEP): within a few steps of the spring's gentle start.
+        moved = [f.tick(1 / 60) for _ in range(5)]
+        self.assertIn(True, moved)
+        self.assertEqual(len(calls), 2 + moved.count(True))
 
     def test_final_resting_value_is_applied(self):
         calls = []
