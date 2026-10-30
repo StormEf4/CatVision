@@ -36,7 +36,7 @@ THREAD_NAMES = ("catvision-auto-fader", "catvision-auto-levels")
 
 
 class FakeScreen:
-    """What the fake capture returns.  mode: dark / bright / black / frozen /
+    """What the fake capture returns.  mode: dark / bright / window / black / frozen /
     none (can't capture) / block (capture hangs until released)."""
 
     def __init__(self):
@@ -59,6 +59,8 @@ class FakeScreen:
             base = bytes([6, 6, 6, 255]) * 400
         elif mode == "bright":
             base = bytes([200, 200, 200, 255]) * 400
+        elif mode == "window":   # a dark room with a bright window filling half the view
+            base = bytes([6, 6, 6, 255]) * 200 + bytes([200, 200, 200, 255]) * 200
         elif mode == "black":
             base = bytes([0, 0, 0, 255]) * 400
             return base   # black stays black
@@ -207,9 +209,11 @@ class AutoLevelsAppStress(unittest.TestCase):
     def assert_offsets_sane(self):
         for did, amounts in self.engine.auto_offsets.items():
             self.assertIn(did, (D1, D2))
-            self.assertTrue(set(amounts) <= {"shadow_boost", "exposure"}, amounts)
+            self.assertTrue(set(amounts) <= {"shadow_boost", "exposure", "highlight_room"},
+                            amounts)
+            self.assertGreaterEqual(amounts.get("highlight_room", 0.0), 0.0)
             s = self.engine.settings_for(did)
-            for k in ("shadow_boost", "exposure"):
+            for k in ("shadow_boost", "exposure", "highlight_room"):
                 lo, hi = curves.LIMITS[k]
                 self.assertTrue(lo <= getattr(s, k) <= hi)
 
@@ -378,6 +382,26 @@ class AutoLevelsAppStress(unittest.TestCase):
         loaded = self.assert_config_valid()
         self.assertEqual(loaded.options.auto_game_looks, {})
         self.assertEqual(loaded.options.auto_target, lo)
+        self.assert_clean()
+
+    def test_window_in_view_keeps_the_outside_visible(self):
+        """A bright window in view from a dark room: Outside detail glides in
+        (the readout says so) and back out once the window has gone."""
+        self.start_fade("Dark Areas")
+        self.screen.mode = "window"
+
+        def room():
+            return self.engine.auto_offsets.get(D1, {}).get("highlight_room", 0.0)
+        self.assertTrue(self.pump_until(lambda: room() > 20, 6), self.engine.auto_offsets)
+        self.assertTrue(self.pump_until(lambda: "keeping the outside visible" in self.info(), 3),
+                        self.info())
+        self.assert_offsets_sane()
+        top = room()
+        self.screen.mode = "dark"
+        self.assertTrue(self.pump_until(lambda: room() < top / 2, 6), self.engine.auto_offsets)
+        self.assertTrue(self.pump_until(lambda: "keeping the outside visible" not in self.info(),
+                                        8), self.info())
+        self.assert_offsets_sane()
         self.assert_clean()
 
     def test_game_only_and_speed_changes(self):
@@ -681,6 +705,10 @@ class AutoLevelsAppStress(unittest.TestCase):
                 lambda: self.app.auto_watch._rects.get(D1) == (0, 0, 1920, 1080), 3))
             self.assertAlmostEqual(self.app._auto_fader.interval,
                                    1.0 / autolevels.fader_rate([240]))
+            # ...while the 60 Hz display is passed on at its own pace.
+            self.assertTrue(self.pump_until(
+                lambda: self.app._auto_fader.rates.get(D2) == 60, 3))
+            self.assertEqual(self.app._auto_fader.rates.get(D1), autolevels.FADER_MAX_HZ)
         finally:
             gui_mod.AUTO_LAYOUT_S = old
         self.assert_clean()

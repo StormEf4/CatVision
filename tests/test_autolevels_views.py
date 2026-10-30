@@ -18,9 +18,10 @@ from unittest import mock
 from catvision import autolevels
 from catvision.autolevels import (ALTERNATE_HOLD_S, BURST_S, CEILING_RUSH, CEILING_STEP, DEAD_ZONE,
                                   FADER_HZ, FLASH_RATIO, INTERVAL_S, RETURN_HOLD_S, RUSH_S,
-                                  SETTLE_FAST_S, STEADY_RATIO, THUMB_H, THUMB_W, VIEW_LAYOUT,
+                                  SETTLE_FAST_S, SETTLE_S, STEADY_RATIO, THUMB_H, THUMB_W, VIEW_LAYOUT,
                                   VIEW_SPREAD, Controller, Measurement, capture_interval, measure,
-                                  target_offset, view_layout, view_spread)
+                                  VIEW_MOVED, target_offset, view_layout, view_moved,
+                                  view_spread)
 
 STRENGTH, AIM = 30.0, 0.12
 
@@ -642,6 +643,205 @@ class CaveEntryTests(unittest.TestCase):
                     c.advance(1 / 60)
             self.assertAlmostEqual(c.want, target, delta=STRENGTH * DEAD_ZONE,
                                    msg=(start, ratio))
+
+
+# A flashbang in the dark room: the screen goes white, then the room shows
+# through again as the white fades (more of the room each picture).
+FADE_STEPS = (0.92, 0.8, 0.66, 0.52, 0.4, 0.3, 0.22, 0.15, 0.1, 0.06, 0.03)
+PICS["white"] = measure(_frame(lambda fx, fy: 250), THUMB_W)
+for _k in FADE_STEPS:
+    PICS[f"fade {_k}"] = measure(_frame(lambda fx, fy, k=_k: _room(fx, fy) * (1 - k) + 250 * k),
+                                 THUMB_W)
+
+
+def _flashbang(white_s=0.3, fade_s=1.0):
+    def scene_at(t):
+        if t < white_s:
+            return "white"
+        left = (1 - min(1.0, (t - white_s) / fade_s)) ** 2      # how much white is left
+        if left < FADE_STEPS[-1] / 2:
+            return "room"
+        return "fade %s" % min(FADE_STEPS, key=lambda k: abs(k - left))
+    return scene_at
+
+
+class WhiteOutTests(unittest.TestCase):
+    def test_a_flashbang_fading_back_is_followed_as_it_goes(self):
+        target = _settled("room")
+        for hz in (60, 120):
+            for phase in (0.01, 0.07, 0.13, 0.19):
+                frames = _simulate(_flashbang(), 4.0, "room", hz=hz, phase=phase)
+                # It used to wait out CALM_S after the white (as if a light
+                # had flashed): not within 2 points until 2.3 s or later.
+                near = next(t for t, off, _w in frames if t >= 0.5 and off > target - 2.0)
+                self.assertLess(near, 1.8, (hz, phase))
+                # Never brighter than the room had, and it only goes up
+                # once the white has gone (no pumping on the way).
+                self.assertLessEqual(max(off for t, off, _w in frames if t >= 0.5), target + 1e-9)
+                lows = [off for t, off, _w in frames if t >= 0.5]
+                low = lows.index(min(lows))
+                self.assertTrue(all(b >= a - 1e-9 for a, b in zip(lows[low:], lows[low + 1:])),
+                                (hz, phase))
+
+    def test_a_white_out_that_snaps_back_still_waits(self):
+        # Lightning (or a strobe) whiting the screen out and snapping off
+        # may come again: it waits like any other flash.
+        # (Back once the last white picture seen is SETTLE_S old, as before.)
+        target = _settled("room")
+        for scene_at in (lambda t: "white" if t < 0.3 else "room",
+                         lambda t: "white" if t % 0.25 < 0.1 and t < 0.6 else "room"):
+            for phase in (0.01, 0.07, 0.13, 0.19):
+                frames = _simulate(scene_at, 4.0, "room", phase=phase)
+                dimmed = next(t for t, _o, want in frames if want < target - 5.0)
+                back = next(t for t, _o, want in frames if t > dimmed and want > target - 1.0)
+                self.assertGreater(back, SETTLE_S + 0.2, phase)
+
+
+# Game-like pictures: a HUD drawn over every view, the same in each (a
+# minimap on a dark panel top right, a health bar, an ammo counter and a
+# crosshair), a vignette darkening the corners, and lights that reach only
+# part of the view.
+def _hud(level_at):
+    def at(fx, fy):
+        if fx > 0.78 and fy < 0.26:
+            edge = fx < 0.8 or fx > 0.96 or fy < 0.04 or fy > 0.24
+            return 230 if edge else 70                   # minimap
+        if fx < 0.33 and 0.88 < fy < 0.93:
+            return 235                                   # health bar
+        if fx > 0.85 and fy > 0.84 and int(fx * 96 + fy * 54) % 2:
+            return 245                                   # ammo counter
+        if (abs(fx - 0.5) < 0.035 and abs(fy - 0.5) < 0.01) or (
+                abs(fx - 0.5) < 0.006 and abs(fy - 0.5) < 0.06):
+            return 255                                   # crosshair
+        return level_at(fx, fy)
+    return at
+
+
+def _vignette(level_at):
+    def at(fx, fy):
+        dx, dy = fx - 0.5, fy - 0.5
+        return level_at(fx, fy) * (1 - 0.45 * min(1.0, (dx * dx + dy * dy) / 0.5))
+    return at
+
+
+def _lit_part(cx, cy, radius, gain):
+    """The room with a light reaching only part of it (around cx, cy)."""
+    def at(fx, fy):
+        d = ((fx - cx) ** 2 * 2.5 + (fy - cy) ** 2) ** 0.5
+        v = _room(fx, fy)
+        return v * (1 + gain * (1 - d / radius)) + 30 * (1 - d / radius) if d < radius else v
+    return at
+
+
+for _name, _fn in (("day", _day), ("room", _room), ("cave", _cave), ("lit", _lit_room)):
+    PICS["hud " + _name] = measure(_frame(_hud(_vignette(_fn))), THUMB_W)
+PICS["centre lit"] = measure(_frame(_lit_part(0.5, 0.55, 0.4, 9)), THUMB_W)   # a muzzle flash
+PICS["corner lit"] = measure(_frame(_lit_part(0.08, 0.12, 0.5, 8)), THUMB_W)  # a lamp in a corner
+PICS["hud white"] = measure(_frame(_hud(_vignette(lambda fx, fy: 250))), THUMB_W)
+for _k in FADE_STEPS:
+    PICS[f"hud fade {_k}"] = measure(_frame(_hud(_vignette(
+        lambda fx, fy, k=_k: _room(fx, fy) * (1 - k) + 250 * k))), THUMB_W)
+
+
+class GameLikePictureTests(unittest.TestCase):
+    def test_a_light_reaching_part_of_the_view_is_not_a_new_view(self):
+        # A muzzle flash lighting the middle, or a lamp in a corner, changes
+        # those parts unevenly and changes the layout, like a turn would;
+        # but it leaves the rest of the room as it was.
+        for lit in ("centre lit", "corner lit"):
+            self.assertGreater(view_spread(PICS[lit], PICS["room"]), VIEW_SPREAD, lit)
+            self.assertLess(view_layout(PICS[lit], PICS["room"]), VIEW_LAYOUT, lit)
+            self.assertLess(view_moved(PICS[lit], PICS["room"]), VIEW_MOVED, lit)
+        # Turning changes nearly every part, even with a HUD that is the
+        # same in every view.
+        for a, b in (("day", "room"), ("day", "cave"),
+                     ("hud day", "hud room"), ("hud day", "hud cave")):
+            self.assertGreaterEqual(view_moved(PICS[a], PICS[b]), VIEW_MOVED, (a, b))
+            self.assertGreater(view_spread(PICS[a], PICS[b]), VIEW_SPREAD, (a, b))
+            self.assertLess(view_layout(PICS[a], PICS[b]), VIEW_LAYOUT, (a, b))
+        # A light going off with the HUD on still keeps the layout.
+        self.assertGreaterEqual(view_layout(PICS["hud lit"], PICS["hud room"]), VIEW_LAYOUT)
+
+    def test_a_light_reaching_part_of_the_view_going_off_still_waits(self):
+        # Settled in the room lit by a light in the middle (or a corner):
+        # it going off may be a flickering light (or the next shot), so it
+        # waits as before.  It used to be followed at once, as a turn.
+        for lit in ("centre lit", "corner lit"):
+            start = _settled(lit)
+            for phase in (0.01, 0.07, 0.13, 0.19):
+                frames = _simulate(lambda t: "room", 3.0, lit, phase=phase)
+                early = [want for t, _o, want in frames if t < SETTLE_FAST_S - INTERVAL_S]
+                self.assertTrue(all(abs(w - start) < 1e-9 for w in early), (lit, phase))
+                self.assertAlmostEqual(frames[-1][2], _settled("room"),
+                                       delta=STRENGTH * DEAD_ZONE)
+
+    def test_a_turn_with_a_hud_on_screen_is_followed_at_once(self):
+        target = _settled("hud room")
+        for phase in (0.01, 0.07, 0.13, 0.19):
+            frames = _simulate(lambda t: "hud room", 2.0, "hud day", phase=phase)
+            near = next(t for t, off, _w in frames if off > target - 2.0)
+            self.assertLess(near, SETTLE_FAST_S, phase)
+
+    def test_a_light_going_off_with_a_hud_on_screen_still_waits(self):
+        start = _settled("hud lit")
+        for phase in (0.01, 0.07, 0.13, 0.19):
+            frames = _simulate(lambda t: "hud room", 3.0, "hud lit", phase=phase)
+            early = [want for t, _o, want in frames if t < SETTLE_FAST_S - INTERVAL_S]
+            self.assertTrue(all(abs(w - start) < 1e-9 for w in early), phase)
+
+    def test_a_flashbang_under_a_hud_is_followed_as_it_goes(self):
+        # The HUD's dark minimap panel and the vignette's corners stay
+        # darker than the white, so the white-out has a layout of its own:
+        # it used to wait out CALM_S (not within 2 points until 2.3 s).
+        target = _settled("hud room")
+
+        def scene_at(t):
+            name = _flashbang()(t)
+            return name if name == "room" else "hud " + name
+        for hz in (60, 120):
+            for phase in (0.01, 0.07, 0.13, 0.19):
+                frames = _simulate(lambda t: "hud room" if scene_at(t) == "room" else scene_at(t),
+                                   4.0, "hud room", hz=hz, phase=phase)
+                near = next(t for t, off, _w in frames if t >= 0.5 and off > target - 2.0)
+                self.assertLess(near, 1.8, (hz, phase))
+                self.assertLessEqual(max(off for t, off, _w in frames if t >= 0.5),
+                                     target + 1e-9)
+
+    def test_lightning_under_a_hud_still_waits(self):
+        target = _settled("hud room")
+        for phase in (0.01, 0.07, 0.13, 0.19):
+            frames = _simulate(lambda t: "hud white" if t < 0.3 else "hud room", 4.0, "hud room",
+                               phase=phase)
+            dimmed = next(t for t, _o, want in frames if want < target - 5.0)
+            back = next(t for t, _o, want in frames if t > dimmed and want > target - 1.0)
+            self.assertGreater(back, SETTLE_S + 0.2, phase)
+
+
+class TurnRoundTests(unittest.TestCase):
+    def test_a_goal_dropping_mid_rise_stops_the_rise_promptly(self):
+        # Brightening quickly for a dark room when a light comes up (less
+        # than a flash): the goal drops just below the rising offset.  It
+        # used to carry on up for about a tenth of a second (+2.2 points at
+        # 120 Hz, +2.6 at 60) before turning back.
+        for hz in (60, 120):
+            c = Controller()
+            c.offset = c.want = _settled("day")
+            c.strength, c.want, c._view_rise = STRENGTH, _settled("room"), True
+            while c.velocity < 60.0:
+                c.advance(1.0 / hz)
+            before, last_step = c.offset, c.velocity / hz
+            c.want = c.offset - 1.0
+            path = [c.offset]
+            for _ in range(int(1.5 * hz)):
+                path.append(c.advance(1.0 / hz))
+            self.assertLess(max(path) - before, 0.8, hz)
+            steps = [b - a for a, b in zip(path, path[1:])]
+            # No step: each move is smaller than the one before it while
+            # it slows, and it never goes past the new goal.
+            self.assertLessEqual(steps[0], last_step + 1e-9, hz)
+            self.assertTrue(all(abs(s) <= CEILING_STEP for s in steps), hz)
+            self.assertGreaterEqual(min(path), c.want - 1e-9, hz)
+            self.assertAlmostEqual(path[-1], c.want, delta=0.05)
 
 
 if __name__ == "__main__":

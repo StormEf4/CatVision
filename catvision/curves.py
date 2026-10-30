@@ -36,6 +36,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "brightness": (0.5, 2.0),
     "contrast": (0.5, 2.0),
     "white_cap": (0.5, 1.0),
+    "highlight_room": (0.0, 100.0),
     "red": (0.5, 1.5),
     "green": (0.5, 1.5),
     "blue": (0.5, 1.5),
@@ -82,6 +83,7 @@ class Settings:
     brightness: float = 1.0        # overall gain
     contrast: float = 1.0          # around mid-grey
     white_cap: float = 1.0         # maximum output, tames flashes/glare
+    highlight_room: float = 0.0    # 0..100, keeps bright areas (a window from a dark room) apart
     red: float = 1.0               # per-channel gain (tint)
     green: float = 1.0
     blue: float = 1.0
@@ -191,12 +193,42 @@ def exposure_curve(x: float, exposure: float, anti_glare: float = 0.0) -> float:
     return top + room * math.log1p(_HIGHLIGHT_CURVE * t) / math.log1p(_HIGHLIGHT_CURVE)
 
 
-def tone_curve(x: float, s: Settings) -> float:
-    """Brightness transfer function shared by all three channels.
+# Outside detail (highlight_room): a ceiling line through white,
+# 1 - slope * (1 - x), that the lifted tones may not cross.  A strong lift
+# pushes everything above the dark room close to white, and contrast then
+# turns the whole view out of a window into one white block; under the line
+# the bright inputs from where the curve meets it up to white keep at least
+# ``slope`` of their own range, so sky, walls and trees stay apart.  The
+# line is a function of brightness only (the gamma table can't know where
+# a pixel is): the dark room sits below where the curve meets the line and
+# is not touched.  Input 255 still reaches white, and nothing before it.
+HIGHLIGHT_SLOPE = 0.6        # the line's slope at 100 (0.3 at 50)
+HIGHLIGHT_SOFT = 0.06        # width of the rounded corner where the curve meets the line...
+HIGHLIGHT_SOFT_TOP = 0.2     # ...narrowing to a sharp one over the top this much of the inputs
 
-    ``x`` and the result are in 0..1.
-    """
-    y = exposure_curve(_clamp01(x), s.exposure, s.anti_glare)
+
+def highlight_slope(highlight_room: float) -> float:
+    """The ceiling line's slope for the 0..100 slider (0 = off)."""
+    return HIGHLIGHT_SLOPE * (min(max(highlight_room, 0.0), 100.0) / 100.0)
+
+
+def _under_ceiling(z: float, top: float, width: float) -> float:
+    """z kept under the line value ``top``, with a rounded corner ``width``
+    wide (a quadratic smooth minimum: it never rises above either, and it
+    rises whenever both do)."""
+    if z <= top - width:
+        return z
+    if z >= top + width:
+        return top
+    gap = z - top
+    h = width - abs(gap)
+    return (z if gap < 0 else top) - h * h / (4.0 * width)
+
+
+def _lifted(x: float, s: Settings) -> float:
+    """tone_curve's stages before Outside detail and the clamp (``x`` is
+    already in 0..1; the result can be outside it)."""
+    y = exposure_curve(x, s.exposure, s.anti_glare)
     if s.gamma != 1.0:
         y = y ** (1.0 / s.gamma)
     a = shadow_boost_factor(s.shadow_boost)
@@ -205,7 +237,34 @@ def tone_curve(x: float, s: Settings) -> float:
         # so dark corners open up without blowing out the sky.
         y = math.log1p(a * y) / math.log1p(a)
     y *= s.brightness
-    y = (y - 0.5) * s.contrast + 0.5
+    return (y - 0.5) * s.contrast + 0.5
+
+
+def highlight_room_cap(s: Settings, x: float) -> float:
+    """The most Outside detail (0..100) that leaves input ``x`` and
+    everything darker untouched: the ceiling line's rounded corner just
+    clears the tone there.  A strong lift (a high boost, Pitch Black, the
+    Night Vision looks) puts the room's own tones close to white, so it
+    allows less; 0 when even a little would reach them."""
+    x = _clamp01(x)
+    if x >= 1.0:
+        return 100.0
+    # The line may come down to the tone plus the corner's width there.
+    headroom = 1.0 - HIGHLIGHT_SOFT * min(1.0, (1.0 - x) / HIGHLIGHT_SOFT_TOP) - _lifted(x, s)
+    return min(100.0, max(0.0, headroom / (1.0 - x) / HIGHLIGHT_SLOPE * 100.0))
+
+
+def tone_curve(x: float, s: Settings) -> float:
+    """Brightness transfer function shared by all three channels.
+
+    ``x`` and the result are in 0..1.
+    """
+    x = _clamp01(x)
+    y = _lifted(x, s)
+    slope = highlight_slope(s.highlight_room)
+    if slope > 0:
+        y = _under_ceiling(y, 1.0 - slope * (1.0 - x),
+                           HIGHLIGHT_SOFT * min(1.0, (1.0 - x) / HIGHLIGHT_SOFT_TOP))
     y = _clamp01(y)
     y = s.black_floor + (1.0 - s.black_floor) * y
     return y
@@ -261,6 +320,52 @@ def _tone_table(s: Settings) -> list[float]:
     a = shadow_boost_factor(s.shadow_boost)
     gain, contrast, floor = s.brightness, s.contrast, s.black_floor
     rest = 1.0 - floor
+    slope = highlight_slope(s.highlight_room)
+    if slope > 0:
+        # Outside detail: the same stages, then the ceiling line (worked out
+        # once per slope; see _under_ceiling) before the clamp, in one pass.
+        # (Most entries are well under the line: one comparison each.)  The
+        # clamp is only written where it can change anything: under the
+        # corner a tone can be below 0 but never above 1 (the line is at most
+        # 1), and the line and its corner stay between 1 - HIGHLIGHT_SLOPE
+        # minus a quarter of the corner's width and 1, always inside.
+        ceiling = _ceiling(slope)
+        if ceiling is None:
+            # A slope seen for the first time (the Outside detail itself is
+            # fading): work the line out only where a tone can reach it (see
+            # _CEILING_PARTS) instead of building a table that is used once.
+            if a > 0:
+                log1p, scale = math.log1p, math.log1p(a)
+                return [floor + rest * ((0.0 if z < 0.0 else z)
+                                        if (z := (log1p(a * y) / scale * gain - 0.5)
+                                            * contrast + 0.5) <= safe
+                                        else z if z <= (t := 1.0 - slope * d) - w
+                                        else t if z >= t + w
+                                        else (z if (g := z - t) < 0 else t)
+                                        - (h := w - (g if g >= 0 else -g)) * h / q)
+                        for y, (safe, d, w, q) in zip(ys, _CEILING_PARTS)]
+            return [floor + rest * ((0.0 if z < 0.0 else z)
+                                    if (z := (y * gain - 0.5) * contrast + 0.5) <= safe
+                                    else z if z <= (t := 1.0 - slope * d) - w
+                                    else t if z >= t + w
+                                    else (z if (g := z - t) < 0 else t)
+                                    - (h := w - (g if g >= 0 else -g)) * h / q)
+                    for y, (safe, d, w, q) in zip(ys, _CEILING_PARTS)]
+        if a > 0:
+            log1p, scale = math.log1p, math.log1p(a)
+            return [floor + rest * ((0.0 if z < 0.0 else z)
+                                    if (z := (log1p(a * y) / scale * gain - 0.5) * contrast
+                                        + 0.5) <= lo
+                                    else t if z >= hi
+                                    else (z if (g := z - t) < 0 else t)
+                                    - (h := w - (g if g >= 0 else -g)) * h / q)
+                    for y, (lo, hi, t, w, q) in zip(ys, ceiling)]
+        return [floor + rest * ((0.0 if z < 0.0 else z)
+                                if (z := (y * gain - 0.5) * contrast + 0.5) <= lo
+                                else t if z >= hi
+                                else (z if (g := z - t) < 0 else t)
+                                - (h := w - (g if g >= 0 else -g)) * h / q)
+                for y, (lo, hi, t, w, q) in zip(ys, ceiling)]
     # The last stages in one pass (z: the value before it is clamped).
     if a > 0:
         log1p, scale = math.log1p, math.log1p(a)
@@ -270,6 +375,48 @@ def _tone_table(s: Settings) -> list[float]:
     return [floor + rest * (0.0 if (z := (y * gain - 0.5) * contrast + 0.5) < 0.0
                             else 1.0 if z > 1.0 else z)
             for y in ys]
+
+
+# For each entry, per slope: where the rounded corner starts and ends, the
+# ceiling line, the corner's width and 4 x the width (tone_curve's arithmetic
+# exactly).  A table is only built for a slope asked for a second time (the
+# boost fading under a steady Outside detail); a slope that is itself fading
+# is new on every step and is worked out inline.  Emptied when it holds this
+# many.
+_CEILINGS: dict[float, tuple] = {}
+_CEILINGS_MAX = 16
+_CEILINGS_SEEN: set[float] = set()   # slopes asked for once (emptied the same way)
+
+
+# What doesn't depend on the slope, per entry: the lowest the corner can
+# start at any slope (a tone at or below it is never touched: one comparison
+# for the dark entries), 1 - x, the corner's width and 4 x the width.  (Rounding
+# never turns a smaller product or difference into a larger one, so a tone
+# at or below the first is at or below the corner's start for every slope
+# up to HIGHLIGHT_SLOPE.)
+_CEILING_PARTS = tuple(
+    ((1.0 - HIGHLIGHT_SLOPE * d) - w, d, w, 4.0 * w)
+    for x in _RAMP_XS
+    for d in (1.0 - x,)
+    for w in (HIGHLIGHT_SOFT * min(1.0, d / HIGHLIGHT_SOFT_TOP),))
+
+
+def _ceiling(slope: float) -> tuple | None:
+    """The per-entry table for ``slope``, or None the first time it is asked
+    for (see _CEILINGS)."""
+    found = _CEILINGS.get(slope)
+    if found is None:
+        if slope not in _CEILINGS_SEEN:
+            if len(_CEILINGS_SEEN) >= _CEILINGS_MAX:
+                _CEILINGS_SEEN.clear()
+            _CEILINGS_SEEN.add(slope)
+            return None
+        if len(_CEILINGS) >= _CEILINGS_MAX:
+            _CEILINGS.clear()
+        found = _CEILINGS[slope] = tuple(
+            (t - w, t + w, t, w, q)
+            for _safe, d, w, q in _CEILING_PARTS for t in (1.0 - slope * d,))
+    return found
 
 
 # _exposure_tones' results for the last few (exposure, anti_glare, gamma).

@@ -414,6 +414,34 @@ class UntargetedDisplayTest(unittest.TestCase):
         self.assertEqual(g.get_ramp(D2), _expected_full(e, D2))
         self.assertFalse(e.check_and_reapply())
 
+    def test_unchosen_display_whose_restore_was_refused_is_put_back(self):
+        """A display taken off the list while Windows refused putting it back
+        (a fullscreen switch) doesn't keep CatVision's look until CatVision
+        is turned off: the keep-applied check offers its own look again."""
+        g, e = _engine(None, Settings(shadow_boost=50), displays=[D1, D2])
+        e.set_auto_offsets({D1: {"shadow_boost": 20}, D2: {"shadow_boost": 20}},
+                           generation=e.auto_generation)
+        real = g.set_ramp
+        refusing = [True]
+        g.set_ramp = lambda mid, ramp: (False if mid == D2 and refusing[0]
+                                        else real(mid, ramp))
+        e.set_displays([D1])
+        self.assertNotEqual(g.get_ramp(D2), g.originals[D2])
+        n = g.calls_to(D2)
+        self.assertFalse(e.check_and_reapply())        # still refused: one call, no fix
+        self.assertNotEqual(g.get_ramp(D2), g.originals[D2])
+        refusing[0] = False                             # Windows takes changes again
+        self.assertTrue(e.check_and_reapply())
+        self.assertEqual(g.get_ramp(D2), g.originals[D2])
+        self.assertEqual(g.calls_to(D2) - n, 1)        # (the refused call was not logged)
+        self.assertFalse(e.check_and_reapply())        # nothing more to do
+        self.assertEqual(g.calls_to(D2) - n, 1)
+        # The chosen display kept its look throughout.
+        self.assertEqual(g.get_ramp(D1), _expected_full(e, D1))
+        self.assertTrue(e.status.gamma_ok)
+        e.set_enabled(False)
+        self.assertEqual(g.get_ramp(D1), g.originals[D1])
+
 
 class FaderThreadStressTest(unittest.TestCase):
     """A real fader thread drives the engine while the 'window' thread
@@ -811,6 +839,90 @@ class RetryRefusedTest(unittest.TestCase):
         self.clock.now += self.engine_mod._RETRY_S
         e.set_auto_offsets(offsets, generation=e.auto_generation)
         self.assertTrue(e.status.gamma_ok)
+
+    def test_refusing_for_long_searches_only_now_and_then(self):
+        """A display that always refuses: after _SEARCH_EVERY_S of refusals
+        each retry offers just the full look (one call), with a search only
+        every _SEARCH_EVERY_S, and the look comes back once Windows takes
+        it (at the next retry for the full look; on a PC that limits the
+        strength, at the next search)."""
+        every = self.engine_mod._SEARCH_EVERY_S
+        for offsets in ({D1: {"shadow_boost": 20.0}}, {D1: {}}):
+            for limit in (None, 40):
+                with self.subTest(offsets=offsets, limit=limit):
+                    g, e = self._refused_then_stopped(None, offsets)
+                    g.limit = -1
+
+                    def rest(seconds):
+                        for _ in range(round(seconds * 10)):   # the fader at rest
+                            self.clock.now += 0.1
+                            e.set_auto_offsets(offsets, generation=e.auto_generation)
+                    rest(every)
+                    n = len(g.log)
+                    rest(3 * every)
+                    calls = len(g.log) - n
+                    retries = 3 * every / self.engine_mod._RETRY_S
+                    # (a search is about a dozen calls)
+                    self.assertLessEqual(calls, retries + 3 * 13, calls)
+                    self.assertFalse(e.status.gamma_ok)
+                    g.limit = limit
+                    waited = 0.0
+                    while not e.status.gamma_ok and waited < 2 * every:
+                        rest(0.1)
+                        waited += 0.1
+                    self.assertTrue(e.status.gamma_ok)
+                    bound = self.engine_mod._RETRY_S if limit is None else every
+                    self.assertLessEqual(waited, bound + 0.15)
+                    if limit is None:
+                        self.assertEqual(g.get_ramp(D1), _expected_full(e, D1))
+                    self.assertEqual(g.bad, [])
+                    # A new refusal later on is searched at every retry again.
+                    g.limit = -1
+                    e.set_settings(Settings(shadow_boost=35))
+                    n = len(g.log)
+                    rest(self.engine_mod._RETRY_S + 0.1)
+                    self.assertGreater(len(g.log) - n, 3)
+
+    def test_keep_applied_check_searches_only_now_and_then(self):
+        """Auto levels off (no offsets): the keep-applied check (every 2 s)
+        offers a display that always refuses its look at every check, but
+        searches (about a dozen refused calls) only every _SEARCH_EVERY_S
+        once it has refused that long; the first checks still search."""
+        every = self.engine_mod._SEARCH_EVERY_S
+        for limit in (None, 40):
+            with self.subTest(limit=limit):
+                g, e = _engine(None, Settings(shadow_boost=30), displays=[D1])
+                g.limit = -1
+                e.set_settings(Settings(shadow_boost=45))
+                self.assertFalse(e.status.gamma_ok)
+
+                def checks(count):
+                    per = []
+                    for _ in range(count):
+                        self.clock.now += 2.0
+                        n = len(g.log)
+                        e.check_and_reapply()
+                        per.append(len(g.log) - n)
+                    return per
+                first = checks(round(every / 2))
+                self.assertTrue(all(c >= 10 for c in first[:-1]), first)   # searches
+                later = checks(round(3 * every / 2))
+                self.assertLessEqual(sum(later), len(later) + 3 * 13, later)
+                self.assertLessEqual(max(later), 13)
+                self.assertGreaterEqual(sum(1 for c in later if c > 2), 2)   # still searches
+                self.assertFalse(e.status.gamma_ok)
+                g.limit = limit
+                count = 0
+                while not e.status.gamma_ok and count < 10:
+                    checks(1)
+                    count += 1
+                self.assertTrue(e.status.gamma_ok, e.status.summary())
+                self.assertLessEqual(count, 1 if limit is None else every / 2 + 1)
+                if limit is None:
+                    self.assertEqual(g.get_ramp(D1), _expected_full(e, D1))
+                else:
+                    self.assertTrue(e.status.gamma_limited)
+                self.assertEqual(g.bad, [])
 
     def test_old_run_and_off_never_retry(self):
         offsets = {D1: {"shadow_boost": 20.0}}

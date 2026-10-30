@@ -6,7 +6,7 @@ import json
 import math
 import os
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .autolevels import SPEEDS, STRENGTH_LIMITS, TARGET_LIMITS, clean_title
@@ -189,6 +189,7 @@ class Config:
         if c.hotkeys == LEGACY_DEFAULT_HOTKEYS:
             c.hotkeys = default_hotkeys()
         _migrate_preset_names(c)
+        _migrate_outside_detail(c, data)
         return c
 
 
@@ -210,6 +211,32 @@ def _migrate_preset_names(c: Config) -> None:
             combo = c.hotkeys.pop(old_action)
             if combo and not c.hotkeys.get(new_action):
                 c.hotkeys[new_action] = combo
+
+
+def _migrate_outside_detail(c: Config, data: dict) -> None:
+    """Looks saved before 1.17 have no Outside detail (highlight_room).  A
+    saved copy of a built-in preset, and the current look while a built-in
+    preset is active, take the built-in's value, so the strong looks keep
+    the outside visible after the update without being picked again."""
+    from .presets import builtin_by_name
+
+    def missing(saved) -> bool:
+        return isinstance(saved, dict) and "highlight_room" not in saved
+
+    customs = data.get("custom_presets")
+    customs = customs if isinstance(customs, dict) else {}
+    # (A copy saved under an old name was renamed by _migrate_preset_names.)
+    saved_as = {new: old for old, new in LEGACY_PRESETS.items()
+                if old in customs and new not in customs}
+    for name, settings in list(c.custom_presets.items()):
+        builtin = builtin_by_name(name)
+        if builtin is not None and missing(customs.get(saved_as.get(name, name))):
+            # (replace, not change: a look may be the built-in's own object.)
+            c.custom_presets[name] = replace(settings,
+                                             highlight_room=builtin.settings.highlight_room)
+    builtin = builtin_by_name(c.active_preset)
+    if builtin is not None and missing(data.get("current")):
+        c.current = replace(c.current, highlight_room=builtin.settings.highlight_room)
 
 
 def load(path: Path | None = None) -> Config:

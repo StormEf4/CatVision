@@ -16,9 +16,17 @@ from .curves import Settings
 # ramps to their own precision.
 _DRIFT_TOLERANCE = 768
 # Auto levels (beta): a display whose last change Windows refused is offered
-# its look again this often (with a fresh search), even once its fade has
-# stopped and no new update would come.
+# its look again this often (with a fresh search; see _SEARCH_EVERY_S), even
+# once its fade has stopped and no new update would come.
 _RETRY_S = 0.5
+# A display Windows keeps refusing is still offered its look at every retry
+# (auto levels every _RETRY_S, the keep-applied check every 2 s), but after
+# this long refusing it is searched for a weaker version Windows would take
+# (about a dozen refused calls) only this often; the retries in between offer
+# just its full look, or that and the weaker version Windows last took for
+# it: one or two calls.  A short refusal (a fullscreen switch) is searched at
+# every retry as before, so the look comes back as soon as Windows takes it.
+_SEARCH_EVERY_S = 10.0
 
 
 @dataclass
@@ -84,6 +92,9 @@ class Engine:
         # Per display: when Windows started refusing it, or it was last
         # offered its look again (see _RETRY_S).
         self._retry_at: dict[str, float] = {}
+        # Per display Windows keeps refusing: (first retry, last search) times
+        # (see _SEARCH_EVERY_S).
+        self._refusing: dict[str, tuple[float, float]] = {}
         self.status = Status()
 
         unclean = self._flag is not None and self._flag.exists()
@@ -204,7 +215,7 @@ class Engine:
         touching the preset.  Only the brightness tables are redone.  A
         display whose last change Windows refused is offered its look again
         every _RETRY_S, even if nothing changed (a fade that has stopped keeps
-        sending the same offsets)."""
+        sending the same offsets); see _SEARCH_EVERY_S for how hard."""
         with self._lock:
             if generation is not None and generation != self.auto_generation:
                 return  # from a fader run that has already been stopped
@@ -224,9 +235,27 @@ class Engine:
                 return
             # Only the tint is needed (the color matrix is not redone).
             tint = curves.plan_tint(self.settings, self.custom_tints)
+            search, offer_only = self._plan_retry(due)
             # Displays with no adjustment left get the normal full apply, so
             # they settle exactly where the preset alone would.
-            self._apply_gamma(redo, tint, self.status, fading=True, search=due)
+            self._apply_gamma(redo, tint, self.status, fading=True, search=search,
+                              offer_only=offer_only)
+
+    def _plan_retry(self, refused: set[str]) -> tuple[set[str], set[str]]:
+        """Displays Windows refused, about to be offered their look again:
+        (those to search for a weaker version Windows would take, those only
+        offered their look).  See _SEARCH_EVERY_S."""
+        now = time.monotonic()
+        search, offer_only = set(), set()
+        for did in refused:
+            first, searched = self._refusing.get(did, (now, now))
+            if now - first < _SEARCH_EVERY_S or now - searched >= _SEARCH_EVERY_S:
+                search.add(did)
+                searched = now
+            else:
+                offer_only.add(did)
+            self._refusing[did] = (first, searched)
+        return search, offer_only
 
     def retry_pending(self) -> bool:
         """Windows refused the last change of a display (a quick check
@@ -244,12 +273,15 @@ class Engine:
         return s.clamped({k: getattr(s, k) + v for k, v in amounts.items()})
 
     def _apply_gamma(self, monitors, tint, status: Status, fading: bool = False,
-                     search: set[str] = frozenset()) -> None:
+                     search: set[str] = frozenset(),
+                     offer_only: set[str] = frozenset()) -> None:
         """``fading``: a frequent auto-levels update.  Displays that carry an
         adjustment reuse what Windows last accepted and remember what they
         set instead of reading every ramp back (the keep-applied check still
         compares); displays with none get the normal full apply.  ``search``:
-        displays Windows refused, offered their look again (see _RETRY_S)."""
+        displays Windows refused, offered their look again (see _RETRY_S).
+        ``offer_only``: displays Windows keeps refusing that get no search
+        this time, only their look offered again (see _SEARCH_EVERY_S)."""
         if not fading:
             self._fallback.clear()   # a full apply starts from the full ramp again
         ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
@@ -272,7 +304,11 @@ class Engine:
                         result = full
                         self._fallback[m.id] = shown_memory(full.applied or ramp)
             else:
-                result = self._apply_rest(m.id, ramp) if fading else None
+                result = None
+                if m.id in offer_only:
+                    result = self._offer_again(m.id, ramp)
+                elif fading:
+                    result = self._apply_rest(m.id, ramp)
                 if result is None:
                     result = apply_ramp_with_fallback(self.gamma, m.id, ramp, None)
                 if result.ok and not any(self.auto_offsets.get(m.id, {}).values()):
@@ -285,11 +321,13 @@ class Engine:
                 if result.ok:
                     self._fallback[m.id] = shown_memory(result.applied or ramp)
             if result.ok:
+                self._refusing.pop(m.id, None)   # a later refusal is searched afresh
                 if adjusted:
                     self._applied[m.id] = result.applied or ramp
                 else:
                     self._applied[m.id] = self.gamma.get_ramp(m.id) or ramp
-            elif m.id in search or self._gamma_state.get(m.id, (True,))[0]:
+            elif (m.id in search or m.id in offer_only
+                  or self._gamma_state.get(m.id, (True,))[0]):
                 self._retry_at[m.id] = time.monotonic()   # refused: try again later
             self._gamma_state[m.id] = (result.ok, result.limited)
         states = [self._gamma_state[m.id] for m in self._targets() if m.id in self._gamma_state]
@@ -311,6 +349,18 @@ class Engine:
             return GammaResult(True, limited=True, applied=cached[1])
         return None
 
+    def _offer_again(self, display_id: str, ramp) -> GammaResult:
+        """A display Windows keeps refusing, between searches (see
+        _SEARCH_EVERY_S): offer its full look, then the weaker version
+        Windows last took for that look (if known), and nothing weaker."""
+        result = self._apply_rest(display_id, ramp)
+        if result is not None:
+            return result
+        cached = self._rest.get(display_id)
+        if (cached is None or cached[0] != ramp) and self.gamma.set_ramp(display_id, ramp):
+            return GammaResult(True, applied=ramp)
+        return GammaResult(False, failed_monitors=[display_id])
+
     def check_and_reapply(self) -> bool:
         """Re-apply if a game, driver or Windows reset the gamma ramp, or
         offer a change Windows refused again (nothing else would).
@@ -328,6 +378,7 @@ class Engine:
             return self._check_and_reapply()
 
     def _check_and_reapply(self) -> bool:
+        put_back = self._restore_unchosen()
         refused = [m for m in self._targets() if not self._gamma_state.get(m.id, (True,))[0]]
         retried = set()
         if refused and not self.auto_offsets:
@@ -337,7 +388,8 @@ class Engine:
             tint, _matrix = curves.plan_color(self.settings, self.custom_filters,
                                               self.custom_tints,
                                               all_displays=self.all_displays_selected())
-            self._apply_gamma(refused, tint, self.status)
+            _search, offer_only = self._plan_retry({m.id for m in refused})
+            self._apply_gamma(refused, tint, self.status, offer_only=offer_only)
             retried = {m.id for m in refused}
         for m in self._targets():
             if m.id in retried:
@@ -354,7 +406,18 @@ class Engine:
             if drifted:
                 self._apply()
                 return True
-        return bool(retried)
+        return bool(retried) or put_back
+
+    def _restore_unchosen(self) -> bool:
+        """Displays no longer chosen whose restore Windows refused (they are
+        still in _applied, showing CatVision's look): offer them their own
+        look again (one call each).  True if one was put back."""
+        chosen = {m.id for m in self._targets()}
+        back = [m for m in self._monitors if m.id in self._applied and m.id not in chosen
+                and self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())]
+        for m in back:
+            del self._applied[m.id]
+        return bool(back)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -398,6 +461,7 @@ class Engine:
                          if m.id in self._applied
                          and not self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())}
         self._gamma_state.clear()
+        self._refusing.clear()
         self._rest.clear()
         self._mark_dirty(bool(self._applied))
 

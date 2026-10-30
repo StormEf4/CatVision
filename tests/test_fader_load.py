@@ -1,5 +1,5 @@
 """Auto levels (beta): fader step timing while other threads run Python
-(the thread switch interval and the self-test's measurement of it)."""
+(the self-test's measurement of it)."""
 
 import os
 import sys
@@ -9,24 +9,16 @@ import unittest
 from unittest import mock
 
 from catvision import autolevels, selftest
-from catvision.autolevels import THREAD_SWITCH_S, quick_thread_switches
 
 
 class SwitchIntervalTests(unittest.TestCase):
+    """Python's thread switch interval is left as it is: a 1 ms interval
+    made fader steps no more even on Windows (the self-test's fader_load)."""
+
     def setUp(self):
         self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
 
-    def test_shortens_pythons_default(self):
-        sys.setswitchinterval(0.005)
-        quick_thread_switches()
-        self.assertAlmostEqual(sys.getswitchinterval(), THREAD_SWITCH_S)
-
-    def test_keeps_a_shorter_interval(self):
-        sys.setswitchinterval(THREAD_SWITCH_S / 2)
-        quick_thread_switches()
-        self.assertAlmostEqual(sys.getswitchinterval(), THREAD_SWITCH_S / 2)
-
-    def test_app_start_sets_it_before_anything_runs(self):
+    def test_app_start_leaves_it_alone(self):
         from catvision import __main__ as entry
         sys.setswitchinterval(0.005)
         seen = []
@@ -40,7 +32,8 @@ class SwitchIntervalTests(unittest.TestCase):
                 mock.patch("catvision.selftest.run", fake_run):
             self.assertEqual(entry.main(["--selftest", os.path.join(tmp, "r.json")]), 0)
         self.assertEqual(len(seen), 1)
-        self.assertAlmostEqual(seen[0], THREAD_SWITCH_S)
+        self.assertAlmostEqual(seen[0], 0.005)
+        self.assertFalse(hasattr(autolevels, "quick_thread_switches"))
 
 
 class GapStatsTests(unittest.TestCase):
@@ -84,19 +77,19 @@ class StepsUnderLoadTests(unittest.TestCase):
         self.assertTrue(0.0 < m.key < 1.0)
 
     def test_watcher_load(self):
-        out = selftest.fader_steps_under_load(0.3, "watcher", THREAD_SWITCH_S)
+        out = selftest.fader_steps_under_load(0.3, "watcher")
         self.assertNotIn("error", out)
-        self.assertEqual(out["switch_ms"], THREAD_SWITCH_S * 1000)
+        self.assertEqual(out["switch_ms"], 5.0)
         self.assertGreater(out["steps"], 10)
         self.assertGreaterEqual(out["measurements"], 1)
         for key in ("hz", "median_ms", "p95_ms", "max_ms", "late_steps"):
             self.assertIn(key, out)
         # A loose check (busy test machines): the fader keeps its beat.
         self.assertGreater(out["hz"], 60)
-        self.assertAlmostEqual(sys.getswitchinterval(), 0.005)   # put back
+        self.assertAlmostEqual(sys.getswitchinterval(), 0.005)   # never changed
 
     def test_busy_load(self):
-        out = selftest.fader_steps_under_load(0.2, "busy", 0.005)
+        out = selftest.fader_steps_under_load(0.2, "busy")
         self.assertNotIn("error", out)
         self.assertEqual(out["switch_ms"], 5.0)
         self.assertGreater(out["measure_ms"], 0)
@@ -104,15 +97,15 @@ class StepsUnderLoadTests(unittest.TestCase):
 
     def test_leaves_no_threads_running(self):
         before = self._threads()
-        selftest.fader_steps_under_load(0.15, "watcher", THREAD_SWITCH_S)
-        selftest.fader_steps_under_load(0.15, "busy", THREAD_SWITCH_S)
+        selftest.fader_steps_under_load(0.15, "watcher")
+        selftest.fader_steps_under_load(0.15, "busy")
         extra = {n for n in self._threads() - before
                  if n.startswith("catvision-")}
         self.assertEqual(extra, set())
 
     def test_problems_are_reported_not_raised(self):
         with mock.patch.object(autolevels, "Fader", side_effect=RuntimeError("boom")):
-            out = selftest.fader_steps_under_load(0.1, "watcher", THREAD_SWITCH_S)
+            out = selftest.fader_steps_under_load(0.1, "watcher")
         self.assertIn("boom", out["error"])
         self.assertAlmostEqual(sys.getswitchinterval(), 0.005)
 

@@ -9,6 +9,7 @@ where Windows limits the strength.
 import ctypes
 import random
 import threading
+import time
 import unittest
 from dataclasses import fields, replace
 from unittest import mock
@@ -276,6 +277,179 @@ class FaderMinStepTest(unittest.TestCase):
         moving = [b["a"] - a["a"] for a, b in zip(applied, applied[1:])]
         self.assertGreater(len(applied), 50)
         self.assertTrue(all(m > 0 for m in moving))
+
+
+class FaderPerDisplayPaceTest(unittest.TestCase):
+    """Displays with different refresh rates: the fader steps at the
+    fastest, every controller moves on every step, and each display is
+    passed on only at its own pace (a 60 Hz screen shows only 60 pictures a
+    second, so more updates would only cost Windows calls)."""
+
+    def _fade(self, rates, seconds=1.0, jitter=0.0, seed=SEED, endless=False):
+        rng = random.Random(seed)
+        ctrls = {did: (Controller(want=1e6, strength=1e6) if endless   # always moving
+                       else Controller(offset=0.0, want=40.0 - 10 * i, strength=30.0))
+                 for i, did in enumerate(rates)}
+        applied = []
+        fader = Fader(ctrls, applied.append)
+        fader.set_rates(rates)
+        hz = round(1 / fader.interval)
+        steps = []
+        for _ in range(round(seconds * hz)):
+            fader.tick(1 / hz * (1 + rng.uniform(-jitter, jitter)))
+            steps.append({did: c.offset for did, c in ctrls.items()})
+        return fader, ctrls, applied, steps
+
+    @staticmethod
+    def _updates(applied, did):
+        return sum(1 for a, b in zip(applied, applied[1:]) if a[did] != b[did]) + 1
+
+    def test_rates(self):
+        fader = Fader({}, lambda pos: None)
+        fader.set_rates({"a": 60, "b": 144, "c": 75, "d": 0, "e": 30})
+        self.assertAlmostEqual(fader.interval, 1 / autolevels.FADER_MAX_HZ)
+        self.assertEqual(fader.rates, {"a": 60, "b": 120, "c": 75,
+                                       "d": autolevels.FADER_HZ, "e": autolevels.FADER_HZ})
+        fader.set_rates({})
+        self.assertAlmostEqual(fader.interval, 1 / autolevels.FADER_HZ)
+
+    def test_slower_display_is_passed_on_at_its_own_pace(self):
+        for jitter in (0.0, 0.2):
+            with self.subTest(jitter=jitter):
+                _f, ctrls, applied, _s = self._fade({"slow": 60, "fast": 144}, jitter=jitter,
+                                                    endless=True)
+                self.assertAlmostEqual(self._updates(applied, "slow"), 60, delta=2)
+                self.assertEqual(self._updates(applied, "fast"), 120)
+                # On a steady beat, every other step; with uneven steps only
+                # now and then two in a row.
+                pairs = [b["slow"] != a["slow"] for a, b in zip(applied, applied[1:])]
+                twice = sum(1 for x, y in zip(pairs, pairs[1:]) if x and y)
+                self.assertLessEqual(twice, 0 if jitter == 0 else 8)
+
+    def test_in_between_rates_keep_their_beat(self):
+        for rate in (75, 90, 100):
+            with self.subTest(rate=rate):
+                _f, _c, applied, _s = self._fade({"a": rate, "b": 120}, seconds=2.0,
+                                                 endless=True)
+                self.assertAlmostEqual(self._updates(applied, "a") / 2.0, rate, delta=6)
+
+    def test_motion_and_final_values_are_unchanged(self):
+        rates = {"slow": 60, "fast": 144}
+        fader, ctrls, applied, steps = self._fade(rates, seconds=3.0)
+        # The same fade with every display passed on at every step.
+        ref_ctrls = {did: Controller(offset=0.0, want=40.0 - 10 * i, strength=30.0)
+                     for i, did in enumerate(rates)}
+        ref = Fader(ref_ctrls, lambda pos: None)
+        ref.set_rate(120)
+        for want in steps:
+            ref.tick(1 / 120)
+            self.assertEqual({d: c.offset for d, c in ref_ctrls.items()}, want)
+        # Every display came to rest and got its exact final value.
+        self.assertTrue(fader.settled())
+        self.assertEqual(applied[-1], {d: c.want for d, c in ctrls.items()})
+
+    def test_shown_is_never_far_behind(self):
+        # What the slow display shows is at most one of its own updates
+        # behind (two fader steps of motion) plus the minimum step.
+        rates = {"slow": 60, "fast": 144}
+        ctrls = {d: Controller(offset=0.0, want=40.0 - 10 * i, strength=30.0)
+                 for i, d in enumerate(rates)}
+        fader = Fader(ctrls, lambda pos: None)
+        fader.set_rates(rates)
+        before = 0.0
+        for _ in range(360):
+            fader.tick(1 / 120)
+            step = abs(ctrls["slow"].offset - before)
+            before = ctrls["slow"].offset
+            self.assertLessEqual(abs(fader._applied["slow"] - ctrls["slow"].offset),
+                                 2 * step + FADER_MIN_STEP + 1e-6)
+
+    def test_quickest_fade_steps_stay_small_on_a_slower_screen(self):
+        """A new darker view's fade is capped per update (CEILING_STEP).  A
+        60 Hz screen next to a 240 Hz one is passed on every other step, so
+        it counts its own updates: its steps are no bigger than on its own
+        and its fade is as quick, instead of steps twice the cap."""
+        def fade(rates):
+            ctrls = {}
+            for did in rates:
+                c = Controller(offset=0.0, want=30.0, strength=30.0)
+                c._view_rise = True               # (as observe sets it for a new view)
+                ctrls[did] = c
+            applied = []
+            fader = Fader(ctrls, applied.append)
+            fader.set_rates(rates)
+            hz = round(1 / fader.interval)
+            for _ in range(hz):
+                fader.tick(1 / hz)
+            self.assertTrue(fader.settled())
+            # What each display was given, in order (apply() also repeats
+            # the other display's unchanged position).
+            return {did: [v for i, v in enumerate(a[did] for a in applied)
+                          if i == 0 or v != applied[i - 1][did]] for did in rates}
+
+        alone = fade({"slow": 60})["slow"]
+        both = fade({"slow": 60, "fast": 240})
+        for shown in (alone, both["slow"]):
+            steps = [b - a for a, b in zip(shown, shown[1:])]
+            self.assertLessEqual(max(steps), autolevels.CEILING_STEP + 1e-9)
+        # As quick as on its own (the same number of updates, give or take
+        # the one its first step lands on the faster beat).
+        self.assertAlmostEqual(len(both["slow"]), len(alone), delta=1)
+        # The faster screen keeps its quicker fade.
+        fast = fade({"fast": 240})["fast"]
+        self.assertEqual(both["fast"], fast)
+        self.assertGreater(max(b - a for a, b in zip(fast, fast[1:])), 1.0)
+
+    def test_display_without_a_rate_is_passed_on_every_step(self):
+        c = Controller(offset=0.0, want=40.0, strength=30.0)
+        applied = []
+        fader = Fader({"a": c}, applied.append)
+        fader.set_rates({"other": 60, "x": 120})
+        for _ in range(60):
+            fader.tick(1 / 120)
+        self.assertGreater(len(applied), 50)
+
+    def test_rest_refresh_and_wake_pass_everything_on(self):
+        rates = {"slow": 60, "fast": 120}
+        ctrls = {d: Controller(offset=5.0, want=5.0, strength=30.0) for d in rates}
+        applied = []
+        fader = Fader(ctrls, applied.append)
+        fader.set_rates(rates)
+        fader.tick(0.1, motion_dt=1 / 120, force=True)
+        self.assertEqual(applied[-1], {"slow": 5.0, "fast": 5.0})
+        # A new goal right after a rest: the first step goes out for both.
+        for c in ctrls.values():
+            c.want = 30.0
+        fader.tick(0.1, motion_dt=1 / 120, force=True)
+        self.assertEqual(applied[-1], {d: c.offset for d, c in ctrls.items()})
+        self.assertGreater(applied[-1]["slow"], 5.0)
+
+    def test_running_fader_thread(self):
+        """The real thread: a 60 Hz display next to a 120 Hz one gets about
+        half the updates and ends exactly at its goal."""
+        rates = {"slow": 60, "fast": 120}
+        ctrls = {d: Controller(offset=0.0, want=30.0, strength=30.0) for d in rates}
+        applied, lock = [], threading.Lock()
+
+        def apply(pos):
+            with lock:
+                applied.append(dict(pos))
+        fader = Fader(ctrls, apply)
+        fader.set_rates(rates)
+        fader.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not fader.settled() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            time.sleep(0.25)   # the rest refresh after the last step
+        finally:
+            fader.stop()
+        self.assertTrue(fader.settled())
+        with lock:
+            slow, fast = self._updates(applied, "slow"), self._updates(applied, "fast")
+            last = applied[-1]
+        self.assertEqual(last, {"slow": 30.0, "fast": 30.0})
+        self.assertLess(slow, 0.7 * fast, (slow, fast))
 
 
 class SmallHelpersExactTest(unittest.TestCase):

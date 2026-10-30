@@ -46,6 +46,21 @@ def reference_build_ramp(s, tint=None):
     return ramp
 
 
+def reference_tone_curve_1_16(x, s):
+    """tone_curve as it was before Outside detail (highlight_room)."""
+    y = curves.exposure_curve(curves._clamp01(x), s.exposure, s.anti_glare)
+    if s.gamma != 1.0:
+        y = y ** (1.0 / s.gamma)
+    a = curves.shadow_boost_factor(s.shadow_boost)
+    if a > 0:
+        y = math.log1p(a * y) / math.log1p(a)
+    y *= s.brightness
+    y = (y - 0.5) * s.contrast + 0.5
+    y = curves._clamp01(y)
+    y = s.black_floor + (1.0 - s.black_floor) * y
+    return y
+
+
 def reference_limit_ramp_deviation(ramp, max_steps=127):
     out = []
     for channel in ramp:
@@ -93,6 +108,8 @@ def random_settings(rng: random.Random) -> Settings:
     data["color_filter"] = rng.choice(list(curves.COLOR_FILTERS))
     if rng.random() < 0.3:   # an even grey: gains equal, but not 1
         data["green"] = data["blue"] = data["red"]
+    if rng.random() < 0.3:   # Outside detail off (most saved looks), exactly
+        data["highlight_room"] = rng.choice([0.0, -0.0, 0])
     return Settings(**data)
 
 
@@ -237,6 +254,48 @@ class BuildRampExactTest(unittest.TestCase):
             want = [curves.tone_curve(i / 255, s) for i in range(256)]
             got = curves._tone_table(s)
             self.assertEqual([x.hex() for x in got], [x.hex() for x in want])
+
+    def test_outside_detail_both_ways_match_tone_curve(self):
+        """A new Outside detail slope is worked out inline, a repeated one
+        from its table: both give tone_curve's values exactly, up to the
+        strongest slope (where the shortcut's bound is reached)."""
+        rng = random.Random(SEED + 6)
+        for _ in range(150):
+            room = rng.choice([100.0, rng.uniform(0.01, 100.0)])
+            s = replace(random_settings(rng), highlight_room=room).clamped()
+            want = [x.hex() for x in (curves.tone_curve(i / 255, s) for i in range(256))]
+            curves._CEILINGS.pop(curves.highlight_slope(room), None)
+            curves._CEILINGS_SEEN.discard(curves.highlight_slope(room))
+            for _ in range(3):      # inline, then the table is built, then reused
+                self.assertEqual([x.hex() for x in curves._tone_table(s)], want)
+            self.assertIn(curves.highlight_slope(room), curves._CEILINGS)
+
+    def test_fading_outside_detail_builds_no_tables(self):
+        """While the Outside detail itself fades, every step is a new slope:
+        no per-slope table is built for it (it would be used once)."""
+        curves._CEILINGS.clear()
+        curves._CEILINGS_SEEN.clear()
+        s = curves.Settings(shadow_boost=80, contrast=1.3).clamped()
+        for i in range(40):
+            curves._tone_table(replace(s, highlight_room=40.0 + i * 0.25))
+        self.assertEqual(curves._CEILINGS, {})
+
+    def test_outside_detail_off_is_the_old_curve(self):
+        """highlight_room 0 (every look saved before it existed) gives
+        exactly the old curve and tables."""
+        rng = random.Random(SEED + 5)
+        for _ in range(400):
+            s = replace(random_settings(rng), highlight_room=0.0).clamped()
+            want = [reference_tone_curve_1_16(i / 255, s) for i in range(256)]
+            self.assertEqual([x.hex() for x in curves._tone_table(s)],
+                             [x.hex() for x in want])
+            old = curves.tone_curve
+            try:
+                curves.tone_curve = reference_tone_curve_1_16
+                reference = reference_build_ramp(s)
+            finally:
+                curves.tone_curve = old
+            self.assertEqual(curves.build_ramp(s), reference)
 
     def test_clamped_unchanged(self):
         rng = random.Random(SEED + 3)

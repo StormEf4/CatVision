@@ -40,6 +40,7 @@ CURVE_SLIDERS = [
     ("brightness", "Brightness", "pct"),
     ("contrast", "Contrast", "pct"),
     ("white_cap", "Glare limit (max white)", "pct"),
+    ("highlight_room", "Outside detail (windows, sky)", "int"),
 ]
 COLOR_SLIDERS = [
     ("saturation", "Saturation", "pct"),
@@ -62,6 +63,9 @@ TIPS = {
     "black_floor": "Lifts pure black to dark grey, so nothing is completely black.",
     "brightness": "Overall brightness.",
     "contrast": "Difference between dark and light. Higher cuts through fog and haze.",
+    "highlight_room": "Keeps windows, open doors and the sky from turning white when dark "
+                      "areas are lifted, so you can see outside from a dark room. Higher "
+                      "keeps more detail outside.",
     "white_cap": "Limits the brightest whites. Lower it if flashes, lamps or snow are "
                  "too bright.",
     "saturation": "Color strength. 0% is black and white, 200% is very vivid.",
@@ -110,7 +114,16 @@ def auto_tick_plan(now: float, fresh: bool, last_front: float,
     return recheck, stale
 
 
+def _auto_moved(ctrl) -> bool:
+    """A display auto levels still holds away from the preset (its boost,
+    or Outside detail for a window in view): glide it back, don't jump."""
+    return abs(ctrl.offset) > 0.05 or ctrl.room > 0.05
+
+
 SETTING_NAMES = {"shadow_boost": "Shadow boost", "exposure": "Exposure"}
+# The readout says "keeping the outside visible" while auto levels adds at
+# least this much Outside detail for bright areas in view.
+AUTO_ROOM_SHOWN = 5.0
 AUTO_TICK_MS = 20       # auto levels (beta) checks for new measurements this often, so a
                         # new picture is acted on within about 20-30 ms (Windows rounds
                         # timers up to its clock tick)
@@ -612,9 +625,9 @@ class CatVisionApp:
             for did in list(self._auto_ctrl):
                 if did not in rects:
                     del self._auto_ctrl[did]
-            # Smaller, more frequent steps on faster screens (120 Hz and up).
-            self._auto_fader.set_rate(autolevels.fader_rate(
-                m.hz for m in self.engine.target_monitors()))
+            # Smaller, more frequent steps on faster screens (120 Hz and up),
+            # each display at its own pace.
+            self._auto_fader.set_rates({m.id: m.hz for m in self.engine.target_monitors()})
             if not self._auto_fader.running:
                 # This run's updates carry its own generation; once auto
                 # levels stops, anything still in flight from it is dropped.
@@ -635,7 +648,7 @@ class CatVisionApp:
             # No game is being watched now: Aim for shows (and edits) the
             # normal value again, not the last game's kept look.
             self._set_auto_game("")
-            if self.engine.enabled and any(abs(c.offset) > 0.05 for c in self._auto_ctrl.values()):
+            if self.engine.enabled and any(_auto_moved(c) for c in self._auto_ctrl.values()):
                 # Auto levels was turned off while CatVision stays on: glide
                 # back to the preset instead of jumping.
                 for ctrl in self._auto_ctrl.values():
@@ -651,7 +664,7 @@ class CatVisionApp:
     def _auto_wind_down(self) -> None:
         if not self._auto_winding_down or self._closed:
             return
-        if self.engine.enabled and any(abs(c.offset) > 0.05 for c in self._auto_ctrl.values()):
+        if self.engine.enabled and any(_auto_moved(c) for c in self._auto_ctrl.values()):
             self._auto_check_gamma()
             self.root.after(100, self._auto_wind_down)
         else:
@@ -694,8 +707,8 @@ class CatVisionApp:
             # tell full-screen games by) the displays' areas as they are now.
             self._auto_layout_at = time.monotonic()
             if self.engine.refresh_layout():
-                self._auto_fader.set_rate(autolevels.fader_rate(
-                    m.hz for m in self.engine.target_monitors()))
+                self._auto_fader.set_rates({m.id: m.hz
+                                            for m in self.engine.target_monitors()})
         rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
         seq, latest = self.auto_watch.latest()
         fresh = seq != self._auto_seq
@@ -730,7 +743,7 @@ class CatVisionApp:
                                       else set(rects) & in_front)
                 self.auto_watch.watch({d: rects[d] for d in self._auto_watched})
         shown: dict[str, tuple[str, object]] = {}
-        goals = {did: c.want for did, c in self._auto_ctrl.items()}
+        goals = {did: (c.want, c.room_want) for did, c in self._auto_ctrl.items()}
         strength, aim = self._auto_strength(), self._auto_aim()
         for did in rects:
             ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
@@ -764,7 +777,7 @@ class CatVisionApp:
         for did in list(self._auto_ctrl):
             if did not in rects:
                 del self._auto_ctrl[did]
-        if any(c.want != goals.get(did) for did, c in self._auto_ctrl.items()):
+        if any((c.want, c.room_want) != goals.get(did) for did, c in self._auto_ctrl.items()):
             self._auto_fader.wake()   # a new goal (a flash, say): start moving now
         # Fades change whether Windows is holding the strength back: keep the
         # warning icon in step with what the displays really show.
@@ -790,12 +803,13 @@ class CatVisionApp:
         the fader still calls this a few times a second)."""
         key = self._auto_key or self._auto_setting()
         settings = self.engine.settings
-        # (Anti-glare too: with it on, Exposure must not cross 0.)
-        base = {k: getattr(settings, k) for k in ("shadow_boost", "exposure", "anti_glare")}
+        # (Anti-glare too: with it on, Exposure must not cross 0.  Every
+        # field: how much Outside detail fits depends on the whole look.)
+        base = autolevels.look_values(settings)
         offsets: dict[str, dict[str, float]] = {}
         for did, offset in positions.items():
-            amounts = {k: round(v, 2) for k, v in
-                       autolevels.split_offset(key, offset, base).items()}
+            amounts = {k: round(v, 2) for k, v in autolevels.fader_amounts(
+                key, offset, base, self._auto_ctrl.get(did)).items()}
             amounts = {k: v for k, v in amounts.items() if v}
             if amounts or did in self.engine.auto_offsets:
                 offsets[did] = amounts
@@ -946,7 +960,7 @@ class CatVisionApp:
                 now = getattr(self.engine.settings_for(did), key)
                 change = f"{SETTING_NAMES[key]} {base:.0f} \u2192 {now:.0f}"
                 spilled = [k for k, v in self.engine.auto_offsets.get(did, {}).items()
-                           if k != key and v]
+                           if k != key and k in SETTING_NAMES and v]
                 if spilled:  # the main slider is at its limit: say where the rest went
                     eff = self.engine.settings_for(did)
                     change = ", ".join(f"{SETTING_NAMES[k]} {getattr(eff, k):.0f}"
@@ -972,7 +986,11 @@ class CatVisionApp:
                         held = ("  (black for a while: back to your preset)"
                                 if ctrl is not None and ctrl.black_too_long
                                 else "  (black screen: holding)")
-                    lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  {change}{held}")
+                    room = self.engine.auto_offsets.get(did, {}).get("highlight_room", 0.0)
+                    outside = ("  \u00b7  keeping the outside visible"
+                               if room >= AUTO_ROOM_SHOWN else "")
+                    lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  {change}"
+                                 f"{outside}{held}")
             text = "\n".join(lines)
         self.auto_info.configure(text=text)
 

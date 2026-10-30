@@ -12,12 +12,13 @@ it does not look for anything in the picture.
 from __future__ import annotations
 
 import math
-import sys
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
+from itertools import compress
 from typing import Callable
 
+from . import curves
 from .winutil import IS_WINDOWS
 
 THUMB_W, THUMB_H = 96, 54       # size of the copy that is measured
@@ -64,16 +65,10 @@ IDLE_S = 0.1                    # how often the fader checks for a new goal whil
 # (about 0.4 at mid-grey), so passing on each of those would only cost CPU.
 # A display coming to rest always gets its exact final value.
 FADER_MIN_STEP = 0.02
-# The fader shares Python with the picture measuring (a few ms, five times a
-# second) and the window.  Python lets a busy thread run on for 5 ms before
-# one that is waiting gets its turn, so a fader step that wakes during a
-# measurement could come up to 5 ms late: more than half a step at 120 a
-# second.  1 ms keeps that to about a millisecond (Windows may round the
-# wait up to its clock tick; the self-test's "fader_load" shows both).  It
-# is process-wide, but only costs anything while two threads want to run
-# Python at the same time (a few ms a second here): then the extra
-# handovers cost a few percent of those milliseconds.
-THREAD_SWITCH_S = 0.001
+# (Python's thread switch interval is left at its 5 ms default: on Windows a
+# 1 ms interval made fader steps no more even, measured by the self-test's
+# "fader_load" with the Watcher running and with a thread measuring back to
+# back, so a process-wide change wasn't worth it.)
 STOPS_FOR_FULL = 3.0            # 3 stops darker/brighter than the target = full strength
 DEAD_ZONE = 0.08                # ignore changes smaller than this share of How much
 CENTER_WEIGHT = 2.0             # the middle of the screen counts up to 3x the edges
@@ -97,6 +92,13 @@ VIEW_LAYOUT = 0.6               # ...if its layout is less alike than this (a li
                                 # keeps where the bright and dark parts are, even when a
                                 # window it doesn't light stays the same and the parts
                                 # change unevenly)
+VIEW_MOVED = 0.65               # ...and if at least this share of the parts changed by more
+VIEW_STILL = 0.25               # than this (stops): a light that reaches only part of the
+                                # view (a lamp in a corner, a muzzle flash lighting the middle,
+                                # lightning through a window) leaves the rest as it was, though
+                                # the parts it lights change unevenly and its layout changes;
+                                # turning changes nearly every part (all but a static HUD's
+                                # few, which are the same in every view)
 VIEW_SETTLED_S = 1.0            # brightness held this long is settled (not a flash or a glance)
 VIEW_STEADY_S = 0.08            # a new view seen this long (two measurements) is followed...
 VIEW_TURN_S = 2.0               # ...if it came this soon after the settled one (a turn, a walk in)
@@ -115,7 +117,30 @@ RISE_VIEW_S = 0.15              # a new darker view is caught up with quicker st
                                 # change hides the fade)...
 MAX_RISE_VIEW = 160.0           # ...up to this many points a second (120 updates a second)...
 CEILING_STEP = 4 / 3            # ...but never more than this per update (80 a second at 60 Hz,
-                                # under the 2 points of a flash's fade at 120 Hz)
+                                # under the 2 points of a flash's fade at 120 Hz; per update
+                                # the display really gets, see Fader.set_rates)
+TURN_BRAKE = 8000.0             # still moving away from a goal that turned round (a light
+                                # came up while brightening): slow down by this many points
+                                # a second, every second, so even the quickest rise (160 a
+                                # second) stops within 0.02 s and a slow one within a frame,
+                                # instead of carrying on for over a tenth of a second (2-3
+                                # points past the new goal, then back)
+# A flashbang (or a blast right in front) whites the whole picture out and
+# then fades back to the view it hit.  Lightning, muzzle flashes and strobes
+# light the view instead (its dark parts stay darker than this), for less
+# than WHITE_OUT_S, and snap straight back off.  A white-out fades back
+# (each picture no brighter than the one before, at least one in between
+# the white and the view) and shows the view it hit coming back through the
+# white, so it is followed as it goes, instead of waiting out CALM_S as if
+# a light had flashed: the room can be seen again as soon as the white has
+# gone.  One that snaps straight back, or fades into another view, still
+# waits.
+WHITE_OUT = 0.6                 # every part of the picture at least this bright (0-1) = a white-out...
+WHITE_OUT_SKIP = 4              # (but for this many parts: a HUD drawn over the white and
+                                # corners a vignette keeps darker)
+WHITE_OUT_S = 0.2               # ...lasting this long (white pictures this far apart; a lightning
+                                # stroke is shorter)
+FADE_S = 2.0                    # its fade back is followed for up to this long after the last white picture
 FLASH_RATIO = 2.0               # a picture twice as bright as the last one is a flash...
 LOST_S = 2.0                    # ...and a picture lost this long eases back to the preset
 BLACK_HOLD_S = 30.0             # a black screen holds the look this long (loading screens)
@@ -133,6 +158,36 @@ SLIDER_RANGE = (0.0, 100.0)
 # preset has it on (0.01 survives the rounding to 2 decimals), and leaves it
 # off when the preset has it off.
 EXPOSURE_FLOOR = 0.01
+
+# Sharing the range with bright areas (beta): a window, an open door or a
+# lamp seen from a dark room gets extra Outside detail (the highlight_room
+# setting, see curves.HIGHLIGHT_SLOPE) in proportion to how much of the view
+# it fills, so the lifted room doesn't push it to white.  Only brightness is
+# counted (the share of bright pixels), never where they are.
+HIGHS_LEVEL = 96                # brightness (0-255) that counts as a bright area
+ROOM_EXTRA = 40.0               # the most Outside detail points it adds...
+ROOM_FULL = 0.25                # ...once this share of the view is bright, and at least this
+                                #  much is not (in proportion to the square root below that,
+                                #  so a small window gets some; see room_for_highs)
+ROOM_MIN_SHARE = 0.005          # less than this is specks and HUD: no change
+HIGHS_SPARSE = 0.10             # with the picture's grid (see REGION_COLS), bright pixels count
+HIGHS_DENSE = 0.30              #  only in parts at least this bright (fully from DENSE): a
+                                #  window or lamp fills its part, HUD text and specks only dot it
+ROOM_RISE_S = 0.6               # a window coming into view gets its room in about a second
+                                #  (the preset's own Outside detail covers the first moments)...
+ROOM_FALL_S = 1.5               # ...and gives it back slowly (it has left the view by then)
+ROOM_STEP = 0.25                # the fader passes it on when it moved this much (an
+                                #  invisible change: under 1/1000 of the range)...
+ROOM_SNAP = 0.5                 # ...and this close it goes straight there (under half a level)
+ROOM_DEADBAND = 2.0             # a moving picture changes the bright share a little all the
+                                #  time: smaller changes than this (about a level) are ignored,
+                                #  so a steady view doesn't redo the tables on every picture
+ROOM_KEEP_LEVEL = 40            # the room comes first: the extra never reaches this input
+                                #  (a dark room's brightest walls) or anything darker, so with
+                                #  a strong lift (a high boost, Pitch Black, Night Vision) it
+                                #  gets less, or none (see curves.highlight_room_cap)
+ROOM_STRENGTH_FULL = 10.0       # How much below this many points scales the extra down with
+                                #  it: 0 turns auto levels' window response off too
 
 DEFAULT_STRENGTH = 30.0         # how far (slider points) it may move Shadow boost / Exposure
 DEFAULT_TARGET = 0.12           # the scene brightness it aims for (log-average, 0-1)
@@ -164,6 +219,10 @@ class Measurement:
     # controller's own clock only moves in IDLE_S steps while the fader
     # rests, so how far apart two pictures were is taken from these.
     at: float = 0.0
+    # Center-weighted share of the picture at HIGHS_LEVEL or brighter (a
+    # window, a lamp, the sky): how much output range they get.  With the
+    # grid, only bright pixels in parts they partly fill (see _dense_highs).
+    highs: float = 0.0
 
 
 _weights_cache: dict[tuple[int, int], list[float]] = {}
@@ -199,6 +258,41 @@ def _regions(lum: list[int], width: int, height: int) -> tuple:
     return tuple(s / n / _LN2 for s, n in zip(sums, counts))
 
 
+_part_areas: dict[tuple[int, int], list[float]] = {}
+
+
+def _dense_highs(lum: list[int], weights: list[float], width: int, height: int) -> float:
+    """The weighted amount of bright pixels (HIGHS_LEVEL or brighter) that
+    sit in grid parts they fill at least HIGHS_SPARSE of (in full from
+    HIGHS_DENSE, in proportion between).  A window, an open door or a lamp
+    fills the parts it is in; bright HUD text, a crosshair or specks only
+    dot theirs, so they don't count as something to keep visible.  (The
+    parts are the fixed grid of Measurement.regions: nothing is located.)"""
+    cols = [c * width // REGION_COLS for c in range(REGION_COLS + 1)]
+    areas = _part_areas.get((width, height))
+    if areas is None:
+        areas = [0.0] * (REGION_COLS * REGION_ROWS)
+        for y in range(height):
+            row, first = y * width, (y * REGION_ROWS // height) * REGION_COLS
+            for c in range(REGION_COLS):
+                areas[first + c] += sum(weights[row + cols[c]:row + cols[c + 1]])
+        _part_areas[(width, height)] = areas
+    mass = [0.0] * (REGION_COLS * REGION_ROWS)
+    bright = HIGHS_LEVEL.__le__
+    for y in range(height):
+        row, first = y * width, (y * REGION_ROWS // height) * REGION_COLS
+        for c in range(REGION_COLS):
+            a, b = row + cols[c], row + cols[c + 1]
+            seg = lum[a:b]
+            if max(seg) >= HIGHS_LEVEL:      # (most of a dark room has none: skipped)
+                mass[first + c] += sum(compress(weights[a:b], map(bright, seg)))
+    out, span = 0.0, HIGHS_DENSE - HIGHS_SPARSE
+    for m, area in zip(mass, areas):
+        if m:
+            out += m * min(1.0, max(0.0, (m / area - HIGHS_SPARSE) / span))
+    return out
+
+
 def view_spread(a: Measurement, b: Measurement) -> float | None:
     """How unevenly the picture changed from a to b, in stops (the spread of
     the change across the grid parts).  A light going on or off, or the
@@ -211,6 +305,51 @@ def view_spread(a: Measurement, b: Measurement) -> float | None:
     change = [y - x for x, y in zip(ra, rb)]
     mean = sum(change) / len(change)
     return math.sqrt(sum((c - mean) ** 2 for c in change) / len(change))
+
+
+def view_moved(a: Measurement, b: Measurement) -> float | None:
+    """The share of the grid parts whose brightness changed by more than
+    VIEW_STILL stops from a to b.  Turning to look somewhere else changes
+    nearly every part; a light that reaches only part of the view (a lamp
+    in a corner, a muzzle flash lighting the middle) leaves the rest as it
+    was.  None if either picture's parts aren't known."""
+    ra, rb = a.regions, b.regions
+    if not ra or len(ra) != len(rb):
+        return None
+    return sum(1 for x, y in zip(ra, rb) if abs(y - x) > VIEW_STILL) / len(ra)
+
+
+def _other_view(a: Measurement, b: Measurement) -> bool:
+    """b is a different view from a: its parts changed unevenly, its layout
+    changed and nearly all of it changed (see VIEW_SPREAD, VIEW_LAYOUT and
+    VIEW_MOVED), not a light going on or off in all or part of the view."""
+    spread, layout, moved = view_spread(a, b), view_layout(a, b), view_moved(a, b)
+    return (spread is not None and spread >= VIEW_SPREAD
+            and layout is not None and layout < VIEW_LAYOUT
+            and moved is not None and moved >= VIEW_MOVED)
+
+
+def _blend_layout(m: Measurement, a: Measurement, b: Measurement) -> float:
+    """How well m is laid out like a blend of a and b (0-1: the multiple
+    correlation of m's parts with theirs, both counting positively).  Half
+    way through a fade from one to the other, a picture is laid out much
+    like neither, but like the two together."""
+    r1, r2, r12 = view_layout(a, m), view_layout(b, m), view_layout(a, b)
+    if r1 is None or r2 is None or r12 is None:
+        return 0.0
+    if 1 - r12 * r12 < 1e-6:
+        return max(r1, r2)
+    if r1 - r2 * r12 < 0 or r2 - r1 * r12 < 0:
+        return 0.0                  # one of the two counts against it: not a blend
+    fit = (r1 * r1 + r2 * r2 - 2 * r1 * r2 * r12) / (1 - r12 * r12)
+    return math.sqrt(max(0.0, min(1.0, fit)))
+
+
+def _white_out(m: Measurement) -> bool:
+    """Every part of m but WHITE_OUT_SKIP is at least WHITE_OUT bright."""
+    regions = m.regions
+    return bool(regions) and (sorted(regions)[min(WHITE_OUT_SKIP, len(regions) - 1)]
+                              >= math.log2(WHITE_OUT))
 
 
 def view_layout(a: Measurement, b: Measurement) -> float | None:
@@ -253,6 +392,10 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     hist = [0.0] * 256
     for w, v in zip(weights, lum):
         hist[v] += w
+    highs = sum(hist[HIGHS_LEVEL:])
+    if highs and regions:
+        highs = _dense_highs(lum, weights, width, n // width)
+    highs /= total
     seen, shadow_level = 0.0, 0
     for level, w in enumerate(hist):          # weighted 25th percentile
         seen += w
@@ -264,7 +407,8 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     dark = sum(1 for v in lum if v < 26) / n
     bright = sum(1 for v in lum if v > 230) / n
     signature = (hash(bgra) or 1) if width else 0
-    return Measurement(key, average, shadows, dark, bright, max(lum) == 0, signature, regions)
+    return Measurement(key, average, shadows, dark, bright, max(lum) == 0, signature, regions,
+                       highs=highs)
 
 
 def capture_interval(prev: Measurement | None, m: Measurement | None) -> float:
@@ -314,6 +458,69 @@ def split_offset(key: str, offset: float, base: dict[str, float]) -> dict[str, f
         if abs(extra) > 0.05:
             out[other] = extra
     return out
+
+
+def room_for_highs(highs: float, strength: float = DEFAULT_STRENGTH) -> float:
+    """Extra Outside detail (points) for this share of bright pixels: in
+    proportion to the square root of the share, up to ROOM_EXTRA.  It shares
+    the range between a dark room and bright areas, so it needs both: a view
+    that is almost all bright (a flash whiting out the screen, the open sky)
+    has no room to share with and gets as little as the same share of dark
+    would.  How much scales it below ROOM_STRENGTH_FULL (0: none)."""
+    share = min(highs, 1.0 - highs)
+    if share <= ROOM_MIN_SHARE or strength <= 0:
+        return 0.0
+    scale = min(1.0, strength / ROOM_STRENGTH_FULL)
+    return ROOM_EXTRA * scale * min(1.0, math.sqrt((share - ROOM_MIN_SHARE) / ROOM_FULL))
+
+
+def fader_amounts(key: str, offset: float, base: dict[str, float],
+                  controller: "Controller | None" = None) -> dict[str, float]:
+    """What one display gets on top of the preset: the offset shared out by
+    split_offset, plus the controller's Outside detail for bright areas in
+    view (see room_for_highs), as much as leaves the room's tones alone
+    (ROOM_KEEP_LEVEL).  ``base``: the look's settings (every field, so the
+    room's tones can be worked out; at least the ones split_offset moves)."""
+    out = split_offset(key, offset, base)
+    if controller is not None and controller.room > 0:
+        extra = min(controller.room, _room_left(base, out))
+        if extra > 0:
+            out["highlight_room"] = extra
+    return out
+
+
+_SETTING_NAMES = tuple(f.name for f in fields(curves.Settings))
+# What the room's tones depend on (see curves._lifted), plus the preset's
+# own Outside detail.
+_ROOM_FIELDS = ("exposure", "anti_glare", "gamma", "shadow_boost", "brightness", "contrast",
+                "highlight_room")
+# _room_left's answers for the last few looks: while the Outside detail
+# glides in or out the offset is mostly at rest, so it is the same look on
+# every step.  Emptied when it holds this many.
+_ROOM_LEFT: dict[tuple, float] = {}
+_ROOM_LEFT_MAX = 64
+
+
+def _room_left(base: dict, amounts: dict[str, float]) -> float:
+    """How much Outside detail may be added to the look ``base`` plus
+    ``amounts`` before it reaches ROOM_KEEP_LEVEL (see
+    curves.highlight_room_cap; can be below 0)."""
+    cache_key = (tuple(base.get(k) for k in _ROOM_FIELDS), tuple(sorted(amounts.items())))
+    left = _ROOM_LEFT.get(cache_key)
+    if left is None:
+        known = {k: v for k, v in base.items() if k in _SETTING_NAMES}
+        look = curves.Settings(**known).clamped(
+            {k: base.get(k, 0.0) + v for k, v in amounts.items()})
+        left = curves.highlight_room_cap(look, ROOM_KEEP_LEVEL / 255.0) - look.highlight_room
+        if len(_ROOM_LEFT) >= _ROOM_LEFT_MAX:
+            _ROOM_LEFT.clear()
+        _ROOM_LEFT[cache_key] = left
+    return left
+
+
+def look_values(s: curves.Settings) -> dict:
+    """A look as fader_amounts' ``base``: every setting by name."""
+    return {k: getattr(s, k) for k in _SETTING_NAMES}
 
 
 def clean_title(title: str) -> str:
@@ -386,6 +593,16 @@ class Controller:
     _view_rise: bool = False                       # brightening for a new darker view: quickest pace
     _estimate: bool = False                        # the goal is a halfway guess (into a cave)
     _rush_view: bool = False                       # the fast fade-down is for a new, brighter view
+    _fade: float = 0.0                             # newest key of a white-out or its fade back (0 = none)
+    _fade_since: float = 0.0                       # when the white-out began
+    _fade_at: float = 0.0                          # when its last white picture came
+    _fading: bool = False                          # its fade back has begun (a picture in between)
+    _fade_from: Measurement | None = None          # the settled view the white-out hit
+    _white: Measurement | None = None              # the white picture it began with
+    room: float = 0.0                              # extra Outside detail now (see room_for_highs)...
+    room_want: float = 0.0                         # ...and where it is heading
+    _room_back: bool = False                       # released: hand it back at the quick pace
+    _highs: float = 0.0                            # the last picture's bright share
 
     def observe(self, m: Measurement | None, strength: float, target: float,
                 dim: bool = True, now: float | None = None) -> None:
@@ -393,6 +610,11 @@ class Controller:
         the clock as of the fader's last step."""
         self.strength = strength
         clock = self.clock if now is None else max(now, self.clock)
+        if m is not None:
+            # (A lost picture keeps it; a black one has no bright areas.)
+            self._highs = m.highs
+            self._aim_room(strength)
+            self._room_back = False
         # A lower How much or an unticked "tone down" brings the goal inside
         # its new limits at once, even while a black or lost picture holds.
         self.want = min(strength, max(-strength if dim else 0.0, self.want))
@@ -440,6 +662,7 @@ class Controller:
                 # usual way until the turning has stopped for a while.
                 self._alternate_until = now + ALTERNATE_HOLD_S
         last = self._stretch[-1][1] if self._stretch else None
+        fade_key = self._fading_back(now, m)
         self._track_stretch(now, m)
         # Steer by the brightest recent picture: dimming reacts at once, but
         # brightening waits until it has stayed dark, so flickering lights,
@@ -465,9 +688,12 @@ class Controller:
         view_key = self._new_darker_view(now, m)
         if view_key is None:
             view_key = self._back_to_settled_view(now, m)
+        if view_key is None:
+            view_key = fade_key
         if view_key is not None and (early is None or view_key < early):
             # Turned or ran into a darker view, or back to the one it was
-            # settled in after a quick look out: follow it now.
+            # settled in after a quick look out (or a white-out fading back
+            # to it): follow it now.
             early, halfway = view_key, False
             self._quick_at = self._stretch[0][0]
         if early is not None:
@@ -598,10 +824,9 @@ class Controller:
             return None
         prev = stretch[-2][1]
         key = max(prev.key, m.key)
-        spread, alike = view_spread(seen, m), view_spread(prev, m)
-        layout = view_layout(seen, m)
-        if (spread is None or spread < VIEW_SPREAD or alike is None or alike >= VIEW_SPREAD
-                or layout is None or layout >= VIEW_LAYOUT or seen.key <= key * STEADY_RATIO):
+        alike = view_spread(prev, m)
+        if (alike is None or alike >= VIEW_SPREAD or seen.key <= key * STEADY_RATIO
+                or not _other_view(seen, m)):
             return None
         return key
 
@@ -612,6 +837,9 @@ class Controller:
         if self._settled is None:
             return False
         _since, until, seen = self._settled
+        # (Not VIEW_MOVED: walking in, the view of the cave mouth still
+        # fills the edges of the picture for a while, and pictures that
+        # keep getting darker for three in a row are no flickering light.)
         spread, layout = view_spread(seen, m), view_layout(seen, m)
         return (self._jump_at <= until and seen.key > m.key * STEADY_RATIO
                 and spread is not None and spread >= VIEW_SPREAD
@@ -623,10 +851,11 @@ class Controller:
         menu opened for a moment): the newest two pictures are alike, as
         dark as the settled view and laid out like it, and have been back
         RETURN_HOLD_S.  A light flashing in the same view never counts (its
-        bright pictures keep the layout), and the hold outlasts the dark
-        spells of running past windows, so neither can pump.  The brightness
-        to steer by now (never boosting more than the settled view had).
-        None otherwise."""
+        bright pictures keep the layout), nor does a white-out (lightning
+        whiting the screen out has a layout of its own under a HUD), and
+        the hold outlasts the dark spells of running past windows, so none
+        of them can pump.  The brightness to steer by now (never boosting
+        more than the settled view had).  None otherwise."""
         ref, stretch, away = self._settled, self._stretch, self._away
         if ref is None or away is None or len(stretch) < 2 or now < self._alternate_until:
             return None
@@ -637,9 +866,14 @@ class Controller:
             return None
         prev = stretch[-2][1]
         key = max(prev.key, m.key, seen.key)
-        if (away.key <= key * STEADY_RATIO
+        if (away.key <= key * STEADY_RATIO or _white_out(away)
                 or max(seen.key, m.key) > min(seen.key, m.key) * STEADY_RATIO):
             return None
+        # (Not VIEW_MOVED for the look away: a window filling the middle of
+        # the view leaves the rest of the room as it was, and a light
+        # reaching only part of the view would have to stay on for two
+        # pictures and then off for RETURN_HOLD_S, with ALTERNATE_S
+        # stopping any repeat.)
         out, out_layout = view_spread(seen, away), view_layout(seen, away)
         back, back_layout = view_spread(seen, m), view_layout(seen, m)
         alike = view_spread(prev, m)
@@ -648,6 +882,58 @@ class Controller:
                 or back_layout < RETURN_LAYOUT or alike is None or alike >= VIEW_SPREAD):
             return None
         return key
+
+    def _fading_back(self, now: float, m: Measurement) -> float | None:
+        """A white-out (see WHITE_OUT) that lasted WHITE_OUT_S fading back
+        to the settled view it hit: m is no brighter than the picture before
+        it, within FADE_S of the last white picture, laid out like that
+        settled view (the view showing through the white, not another one),
+        and the fade has shown a picture between the two (still brighter
+        than the view: lightning snaps straight back instead).  In a game
+        the white has a layout of its own (a HUD drawn over it, a vignette
+        darkening its corners), so a picture laid out like the white and
+        within FLASH_RATIO of it still counts as white (as a plain white
+        fading would, every part still at least WHITE_OUT), and one laid out
+        like a blend of the white and the view (RETURN_LAYOUT, see
+        _blend_layout) is a picture in between: the fade is followed on
+        through those.  The brightness to steer by now (never boosting more
+        than the settled view had).  None otherwise.  Called with every
+        picture, before _track_stretch."""
+        last, self._fade = self._fade, 0.0
+        regions, white = m.regions, self._white
+        white_layout = view_layout(white, m) if last and white is not None else None
+        if regions and (
+                _white_out(m)
+                or not self._fading and white_layout is not None and white_layout >= RETURN_LAYOUT
+                and m.key * FLASH_RATIO >= white.key):
+            if not last:
+                # Remember the view it hit: a long white-out would
+                # otherwise become the settled view itself.
+                ref = self._settled
+                self._fade_from = (ref[2] if ref is not None and now - ref[1] <= VIEW_TURN_S
+                                   else None)
+            if not last or self._fading:
+                self._fade_since = now
+            self._fade, self._fade_at, self._fading = m.key, now, False
+            if white_layout is None:
+                self._white = m
+            return None
+        seen = self._fade_from
+        if (not last or seen is None or now - self._fade_at > FADE_S
+                or self._fade_at - self._fade_since < WHITE_OUT_S or m.key > last + NOISE_KEY):
+            return None
+        layout = view_layout(seen, m)
+        if layout is not None and layout < RETURN_LAYOUT and m.key > seen.key * STEADY_RATIO:
+            if white is not None and _blend_layout(m, seen, white) >= RETURN_LAYOUT:
+                # A picture in between, but the view can't be told
+                # through the white yet.
+                self._fade, self._fading = m.key, True
+            return None
+        if (layout is None or layout < RETURN_LAYOUT
+                or not self._fading and m.key <= seen.key * STEADY_RATIO):
+            return None
+        self._fade, self._fading = m.key, True
+        return max(m.key, seen.key)
 
     def hold(self, strength: float, target: float, dim: bool = True) -> None:
         """No new game picture (CatVision's own window is in front): keep the
@@ -662,6 +948,7 @@ class Controller:
             self._settings = settings
             self.want = target_offset(self.key, strength, target, dim)
             self.rush = False
+            self._aim_room(strength)
 
     @property
     def black_too_long(self) -> bool:
@@ -671,18 +958,42 @@ class Controller:
     def release(self) -> None:
         """Head back to the preset (no game in front)."""
         self.want = 0.0
+        self.room_want, self._room_back, self._highs = 0.0, True, 0.0
         self.rush = self._rush_view = False
         self._recent.clear()
         self._last_key = 0.0
         self._black_since = None
         self._jump_at = self.clock - CALM_S
         self._stretch, self._settled, self._estimate = [], None, False
-        self._away = None
+        self._away = self._fade_from = self._white = None
+        self._fade, self._fading = 0.0, False
         self._view_rise = False     # back to the preset at the usual pace
 
-    def advance(self, dt: float, speed: float = 1.0) -> float:
+    def advance(self, dt: float, speed: float = 1.0, frame: float | None = None) -> float:
+        """``frame``: how often this display is really updated, when that is
+        less often than every step (see Fader.set_rates)."""
         self.clock += max(dt, 0.0)
-        return self.follow(self.want, self.strength, dt, speed)
+        self._ease_room(dt)
+        return self.follow(self.want, self.strength, dt, speed, frame)
+
+    def _aim_room(self, strength: float) -> None:
+        """Where the Outside detail heads for the last picture's bright share."""
+        room = room_for_highs(self._highs, strength)
+        if not room or abs(room - self.room_want) >= ROOM_DEADBAND:
+            self.room_want = room
+
+    def _ease_room(self, dt: float) -> None:
+        """Glide the Outside detail toward room_want: quicker up than down
+        (an even exponential approach, so no step is ever visible)."""
+        gap = self.room_want - self.room
+        if not gap:
+            return
+        if abs(gap) < ROOM_SNAP:
+            self.room = self.room_want
+            return
+        # (Back to the preset, as auto levels stops, at the quick pace.)
+        pace = ROOM_RISE_S if gap > 0 or self._room_back else ROOM_FALL_S
+        self.room += gap * (1.0 - math.exp(-max(dt, 0.0) / pace))
 
     def step(self, m: Measurement | None, strength: float, target: float, dt: float,
              speed: float = 1.0, dim: bool = True) -> float:
@@ -695,9 +1006,11 @@ class Controller:
         self.release()
         return self.advance(dt, speed)
 
-    def follow(self, want: float, strength: float, dt: float, speed: float = 1.0) -> float:
+    def follow(self, want: float, strength: float, dt: float, speed: float = 1.0,
+               frame: float | None = None) -> float:
         """Glide toward want: a critically damped spring (smooth start and
-        stop, no overshoot) with a speed limit, never past want."""
+        stop, no overshoot) with a speed limit, never past want.  ``frame``:
+        see advance()."""
         dt = max(dt, 0.0)
         gap = want - self.offset
         if abs(gap) < 0.01 and abs(self.velocity) < 0.05:
@@ -713,6 +1026,25 @@ class Controller:
             # picture doesn't jump, it just turns round without first
             # carrying on up into the glare).
             self.velocity = 0.0
+        if gap * self.velocity < 0:
+            # Still moving away from a goal that turned round without a
+            # flash (a light came up while brightening for the dark): the
+            # spring below would carry on that way for a tenth of a second
+            # or so, a couple of points past the new goal and back.  Brake
+            # evenly instead (no pull toward the goal yet, so no sudden
+            # fade back either): the speed eases off to nothing within
+            # a few hundredths of a second, with no step and no dead stop,
+            # and from rest the usual glide takes over.
+            v0 = self.velocity
+            stop = abs(v0) / TURN_BRAKE
+            if dt < stop:
+                v1 = v0 - math.copysign(TURN_BRAKE * dt, v0)
+                self.offset += (v0 + v1) / 2 * dt
+                self.velocity = v1
+                return self.offset
+            self.offset += v0 * stop / 2
+            self.velocity, dt = 0.0, dt - stop
+            gap = want - self.offset
         if gap > 0:
             # A big change (into a cave) catches up quicker, all the way:
             # dropping to the slow pace for the last stretch would leave the
@@ -747,8 +1079,10 @@ class Controller:
         if per_update:
             # Its cap is per update, so a 60 Hz screen fades at 80 points a
             # second and only faster screens (smaller steps) go quicker; a
-            # stalled update can't make a bigger step.
-            ceiling = CEILING_STEP / max(dt, 1.0 / FADER_MAX_HZ)
+            # stalled update can't make a bigger step.  A screen updated
+            # only every few steps (a 60 Hz one next to a 144 Hz one) counts
+            # its own updates, or it would show steps twice the cap.
+            ceiling = CEILING_STEP / max(dt, frame or 1.0 / FADER_MAX_HZ)
         else:
             ceiling = CEILING_RUSH if vmax == MAX_RUSH else CEILING
         limit = min(vmax * speed, ceiling)
@@ -763,14 +1097,6 @@ class Controller:
         return self.offset
 
 
-def quick_thread_switches() -> None:
-    """Let a waiting thread (the fader) have its turn sooner: see
-    THREAD_SWITCH_S.  Process-wide, so only the app's entry point calls
-    it; a shorter interval set elsewhere is kept."""
-    if sys.getswitchinterval() > THREAD_SWITCH_S:
-        sys.setswitchinterval(THREAD_SWITCH_S)
-
-
 def fader_rate(refresh_rates) -> int:
     """Fader updates a second for these displays: their fastest refresh
     rate, from FADER_HZ up to FADER_MAX_HZ."""
@@ -779,9 +1105,10 @@ def fader_rate(refresh_rates) -> int:
 
 class Fader:
     """Moves every display toward where auto levels wants it, at the
-    displays' refresh rate (see fader_rate) on its own thread, so fades are
-    smooth and never wait on the window.  apply() gets {display id:
-    offset} whenever something moved."""
+    displays' refresh rate (see fader_rate; each display is passed on at its
+    own, see set_rates) on its own thread, so fades are smooth and never
+    wait on the window.  apply() gets {display id: offset} whenever
+    something moved."""
 
     def __init__(self, controllers: dict[str, Controller],
                  apply: Callable[[dict[str, float]], None], hz: int = FADER_HZ):
@@ -789,12 +1116,17 @@ class Fader:
         self.apply = apply
         self.speed = 1.0
         self.interval = 1.0 / hz     # may be changed while running (set_rate)
+        # Per display: its own updates a second (see set_rates).  A display
+        # not listed is passed on at the fader's own pace.
+        self.rates: dict[str, int] = {}
+        self._since: dict[str, float] = {}   # per display: time since it was last passed on
         self._stop = threading.Event()
         self._wake = threading.Event()   # a new goal: stop resting at once
         self._thread: threading.Thread | None = None
         self._ticked_at: float | None = None   # real time the clocks were last moved to
         self.last_error = ""
         self._applied: dict[str, float] = {}
+        self._rooms: dict[str, float] = {}     # each display's Outside detail when last applied
 
     @property
     def running(self) -> bool:
@@ -829,6 +1161,16 @@ class Fader:
         """Updates a second (the displays' refresh rate; see fader_rate)."""
         self.interval = 1.0 / max(1.0, hz)
 
+    def set_rates(self, refresh_rates: dict[str, float]) -> None:
+        """Each display's refresh rate ({display id: Hz}).  The fader steps
+        at the fastest of them (fader_rate) and every controller moves on
+        every step, but each display is passed on only at its own pace
+        (fader_rate of its own rate): a 60 Hz screen next to a 144 Hz one
+        shows only 60 pictures a second, so 120 updates would cost twice
+        the Windows calls for nothing visible."""
+        self.rates = {did: fader_rate([hz]) for did, hz in refresh_rates.items()}
+        self.set_rate(fader_rate(refresh_rates.values()))
+
     def now_for(self, ctrl: Controller) -> float:
         """ctrl's clock as it is right now.  The clock moves only when the
         fader steps, which at rest is only every IDLE_S, so on its own it
@@ -841,44 +1183,83 @@ class Fader:
     def settled(self) -> bool:
         """Every display is where it wants to be and has stopped moving."""
         return all(abs(c.want - c.offset) <= 0.001 and abs(c.velocity) < 1e-3
+                   and c.room == c.room_want
                    for c in list(self.controllers.values()))
 
     def tick(self, dt: float, motion_dt: float | None = None, force: bool = False,
              apply: Callable[[dict[str, float]], None] | None = None) -> bool:
-        """Move every display one step.  apply() is called only when some
-        position moved FADER_MIN_STEP since the last call (or force), and
-        always once more when a display comes to rest, so its exact final
-        value is applied.  Returns True if apply() was called."""
+        """Move every display one step.  A display's new position is passed
+        on only once it has moved FADER_MIN_STEP since it was last passed on,
+        at most at its own pace (see set_rates), and always once more when it
+        comes to rest, so its exact final value is applied; with force, every
+        display's.  apply() gets every display's position as last passed on,
+        and is called only when one of them changed (or force).  Returns True
+        if apply() was called."""
         motion = dt if motion_dt is None else min(motion_dt, dt)
         # One snapshot: the window may add or remove displays meanwhile.
         items = list(self.controllers.items())
-        positions, wants = {}, {}
+        rates, step = self.rates, self.interval
+        last, shown, since_all = self._applied, {}, {}
         for did, ctrl in items:
             if dt > motion:
                 ctrl.clock += dt - motion   # time passes even while resting
-            positions[did] = ctrl.advance(motion, self.speed)
-            wants[did] = ctrl.want
-        last = self._applied
-        changed = force or positions.keys() != last.keys()
+            # Every controller moves on every step, whatever its display's
+            # pace, so the motion is the same on every screen; only the
+            # quickest fade's cap per update counts a slower screen's own
+            # updates (see CEILING_STEP), so its steps stay as small as on
+            # its own.
+            pace = 1.0 / rates[did] if did in rates else step
+            pos = ctrl.advance(motion, self.speed, pace if pace > step else None)
+            prev = last.get(did)
+            since = self._since.get(did, 0.0) + dt
+            if force or prev is None:
+                new, since = True, 0.0
+            elif pos == prev:
+                new = False
+            elif ctrl.want == pos:
+                new = True                  # came to rest: its exact final value, at once
+            else:
+                # A slower screen than the fastest is passed on only every
+                # few steps (the nearest step to its own beat).
+                due = pace <= step or since >= pace - step / 2
+                new = due and abs(pos - prev) >= FADER_MIN_STEP
+            if new:
+                shown[did] = pos
+                if since:
+                    # Keep its beat (a 75 Hz screen gets 75 a second, not
+                    # 60), but never hurry to catch up after a stall.
+                    since = min(since - pace, step / 2)
+            else:
+                shown[did] = prev
+                since = min(since, pace)
+            since_all[did] = since
+        self._since = since_all
+        changed = force or shown != last
+        # The Outside detail moves on its own (see Controller.room).
+        rooms = {did: (ctrl.room, ctrl.room_want) for did, ctrl in items}
         if not changed:
-            for did, pos in positions.items():
-                gap = abs(pos - last[did])
-                if gap >= FADER_MIN_STEP or (gap > 0 and wants[did] == pos):
+            for did, (room, room_want) in rooms.items():
+                gap = abs(room - self._rooms.get(did, 0.0))
+                if gap >= ROOM_STEP or (gap > 0 and room == room_want):
                     changed = True
                     break
         if changed:
-            (apply or self.apply)(positions)
-            self._applied = positions
+            (apply or self.apply)(shown)
+            self._applied = shown
+            self._rooms = {did: room for did, (room, _want) in rooms.items()}
         return changed
 
     def _run(self, stop: threading.Event,
              apply: Callable[[dict[str, float]], None] | None = None) -> None:
         last = due = time.perf_counter()
         idle = False
-        self._applied = {}
+        self._applied, self._since, self._rooms = {}, {}, {}
         while not stop.is_set():
             now = time.perf_counter()
             dt, last = min(now - last, 0.25), now
+            # Set before the clocks move (now_for adds the time since this
+            # to a clock): a picture arriving in between is stamped one step
+            # early at worst, never with that step counted twice.
             self._ticked_at = now
             try:
                 # Coming out of a rest, the first step is a normal 60 Hz step,

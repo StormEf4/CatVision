@@ -172,23 +172,37 @@ display and adjusts it live, the way your eyes adapt:
 - **No visible steps:** changes glide in tiny steps (as many a second as
   your display refreshes, from 60 up to 120) on their own background
   thread, easing in and out with a speed limit, so you never see the
-  picture jump. It ignores tiny changes so the picture doesn't keep
+  picture jump. With screens of different speeds, each display gets steps
+  at its own refresh rate (a 60 Hz screen next to a 144 Hz one gets 60 a
+  second, not 120), which saves CPU, and the quickest fade (into a dark
+  view) goes at each screen's own pace, so the slower one never shows
+  bigger steps than it would on its own.
+  It ignores tiny changes so the picture doesn't keep
   "breathing", and it catches up faster after a big change (stepping from
   daylight into a dark building), keeping that quicker pace all the way, and
   it starts brightening on the way into a cave instead of waiting until you
-  are inside. Turning auto levels off glides back to your preset too. At
-  the slow end of a glide, where single steps are too small to see, it
-  updates less often to save CPU.
+  are inside. If the scene brightens a little while it is still
+  brightening for the dark (a light coming up), it eases to a stop within
+  a frame or two instead of carrying on up past the new level first.
+  Turning auto levels off glides back to your preset too. At the slow end
+  of a glide, where single steps are too small to see, it updates less
+  often to save CPU.
 - **Quick into the dark:** when you turn or run somewhere darker (into a
   building or a cave, away from the sky, closing a bright menu) it can tell
   the whole view changed, not just a light, and starts brightening within
   about a third of a second, with an even quicker fade (walking into a cave
-  gets that quicker fade too, on the way in).
+  gets that quicker fade too, on the way in). A light that only reaches
+  part of the view (a lamp in a corner, a muzzle flash lighting the middle,
+  lightning through a window) leaves the rest of the picture as it was, so
+  it doesn't count as a new view, and the game's HUD (the same in every
+  view) doesn't hide a real turn.
 - **Quick back into the dark:** after a quick look at something bright from a
   dark place (a glance out of a doorway, a door opened and shut, a menu
   opened for a moment), it goes back to how it was once you have been back
   for just over half a second, with the same quick fade, instead of waiting
-  as if a light had flashed.
+  as if a light had flashed. A look at something nearly all white (bright
+  enough to count as a white-out, see Flashbangs) still waits, as lightning
+  does.
 - **Flash guard:** a sudden flash or explosion is toned down within a
   fraction of a second, as a very fast fade rather than a jump. Stepping
   out of the dark into daylight gets the same quick fade, even when it
@@ -197,13 +211,35 @@ display and adjusts it live, the way your eyes adapt:
   fade starts at full speed from the first brighter picture; walking out
   gets the same full-speed start once the view no longer looks like the
   dark one you were in. A light coming on in the same view doesn't count.
+- **Flashbangs:** when the whole screen whites out (a flashbang or a blast
+  right in front) and then fades back to the room you were in, it follows
+  the fade as it goes, so you can see in the room again as soon as the
+  white has gone (about a second sooner than waiting as for a flash). This
+  works with a HUD drawn over the white and a vignette darkening its
+  corners too. Lightning, muzzle flashes and strobes light the view and
+  snap straight back off, so they still wait (see below).
 - **No pumping:** apart from turning into a new, darker view (or back to the
-  one you just looked away from), it only brightens once a scene has stayed
-  dark for a moment, so flickering lights, muzzle flashes and lightning don't
-  make the picture bounce. Glimpses of something bright (running past
-  windows) don't count as a new view or as looking away, and if you keep
-  turning back and forth between bright and dark it waits the usual way until
-  you stop for a few seconds.
+  one you just looked away from, or a flashbang fading), it only brightens
+  once a scene has stayed dark for a moment, so flickering lights, muzzle
+  flashes and lightning don't make the picture bounce. Glimpses of
+  something bright (running past windows) don't count as a new view or as
+  looking away, and if you keep turning back and forth between bright and
+  dark it waits the usual way until you stop for a few seconds.
+- **See outside from a dark room:** when a window, an open door or a lamp is
+  in view, it gives the bright part more **Outside detail** (the more of
+  the view it fills, the more it gets, up to 40 points), so the sky, walls
+  and trees outside stay apart instead of turning one white block. The room
+  comes first: the extra never changes the dark room's own levels, so when
+  the room is lifted a lot (Pitch Black, Night Vision, a big boost) it adds
+  less, or nothing. It glides in over about a second
+  and back out more slowly, with no visible steps. Small bright bits (HUD
+  text, a crosshair, sparks) don't count: only bright areas that fill at
+  least a tenth of one of the 32 blocks (see *How it stays safe*). CatVision can't change
+  parts of the screen, only how bright each brightness level is shown: the
+  room is the dark levels and the outside the bright ones, so they can be
+  treated differently. A screen that is all bright (a flash, open sky) gets
+  nothing extra, and **How much** at 0 turns this off too. The Home tab then
+  says *keeping the outside visible*.
 - **Aim brighter / darker hotkeys:** nudge Aim for while you play, without
   leaving the game (suggested Ctrl+Alt+] and Ctrl+Alt+[). They change the
   game's own kept look if it has one.
@@ -245,11 +281,11 @@ display and adjusts it live, the way your eyes adapt:
 **How it stays safe:** five times a second (ten while the brightness is
 changing a lot) it takes a tiny, low-resolution copy of what Windows is
 already showing (the same screen-capture route recording and streaming apps
-use) and measures only how bright it is: overall, and in 32 large blocks of
-the picture (8 across, 4 down) to tell turning to a new view from a light
-going off. It never touches the game, never saves or sends the pictures, and
-never looks for anything in them. It only changes brightness, nothing that
-would point things out to you.
+use) and measures only how bright it is: overall, how much of it is bright,
+and in 32 large blocks of the picture (8 across, 4 down) to tell turning to a
+new view from a light going off. It never touches the game, never saves or
+sends the pictures, and never looks for anything in them. It only changes
+brightness, nothing that would point things out to you.
 
 **Things to know:**
 
@@ -320,6 +356,11 @@ presets in the **Presets** tab.
 - **Brightness / Contrast**: as usual.
 - **Glare limit**: caps the brightest whites. Useful for flashbangs and
   flashlights.
+- **Outside detail (windows, sky)**: keeps bright areas from turning white
+  when dark areas are lifted, so you can see out of a window or door from a
+  dark room. Higher keeps more detail outside; 0 is off. Dark Areas, Pitch
+  Black and both Night Vision presets use 40, which leaves dark rooms about
+  as bright as before. Your saved copies of those presets get it too.
 - **Saturation / Filter strength / Red-Green-Blue**: color strength, how
   strongly the color filter applies, and an overall tint.
 
@@ -411,7 +452,9 @@ bottom of the window just says what CatVision is doing.
   **Windowed fullscreen**.
 - **The effect disappears when a game starts.** Some games reset brightness
   on launch. Leave *Keep applied* on (Settings) and CatVision puts it back
-  within about 2 seconds.
+  within about 2 seconds. It also puts back a display you unticked while
+  Windows wasn't taking changes (during a fullscreen switch, say), as soon
+  as Windows allows it.
 - **Nothing happens with HDR on.** Windows ignores brightness tables while
   HDR is on. Turn HDR off in *Settings → Display* while you use CatVision.
 - **Windows' own Color filters are on.** Turn them off; they conflict with
@@ -421,6 +464,9 @@ bottom of the window just says what CatVision is doing.
   **Reset display now** in Settings, **Reset display to normal** or
   **Force quit** in the tray menu, your *Panic* hotkey if you set one, or run
   `CatVision.exe --reset`.
+- **Looking out of a window from a dark room is too bright?** Raise
+  **Outside detail** (Tune tab). With auto levels (beta) on it also adds
+  some by itself while a window is in view.
 - **Text too small?** Settings → Text size → *Extra large*.
 - **Opened CatVision twice?** The second copy just brings up the first one's
   window.

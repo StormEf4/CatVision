@@ -10,6 +10,12 @@ from dataclasses import dataclass
 
 from .curves import Settings
 
+# Outside detail for the strong looks: without it their lift and contrast
+# turn everything brighter than a lamp-lit wall white, so the view out of a
+# window from a dark room is one white block.  This much keeps the sky,
+# walls and trees apart and leaves the dark room's tones as they were.
+HIGHLIGHT_ROOM = 40.0
+
 
 @dataclass(frozen=True)
 class Preset:
@@ -29,12 +35,13 @@ BUILTIN_PRESETS: list[Preset] = [
         "Dark Areas",
         "Opens up dark rooms, caves and night scenes. A good everyday choice.",
         Settings(shadow_boost=66, exposure=3, anti_glare=100, gamma=1.0, black_floor=0.02,
-                 contrast=1.34),
+                 contrast=1.34, highlight_room=HIGHLIGHT_ROOM),
     ),
     Preset(
         "Pitch Black",
         "Maximum shadow lift for nearly black areas. Image will look washed out.",
-        Settings(shadow_boost=85, gamma=1.0, black_floor=0.04, brightness=1.05),
+        Settings(shadow_boost=85, gamma=1.0, black_floor=0.04, brightness=1.05,
+                 highlight_room=HIGHLIGHT_ROOM),
     ),
     Preset(
         "Night Vision",
@@ -42,13 +49,14 @@ BUILTIN_PRESETS: list[Preset] = [
         "and pale highlights. Bright lights are held back so they never blind you "
         "or hide someone standing in front of them.",
         Settings(exposure=40, anti_glare=100, gamma=1.3, contrast=1.1, black_floor=0.015,
-                 white_cap=0.88, color_filter="night_vision"),
+                 white_cap=0.88, color_filter="night_vision", highlight_room=HIGHLIGHT_ROOM),
     ),
     Preset(
         "Night Vision (Blue)",
         "Night vision in cool blue. Bright lights are held back, like the green one.",
         Settings(exposure=50, anti_glare=74, gamma=1.25, contrast=1.1, black_floor=0.015,
-                 white_cap=0.88, color_filter="night_vision_blue"),
+                 white_cap=0.88, color_filter="night_vision_blue",
+                 highlight_room=HIGHLIGHT_ROOM),
     ),
     Preset(
         "Fog & Haze Cutter",

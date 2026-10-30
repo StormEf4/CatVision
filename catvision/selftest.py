@@ -265,29 +265,24 @@ def _gap_stats(stamps: list[float], hz: float) -> dict:
             "late_steps": sum(1 for g in gaps if g > beat * 1.5)}
 
 
-def fader_steps_under_load(seconds: float, load: str, switch_s: float | None = None,
-                           hz: float | None = None) -> dict:
+def fader_steps_under_load(seconds: float, load: str, hz: float | None = None) -> dict:
     """Auto levels (beta): how evenly the fader steps while other threads
     run Python.  ``load``: "watcher" (the real Watcher measuring a captured
     picture five times a second, plus window-like work every 50 ms) or
     "busy" (a thread measuring pictures back to back: the worst case).
-    ``switch_s``: Python's thread switch interval for the run (restored
-    afterwards).  Each step builds a real brightness table (its usual cost)
-    but no display is changed.  Never raises: problems go in "error"."""
+    "switch_ms" is Python's thread switch interval (CatVision leaves it as
+    it is).  Each step builds a real brightness table (its usual cost) but
+    no display is changed.  Never raises: problems go in "error"."""
     import threading
     import time
     from . import autolevels, curves
     hz = hz or autolevels.FADER_MAX_HZ
-    out: dict = {"load": load, "switch_ms": None}
-    old_switch = sys.getswitchinterval()
+    out: dict = {"load": load, "switch_ms": round(sys.getswitchinterval() * 1000, 2)}
     stop = threading.Event()
     threads: list = []
     watcher = fader = None
     measure_ms: list[float] = []
     try:
-        if switch_s is not None:
-            sys.setswitchinterval(switch_s)
-        out["switch_ms"] = round(sys.getswitchinterval() * 1000, 2)
         thumb = _thumbnail()
 
         def busy():
@@ -344,7 +339,6 @@ def fader_steps_under_load(seconds: float, load: str, switch_s: float | None = N
                 out.setdefault("error", repr(exc))
         for t in threads:
             t.join(timeout=1.0)
-        sys.setswitchinterval(old_switch)
     return out
 
 
@@ -767,20 +761,13 @@ def run(report_path: str) -> int:
 
     def fader_load():
         """Auto levels (beta): how evenly the fader steps at 120 a second
-        while the Watcher measures and the window works, with CatVision's
-        thread switch interval and Python's own (5 ms) for comparison; and
-        with a thread measuring back to back (the worst case).  Information
-        only: never fails the test."""
+        while the Watcher measures and the window works, and with a thread
+        measuring back to back (the worst case).  Information only: never
+        fails the test."""
         out: dict = {}
         try:
-            from . import autolevels
-            out["app_switch_ms"] = autolevels.THREAD_SWITCH_S * 1000
-            for name, seconds, load, switch in (
-                    ("watcher", 0.6, "watcher", autolevels.THREAD_SWITCH_S),
-                    ("watcher_python_default", 0.6, "watcher", 0.005),
-                    ("busy", 0.3, "busy", autolevels.THREAD_SWITCH_S),
-                    ("busy_python_default", 0.3, "busy", 0.005)):
-                out[name] = fader_steps_under_load(seconds, load, switch)
+            for name, seconds in (("watcher", 0.6), ("busy", 0.3)):
+                out[name] = fader_steps_under_load(seconds, name)
         except Exception as exc:
             out["error"] = repr(exc)
         return out
