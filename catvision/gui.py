@@ -725,7 +725,9 @@ class CatVisionApp:
     def _fader_apply(self, positions: dict[str, float], generation: int | None = None) -> None:
         """Runs on the fader thread: share each display's offset between
         Shadow boost and Exposure and pass it to the engine (which is
-        thread-safe) only when it actually changed."""
+        thread-safe) only when it actually changed, or when Windows refused
+        the last change (the engine offers it again every so often; at rest
+        the fader still calls this a few times a second)."""
         key = self._auto_key or self._auto_setting()
         settings = self.engine.settings
         base = {k: getattr(settings, k) for k in ("shadow_boost", "exposure")}
@@ -736,7 +738,7 @@ class CatVisionApp:
             amounts = {k: v for k, v in amounts.items() if v}
             if amounts or did in self.engine.auto_offsets:
                 offsets[did] = amounts
-        if offsets != self.engine.auto_offsets:
+        if offsets != self.engine.auto_offsets or self.engine.retry_pending():
             self.engine.set_auto_offsets(offsets, generation=generation)
 
     def _keep_auto_look(self, quiet: bool = False) -> str:

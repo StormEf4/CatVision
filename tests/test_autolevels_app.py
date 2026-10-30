@@ -485,6 +485,33 @@ class AutoLevelsAppStress(unittest.TestCase):
         self.screen.release.set()
         self.assert_clean()
 
+    def test_refused_change_recovers_after_the_fade_stops(self):
+        """Windows refuses every change while a fade runs and ends; once it
+        takes changes again the display gets its look and the warning goes,
+        without waiting for the scene to change."""
+        self.start_fade()
+        self.gamma.limit = -1                       # refuses everything
+        self.screen.mode = "bright"                 # a new goal: a fade that is refused
+        self.assertTrue(self.pump_until(lambda: not self.engine.status.gamma_ok, 4))
+        self.assertTrue(self.pump_until(self.app._auto_fader.settled, 8),
+                        "the fade never came to rest")
+        self.pump(0.5)
+        self.assertFalse(self.engine.status.gamma_ok)
+        self.assertIn("gamma_refused", [n.key for n in self.app.warning.notices])
+        self.gamma.limit = None                     # Windows takes changes again
+        tint, _m = curves.plan_color(self.engine.settings, self.engine.custom_filters,
+                                     self.engine.custom_tints,
+                                     all_displays=self.engine.all_displays_selected())
+
+        def recovered():
+            want = curves.build_ramp(self.engine.settings_for(D1), tint)
+            return self.engine.status.gamma_ok and self.gamma.ramps[D1] == want
+        self.assertTrue(self.pump_until(recovered, 3), "the refused look was never put back")
+        self.assertTrue(self.pump_until(
+            lambda: "gamma_refused" not in [n.key for n in self.app.warning.notices], 2))
+        self.assertTrue(self.engine.auto_offsets.get(D1))
+        self.assert_clean()
+
     def test_corrupt_saved_looks_stay_safe(self):
         # A hand-edited / damaged config.json: out-of-range and NaN values.
         o = self.app.cfg.options

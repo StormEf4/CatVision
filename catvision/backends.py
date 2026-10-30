@@ -231,7 +231,7 @@ def shown_memory(ramp: list[list[int]] | None) -> tuple | None:
 
 
 def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]],
-                             memory: dict | None = None) -> GammaResult:
+                             memory: dict | None = None, search: bool = False) -> GammaResult:
     """Apply a ramp, weakening it if Windows refuses the full strength.
 
     Windows (without the registry tweak in ``windows/``) rejects ramps that
@@ -242,9 +242,12 @@ def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]],
     ``memory`` (optional, a dict kept by the caller) marks a frequent small
     update (auto levels fading) and remembers per monitor what Windows last
     accepted, so the next update goes straight to it (see ``_apply_fading``).
+    ``search``: Windows refused this monitor's last fading update; look for
+    what it takes now instead of offering only the full ramp (the caller
+    limits how often).
     """
     if memory is not None:
-        return _apply_fading(backend, monitor_id, ramp, memory)
+        return _apply_fading(backend, monitor_id, ramp, memory, search)
     if backend.set_ramp(monitor_id, ramp):
         return GammaResult(True, applied=ramp)
     for steps in _TIERS:
@@ -266,7 +269,8 @@ def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]],
     return GammaResult(False, failed_monitors=[monitor_id])
 
 
-def _apply_fading(backend, monitor_id: str, ramp, memory: dict) -> GammaResult:
+def _apply_fading(backend, monitor_id: str, ramp, memory: dict,
+                  search: bool = False) -> GammaResult:
     """apply_ramp_with_fallback for a fading update (see there).
 
     The full ramp is offered first (a refused call changes nothing on
@@ -310,7 +314,7 @@ def _apply_fading(backend, monitor_id: str, ramp, memory: dict) -> GammaResult:
     if offer(ramp):
         memory[monitor_id] = ("shown", dev, bad if bad is not None and bad > dev else None, age)
         return GammaResult(True, applied=ramp)
-    if refused and age != 0:        # still refusing: re-search about once a second
+    if refused and age != 0 and not search:   # still refusing: re-search about once a second
         memory[monitor_id] = ("refused", age, ok)
         return GammaResult(False, failed_monitors=[monitor_id])
 

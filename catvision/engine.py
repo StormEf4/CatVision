@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -14,6 +15,10 @@ from .curves import Settings
 # what we set before we decide something else overwrote it.  Drivers round
 # ramps to their own precision.
 _DRIFT_TOLERANCE = 768
+# Auto levels (beta): a display whose last change Windows refused is offered
+# its look again this often (with a fresh search), even once its fade has
+# stopped and no new update would come.
+_RETRY_S = 0.5
 
 
 @dataclass
@@ -76,6 +81,9 @@ class Engine:
         # status follows what is on screen now (a fade that Windows held back
         # must not leave "holding back" showing once it is back to normal).
         self._gamma_state: dict[str, tuple[bool, bool]] = {}
+        # Per display: when Windows started refusing it, or it was last
+        # offered its look again (see _RETRY_S).
+        self._retry_at: dict[str, float] = {}
         self.status = Status()
 
         unclean = self._flag is not None and self._flag.exists()
@@ -172,23 +180,38 @@ class Engine:
     def set_auto_offsets(self, offsets: dict[str, dict[str, float]],
                          generation: int | None = None) -> None:
         """Auto levels (beta): move Shadow boost / Exposure per display without
-        touching the preset.  Only the brightness tables are redone."""
+        touching the preset.  Only the brightness tables are redone.  A
+        display whose last change Windows refused is offered its look again
+        every _RETRY_S, even if nothing changed (a fade that has stopped keeps
+        sending the same offsets)."""
         with self._lock:
             if generation is not None and generation != self.auto_generation:
                 return  # from a fader run that has already been stopped
             def amounts(d):   # {} and all-zero adjustments are the same picture
                 return {k: v for k, v in (d or {}).items() if v}
-            changed = [m for m in self._targets()
+            targets = self._targets()
+            changed = [m for m in targets
                        if amounts(offsets.get(m.id)) != amounts(self.auto_offsets.get(m.id))]
             self.auto_offsets = {d: dict(v) for d, v in offsets.items()}
-            if not self.enabled or not changed:
+            if not self.enabled:
+                return
+            now = time.monotonic()
+            due = {m.id for m in targets if not self._gamma_state.get(m.id, (True,))[0]
+                   and now - self._retry_at.get(m.id, now) >= _RETRY_S}
+            redo = changed + [m for m in targets if m.id in due and m not in changed]
+            if not redo:
                 return
             tint, _matrix = curves.plan_color(self.settings, self.custom_filters,
                                               self.custom_tints,
                                               all_displays=self.all_displays_selected())
             # Displays with no adjustment left get the normal full apply, so
             # they settle exactly where the preset alone would.
-            self._apply_gamma(changed, tint, self.status, fading=True)
+            self._apply_gamma(redo, tint, self.status, fading=True, search=due)
+
+    def retry_pending(self) -> bool:
+        """Windows refused the last change of a display (a quick check
+        without the lock; set_auto_offsets decides when to try again)."""
+        return self.enabled and not self.status.gamma_ok
 
     def settings_for(self, display_id: str) -> Settings:
         """The settings a display really gets (the preset plus auto levels)."""
@@ -198,11 +221,13 @@ class Engine:
         return replace(self.settings, **{k: getattr(self.settings, k) + v
                                          for k, v in amounts.items()}).clamped()
 
-    def _apply_gamma(self, monitors, tint, status: Status, fading: bool = False) -> None:
+    def _apply_gamma(self, monitors, tint, status: Status, fading: bool = False,
+                     search: set[str] = frozenset()) -> None:
         """``fading``: a frequent auto-levels update.  Displays that carry an
         adjustment reuse what Windows last accepted and remember what they
         set instead of reading every ramp back (the keep-applied check still
-        compares); displays with none get the normal full apply."""
+        compares); displays with none get the normal full apply.  ``search``:
+        displays Windows refused, offered their look again (see _RETRY_S)."""
         if not fading:
             self._fallback.clear()   # a full apply starts from the full ramp again
         ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
@@ -213,8 +238,8 @@ class Engine:
             if ramp is None:
                 ramp = ramps[which] = curves.build_ramp(self.settings_for(m.id), tint)
             if adjusted:
-                result: GammaResult = apply_ramp_with_fallback(self.gamma, m.id, ramp,
-                                                               self._fallback)
+                result: GammaResult = apply_ramp_with_fallback(
+                    self.gamma, m.id, ramp, self._fallback, search=m.id in search)
             else:
                 result = self._apply_rest(m.id, ramp) if fading else None
                 if result is None:
@@ -231,6 +256,8 @@ class Engine:
                     self._applied[m.id] = result.applied or ramp
                 else:
                     self._applied[m.id] = self.gamma.get_ramp(m.id) or ramp
+            elif m.id in search or self._gamma_state.get(m.id, (True,))[0]:
+                self._retry_at[m.id] = time.monotonic()   # refused: try again later
             self._gamma_state[m.id] = (result.ok, result.limited)
         states = [self._gamma_state[m.id] for m in self._targets() if m.id in self._gamma_state]
         status.gamma_ok = all(ok for ok, _ in states)

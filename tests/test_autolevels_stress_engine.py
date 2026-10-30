@@ -699,6 +699,129 @@ class RefusingDisplayBudgetTest(unittest.TestCase):
                 self.assertEqual(g.bad, [])
 
 
+class _Clock:
+    """Stands in for the engine's time module, so retries can be timed."""
+
+    def __init__(self):
+        self.now = 100.0
+
+    def monotonic(self):
+        return self.now
+
+
+class RetryRefusedTest(unittest.TestCase):
+    """A display whose last change Windows refused gets its look once Windows
+    takes changes again, even after its fade has stopped (the fader then
+    keeps sending the very same offsets)."""
+
+    def setUp(self):
+        import catvision.engine as engine_mod
+        self.engine_mod = engine_mod
+        self.clock = _Clock()
+        self._real_time = engine_mod.time
+        engine_mod.time = self.clock
+
+    def tearDown(self):
+        self.engine_mod.time = self._real_time
+
+    def _refused_then_stopped(self, limit, offsets):
+        g, e = _engine(limit, Settings(shadow_boost=30), displays=[D1])
+        e.set_auto_offsets({D1: {"shadow_boost": 5.0}}, generation=e.auto_generation)
+        keep = g.limit
+        g.limit = -1                       # Windows refuses everything for a moment
+        e.set_auto_offsets(offsets, generation=e.auto_generation)
+        self.assertFalse(e.status.gamma_ok)
+        g.limit = keep                     # ...and takes changes again
+        return g, e
+
+    def test_refused_display_recovers_once_the_fade_has_stopped(self):
+        offsets = {D1: {"shadow_boost": 20.0}}
+        g, e = self._refused_then_stopped(None, offsets)
+        self.assertTrue(e.retry_pending())
+        n = len(g.log)
+        e.set_auto_offsets(offsets, generation=e.auto_generation)    # too soon
+        self.assertEqual(len(g.log), n)
+        self.clock.now += self.engine_mod._RETRY_S
+        e.set_auto_offsets(offsets, generation=e.auto_generation)
+        self.assertEqual(g.get_ramp(D1), _expected_full(e, D1))
+        self.assertTrue(e.status.gamma_ok, e.status.summary())
+        self.assertFalse(e.retry_pending())
+        self.assertFalse(e.check_and_reapply())
+        n = len(g.log)
+        self.clock.now += 5
+        e.set_auto_offsets(offsets, generation=e.auto_generation)    # nothing to redo
+        self.assertEqual(len(g.log), n)
+
+    def test_retry_finds_what_a_limited_pc_takes(self):
+        """On a PC where Windows limits the strength, offering only the full
+        (too strong) look again would never be taken: the retry searches."""
+        offsets = {D1: {"shadow_boost": 60.0}}
+        g, e = self._refused_then_stopped(40, offsets)
+        for _ in range(3):
+            self.clock.now += self.engine_mod._RETRY_S
+            e.set_auto_offsets(offsets, generation=e.auto_generation)
+        self.assertTrue(e.status.gamma_ok, e.status.summary())
+        self.assertTrue(e.status.gamma_limited)
+        self.assertEqual(_deviation(g.get_ramp(D1)), 40)
+        self.assertEqual(g.bad, [])
+
+    def test_retry_back_to_the_preset(self):
+        """The fade ended at the preset while Windows refused: the preset
+        itself is put back."""
+        g, e = self._refused_then_stopped(None, {})
+        self.clock.now += self.engine_mod._RETRY_S
+        e.set_auto_offsets({}, generation=e.auto_generation)
+        self.assertEqual(g.get_ramp(D1), _expected_full(e, D1))
+        self.assertTrue(e.status.gamma_ok)
+
+    def test_still_refusing_costs_little(self):
+        """While Windows keeps refusing, a stopped fade (the fader calls ten
+        times a second at rest) only searches every _RETRY_S."""
+        offsets = {D1: {"shadow_boost": 20.0}}
+        g, e = self._refused_then_stopped(None, offsets)
+        g.limit = -1
+        n = len(g.log)
+        for _ in range(100):               # ten seconds at rest
+            self.clock.now += 0.1
+            e.set_auto_offsets(offsets, generation=e.auto_generation)
+        searches = 10 / self.engine_mod._RETRY_S
+        self.assertLessEqual(len(g.log) - n, searches * 13)
+        self.assertFalse(e.status.gamma_ok)
+        g.limit = None
+        self.clock.now += self.engine_mod._RETRY_S
+        e.set_auto_offsets(offsets, generation=e.auto_generation)
+        self.assertTrue(e.status.gamma_ok)
+
+    def test_old_run_and_off_never_retry(self):
+        offsets = {D1: {"shadow_boost": 20.0}}
+        g, e = self._refused_then_stopped(None, offsets)
+        old = e.auto_generation
+        e.auto_generation += 1             # that run has been stopped
+        self.clock.now += 5
+        n = len(g.log)
+        e.set_auto_offsets(offsets, generation=old)
+        self.assertEqual(len(g.log), n)
+        e.set_enabled(False)
+        self.assertFalse(e.retry_pending())
+        e.set_auto_offsets(offsets)
+        self.assertEqual(g.get_ramp(D1), g.originals[D1])
+
+    def test_refused_full_apply_is_retried_by_fading_updates(self):
+        """A preset change Windows refused while auto levels runs is offered
+        again by the next updates too."""
+        offsets = {D1: {"shadow_boost": 20.0}}
+        g, e = _engine(None, Settings(shadow_boost=30), displays=[D1])
+        e.set_auto_offsets(offsets, generation=e.auto_generation)
+        g.limit = -1
+        e.set_settings(Settings(shadow_boost=40))
+        self.assertFalse(e.status.gamma_ok)
+        g.limit = None
+        self.clock.now += self.engine_mod._RETRY_S
+        e.set_auto_offsets(offsets, generation=e.auto_generation)
+        self.assertEqual(g.get_ramp(D1), _expected_full(e, D1))
+        self.assertTrue(e.status.gamma_ok)
+
+
 class ReturnToRestTest(unittest.TestCase):
     """A fade coming back to rest (or auto levels turned off) shows exactly
     the preset's own look in one step, with no flash of weaker versions on a
