@@ -301,8 +301,10 @@ class Fader:
             return
         # Each run gets its own stop signal, so a thread from an earlier run
         # that is still finishing can never be brought back to life.
+        # The run also keeps the apply() it started with, so a thread that
+        # is still finishing reports through its own (outdated) callback.
         stop = self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, args=(stop,),
+        self._thread = threading.Thread(target=self._run, args=(stop, self.apply),
                                         name="catvision-auto-fader", daemon=True)
         self._thread.start()
 
@@ -322,7 +324,8 @@ class Fader:
         return all(abs(c.want - c.offset) <= 0.001 and abs(c.velocity) < 1e-3
                    for c in list(self.controllers.values()))
 
-    def tick(self, dt: float, motion_dt: float | None = None, force: bool = False) -> bool:
+    def tick(self, dt: float, motion_dt: float | None = None, force: bool = False,
+             apply: Callable[[dict[str, float]], None] | None = None) -> bool:
         """Move every display one step.  apply() is called only when some
         position moved noticeably (or force), and always once more when a
         display comes to rest, so its exact final value is applied.  Returns
@@ -345,11 +348,12 @@ class Fader:
                     changed = True
                     break
         if changed:
-            self.apply(positions)
+            (apply or self.apply)(positions)
             self._applied = positions
         return changed
 
-    def _run(self, stop: threading.Event) -> None:
+    def _run(self, stop: threading.Event,
+             apply: Callable[[dict[str, float]], None] | None = None) -> None:
         last = time.perf_counter()
         idle = False
         self._applied = {}
@@ -361,7 +365,7 @@ class Fader:
                 # so a fade starts exactly as it would have anyway.  At rest it
                 # still refreshes apply() a few times a second (cheap, and a
                 # changed preset gets shared out again).
-                self.tick(dt, self.interval if idle else None, force=idle)
+                self.tick(dt, self.interval if idle else None, force=idle, apply=apply)
                 idle = self.settled()
             except Exception as exc:  # keep fading; the window shows nothing breaks
                 self.last_error = repr(exc)

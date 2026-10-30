@@ -231,7 +231,6 @@ class CatVisionApp:
         self._auto_seq_at = 0.0     # when a new measurement last arrived
         self._auto_front_at = 0.0   # when the window in front was last checked
         self._auto_winding_down = False
-        self._auto_gen = 0
         self._auto_job = None
         self._auto_fader = autolevels.Fader(self._auto_ctrl, self._fader_apply)
         self._auto_shown: dict = {}
@@ -552,7 +551,10 @@ class CatVisionApp:
                 if did not in rects:
                     del self._auto_ctrl[did]
             if not self._auto_fader.running:
-                self._auto_gen = self.engine.auto_generation   # this run's updates count
+                # This run's updates carry its own generation; once auto
+                # levels stops, anything still in flight from it is dropped.
+                gen = self.engine.auto_generation
+                self._auto_fader.apply = lambda pos, gen=gen: self._fader_apply(pos, gen)
             self._auto_fader.start()
             if self._auto_job is None and not self._closed:
                 self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
@@ -649,7 +651,7 @@ class CatVisionApp:
             self._render_auto_info(shown)
         self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
 
-    def _fader_apply(self, positions: dict[str, float]) -> None:
+    def _fader_apply(self, positions: dict[str, float], generation: int | None = None) -> None:
         """Runs on the fader thread: share each display's offset between
         Shadow boost and Exposure and pass it to the engine (which is
         thread-safe) only when it actually changed."""
@@ -664,7 +666,7 @@ class CatVisionApp:
             if amounts or did in self.engine.auto_offsets:
                 offsets[did] = amounts
         if offsets != self.engine.auto_offsets:
-            self.engine.set_auto_offsets(offsets, generation=self._auto_gen)
+            self.engine.set_auto_offsets(offsets, generation=generation)
 
     def _keep_auto_look(self, quiet: bool = False) -> str:
         """Make auto levels aim for how the game looks right now."""

@@ -138,3 +138,17 @@ class FaderLifecycleTests(unittest.TestCase):
             time.sleep(0.01)
         f.stop()
         self.assertEqual(f.last_error, "")
+
+
+class FaderRunCallbackTests(unittest.TestCase):
+    def test_a_run_keeps_the_callback_it_started_with(self):
+        first, second = [], []
+        ctrls = {"a": Controller(want=20.0, strength=30.0)}
+        f = Fader(ctrls, first.append)
+        f.tick(1 / 60, apply=first.append)
+        f.apply = second.append            # a later run would bring its own callback
+        f.tick(1 / 60, apply=first.append)
+        self.assertEqual(len(first), 2)    # this run kept reporting through its own
+        self.assertEqual(second, [])
+        f.tick(1 / 60)                     # without one, the current callback is used
+        self.assertEqual(len(second), 1)
