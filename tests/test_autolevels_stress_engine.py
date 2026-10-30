@@ -555,9 +555,6 @@ class AutolevelsConstantsSanity(unittest.TestCase):
                 self.assertLessEqual(base[k] + v, hi + 1e-9)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 def _shown_after_each(g, e, did, values, key="shadow_boost"):
     """Send each offset as a fading update; the deviation on screen and the
@@ -700,3 +697,54 @@ class RefusingDisplayBudgetTest(unittest.TestCase):
                 self.assertLessEqual(max(calls), 3)
                 self.assertLessEqual(sum(calls) / len(calls), 2.2)
                 self.assertEqual(g.bad, [])
+
+
+class ReturnToRestTest(unittest.TestCase):
+    """A fade coming back to rest (or auto levels turned off) shows exactly
+    the preset's own look in one step, with no flash of weaker versions on a
+    PC where Windows limits the strength."""
+
+    def _faded(self, limit):
+        g0, _e0 = _engine(limit, Settings(shadow_boost=70), displays=[D1])
+        preset = g0.get_ramp(D1)
+        g, e = _engine(limit, Settings(shadow_boost=70), displays=[D1])
+        for i in range(1, 21):
+            e.set_auto_offsets({D1: {"shadow_boost": float(i)}}, generation=e.auto_generation)
+        return g, e, preset
+
+    def _check_last_update(self, g, e, preset, n):
+        last = g.log[n:]
+        self.assertLessEqual(len(last), 2, last)
+        self.assertLessEqual(sum(1 for _d, ok in last if ok), 1, last)
+        self.assertEqual(g.get_ramp(D1), preset)
+        self.assertFalse(e.check_and_reapply())
+        self.assertEqual(g.bad, [])
+
+    def test_fade_back_to_rest_is_one_step_and_exact(self):
+        for limit in (40, 60, 10, None):
+            with self.subTest(limit=limit):
+                g, e, preset = self._faded(limit)
+                n = len(g.log)
+                e.set_auto_offsets({D1: {}}, generation=e.auto_generation)
+                self._check_last_update(g, e, preset, n)
+
+    def test_turning_auto_levels_off_is_one_step_and_exact(self):
+        for limit in (40, 60, 10, None):
+            with self.subTest(limit=limit):
+                g, e, preset = self._faded(limit)
+                n = len(g.log)
+                e.retire_auto_offsets()
+                self._check_last_update(g, e, preset, n)
+
+    def test_empty_and_all_zero_adjustments_are_the_same(self):
+        g, e, _preset = self._faded(40)
+        e.set_auto_offsets({D1: {}}, generation=e.auto_generation)
+        n = len(g.log)
+        e.set_auto_offsets({D1: {"shadow_boost": 0.0}}, generation=e.auto_generation)
+        e.set_auto_offsets({D1: {"shadow_boost": 0.0, "exposure": 0.0}},
+                           generation=e.auto_generation)
+        self.assertEqual(g.log[n:], [])          # same picture: nothing redone
+
+
+if __name__ == "__main__":
+    unittest.main()
