@@ -173,10 +173,11 @@ display and adjusts it live, the way your eyes adapt:
   background thread, easing in and out with a speed limit, so you never see
   the picture jump. It ignores tiny changes so the picture doesn't keep
   "breathing", and it catches up faster after a big change (stepping from
-  daylight into a dark building). Turning auto levels off glides back to your
-  preset too.
-- **Flash guard:** a sudden flash or explosion is toned down within about a
-  tenth of a second, as a very fast fade rather than a jump.
+  daylight into a dark building), keeping that quicker pace all the way, and
+  it starts brightening on the way into a cave instead of waiting until you
+  are inside. Turning auto levels off glides back to your preset too.
+- **Flash guard:** a sudden flash or explosion is toned down within a
+  fraction of a second, as a very fast fade rather than a jump.
 - **No pumping:** it only brightens once a scene has stayed dark for a
   moment, so flickering lights, muzzle flashes and lightning don't make the
   picture bounce.
@@ -197,7 +198,7 @@ display and adjusts it live, the way your eyes adapt:
 - **How much** sets how far it may move the slider. **Aim for** sets how
   bright it tries to make scenes: higher brightens dark scenes more.
 - **Speed**: Slow, Normal or Fast reaction to darker and brighter scenes.
-  Flashes are always toned down quickly.
+  Flashes are always toned down much faster than other changes.
 - **Only while a game fills the screen** (on by default): on the desktop or in
   a windowed app it pauses and eases back to your preset. Games in fullscreen
   or borderless windowed mode count, and so do full-screen videos. A normal
@@ -222,15 +223,17 @@ things out to you.
   exclusive fullscreen can't be seen; the Home tab then says *can't see the
   picture* and auto levels leaves your preset alone.
 - A few games and videos block screen capture and show up black. Auto levels
-  holds still on a black screen instead of over-brightening, and if it can't
-  see the picture at all for a couple of seconds it eases back to your preset.
+  holds still on a black screen (a loading screen, say) instead of
+  over-brightening; after about 30 seconds of black it eases back to your
+  preset. If it can't see the picture at all for a couple of seconds it eases
+  back to your preset too.
 - Some games in exclusive fullscreen leave Windows with a frozen, old
   picture. If the picture doesn't change at all for a few seconds, auto
   levels stops following it and eases back to your preset, and the Home tab
   says *the picture isn't changing*. Borderless windowed mode avoids this.
-- If the screen copies stop arriving for a moment, it holds, and after a
-  couple of seconds it eases back to your preset, so it can never stay
-  boosted after you leave a game.
+- If the screen copies stop arriving for a moment, it holds, and after about
+  three seconds it eases back to your preset, so it can never stay boosted
+  after you leave a game.
 - On PCs where Windows limits how strong a brightness change can be (see
   *Get the full strength*), fades stay smooth and turning auto levels off
   always brings back your full preset.

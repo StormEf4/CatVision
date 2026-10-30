@@ -176,7 +176,18 @@ _SUGGESTED_KEYS = {
 
 # Versions 1.1-1.3 came with exactly this set already applied; used only to
 # recognise (and clear) those untouched old defaults when upgrading.
-LEGACY_DEFAULT_HOTKEYS = dict(_SUGGESTED_KEYS, **{
+# Spelled out (not built from _SUGGESTED_KEYS) so actions added later, such as
+# the auto levels ones, never stop an untouched 1.1-1.3 set from matching.
+LEGACY_DEFAULT_HOTKEYS = dict({
+    "toggle": "Ctrl+Alt+V",
+    "off": "Ctrl+Alt+0",
+    "next": "Ctrl+Alt+Page Down",
+    "prev": "Ctrl+Alt+Page Up",
+    "boost_up": "Ctrl+Alt+=",
+    "boost_down": "Ctrl+Alt+-",
+    "filter_next": "Ctrl+Alt+F",
+    "show_window": "Ctrl+Alt+C",
+}, **{
     f"preset:{name}": f"Ctrl+Alt+{n}" for n, name in enumerate([
         "Gentle Boost", "Dark Areas", "Pitch Black", "Night Vision", "Horror / Flashlight",
         "Fog & Haze Cutter", "Mixed Light", "High-Contrast Mono", "Warm Low-Light",

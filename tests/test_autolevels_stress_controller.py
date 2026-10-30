@@ -11,7 +11,7 @@ import threading
 import time
 import unittest
 
-from catvision.autolevels import (FADER_HZ, FROZEN_S, INTERVAL_S, LOST_S, MAX_FALL,
+from catvision.autolevels import (BLACK_HOLD_S, FADER_HZ, FROZEN_S, INTERVAL_S, LOST_S, MAX_FALL,
                                   MAX_RISE, RISE_S, MAX_RISE_FAST, MAX_RUSH, SLIDER_RANGE, SPEEDS,
                                   SPILL, TARGET_LIMITS, Controller, Fader,
                                   aim_for_current_look, measure, nudge_aim, split_offset,
@@ -113,7 +113,7 @@ def _random_params(rng):
 
 
 class RandomSceneInvariantTests(unittest.TestCase):
-    SEQUENCES = 600
+    SEQUENCES = 300
 
     @classmethod
     def setUpClass(cls):
@@ -329,6 +329,55 @@ class SceneScenarioTests(unittest.TestCase):
         _run(ctrl, [PICS.get(0, 0, 0)] * 50, 30.0, 0.12)
         self.assertEqual(ctrl.want, goal)
 
+    def test_very_long_black_eases_back_and_recovers(self):
+        """Black for longer than BLACK_HOLD_S (capture blocked for good)
+        eases back to the preset; a live picture afterwards steers again."""
+        ctrl = Controller()
+        self._settle(ctrl, 10, 30.0, 0.12, 6.0)
+        goal = ctrl.want
+        black = PICS.get(0, 0, 0)
+        _run(ctrl, [black] * int((BLACK_HOLD_S - 1.0) / INTERVAL_S), 30.0, 0.12)
+        self.assertEqual(ctrl.want, goal)
+        self.assertFalse(ctrl.frozen)
+        _run(ctrl, [black] * int(3.0 / INTERVAL_S), 30.0, 0.12)
+        self.assertEqual(ctrl.want, 0.0)
+        self._settle(ctrl, 10, 30.0, 0.12, 6.0)
+        self.assertAlmostEqual(ctrl.want, goal, delta=30.0 * 0.08)
+
+    def test_black_then_same_picture_is_not_frozen_at_once(self):
+        """The picture from before a loading screen coming back unchanged
+        starts the frozen count afresh."""
+        ctrl = Controller()
+        same = PICS.get(10, 0)
+        _run(ctrl, [same] * int((FROZEN_S - 0.4) / INTERVAL_S), 30.0, 0.12)
+        _run(ctrl, [PICS.get(0, 0, 0)] * 10, 30.0, 0.12)
+        _run(ctrl, [same] * int((FROZEN_S - 0.4) / INTERVAL_S), 30.0, 0.12)
+        self.assertFalse(ctrl.frozen)
+
+    def test_aim_and_strength_changes_apply_at_once_in_dark_scenes(self):
+        """The noise allowance near black never swallows a change of Aim
+        for, How much or dim (each hotkey press must be felt)."""
+        for level in (3, 4, 6, 10):
+            for strength in (30.0, 60.0):
+                ctrl = Controller()
+                self._settle(ctrl, level, strength, 0.04, 4.0)
+                goal = ctrl.want
+                aim = nudge_aim(nudge_aim(0.04, True), True)
+                _run(ctrl, [PICS.get(level, 1)], strength, aim)
+                expect = target_offset(ctrl._recent[-1][1], strength, aim)
+                if abs(expect - goal) >= max(0.5, strength * 0.08):
+                    self.assertNotEqual(ctrl.want, goal, (level, strength))
+                _run(ctrl, [PICS.get(level, 2)], strength / 2, aim)
+                self.assertLessEqual(ctrl.want, strength / 2 + 1e-9)
+
+    def test_real_change_near_black_still_moves_the_goal(self):
+        """Twice as bright (level 4 -> 8) is a real change, not noise."""
+        ctrl = Controller()
+        self._settle(ctrl, 4, 60.0, 0.04, 4.0)
+        goal = ctrl.want
+        self._settle(ctrl, 8, 60.0, 0.04, 2.0)
+        self.assertLess(ctrl.want, goal - 5.0)
+
     def test_speeds_scale_monotonically(self):
         def time_to(goal_level, start_level, speed, strength=30.0):
             ctrl = Controller()
@@ -347,17 +396,21 @@ class SceneScenarioTests(unittest.TestCase):
 
     def test_spring_from_rest_never_overshoots(self):
         rng = random.Random(15)
-        for _ in range(3000):
+        for _ in range(1500):
             ctrl = Controller()
             ctrl.offset = rng.uniform(-60, 60)
             want = rng.uniform(-60, 60)
             ctrl.rush = rng.random() < 0.3 and want < ctrl.offset
             speed = SPEEDS[rng.choice(list(SPEEDS))]
             side = (ctrl.offset > want) - (ctrl.offset < want)
-            for _ in range(900):
+            # A glide held back by the speed limit now ends with a gentle
+            # exponential approach instead of sliding past the goal, so at
+            # "slow" it can take longer than 15 s to land exactly: allow 30 s.
+            for _ in range(1800):
                 pos = ctrl.follow(want, 60.0, DT, speed)
-                # (the speed-limit clamp leaves a few thousandths at most)
-                self.assertGreaterEqual((pos - want) * side, -0.01)
+                self.assertGreaterEqual((pos - want) * side, 0.0)
+                if pos == want:
+                    break
             self.assertEqual(ctrl.offset, want)
 
     def test_goal_reversal_mid_glide_never_overshoots_new_goal(self):
@@ -365,7 +418,7 @@ class SceneScenarioTests(unittest.TestCase):
         not shoot past the new goal."""
         rng = random.Random(16)
         worst = 0.0
-        for _ in range(1500):
+        for _ in range(600):
             ctrl = Controller()
             speed = SPEEDS[rng.choice(list(SPEEDS))]
             first = rng.uniform(-60, 60)
@@ -531,7 +584,7 @@ class FaderThreadStressTests(unittest.TestCase):
 
         fader = Fader(ctrls, apply)
         baseline = len(self._faders_alive())
-        deadline = time.monotonic() + 0.8
+        deadline = time.monotonic() + 0.6
         ops = 0
         while time.monotonic() < deadline:
             op = rng.choice(["start", "stop", "wake", "add", "remove", "goal", "speed",

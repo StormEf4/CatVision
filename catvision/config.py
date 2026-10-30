@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .autolevels import SPEEDS, STRENGTH_LIMITS, TARGET_LIMITS, clean_title
 from .curves import Settings
 from .filters import CustomFilter, clean_name
 from .hotkeys import LEGACY_DEFAULT_HOTKEYS, default_hotkeys, normalize_combo
@@ -53,16 +55,60 @@ class Options:
         o = cls()
         if isinstance(data, dict):
             for key, default in asdict(o).items():
-                if key in data and isinstance(data[key], type(default)):
-                    setattr(o, key, data[key])
+                if key not in data:
+                    continue
+                value = data[key]
+                if isinstance(default, float) and _is_number(value):
+                    value = float(value)   # a hand-edited "auto_strength": 40
+                if isinstance(value, type(default)):
+                    setattr(o, key, value)
             o.displays = [d for d in o.displays if isinstance(d, str)][:16]
-            o.auto_game_looks = {str(k)[:60]: float(v) for k, v in o.auto_game_looks.items()
-                                 if isinstance(v, (int, float))}
+            o._clean_auto()
             # version 1-2 stored a single "monitor" ("all" or an id)
             old = data.get("monitor")
             if "displays" not in data and isinstance(old, str) and old != "all":
                 o.displays = [old]
         return o
+
+    def _clean_auto(self) -> None:
+        """Auto levels (beta) values from a hand-edited or old config are fed
+        straight to the controller, so bring them back into range here."""
+        defaults = Options()
+        self.auto_strength = _clamp(self.auto_strength, STRENGTH_LIMITS, defaults.auto_strength)
+        self.auto_target = _clamp(self.auto_target, TARGET_LIMITS, defaults.auto_target)
+        if self.auto_speed not in SPEEDS:
+            self.auto_speed = defaults.auto_speed
+        looks: dict[str, float] = {}
+        for title, aim in self.auto_game_looks.items():
+            # Same title as window_in_front() reports; "" means no game.
+            title = clean_title(str(title))
+            if title and _is_number(aim) and math.isfinite(aim):
+                looks.pop(title, None)
+                looks[title] = _clamp(aim, TARGET_LIMITS, defaults.auto_target)
+        # Keep the most recent ones (dicts keep the order they were saved in).
+        self.auto_game_looks = dict(list(looks.items())[-MAX_GAME_LOOKS:])
+
+
+MAX_GAME_LOOKS = 200
+
+
+def _is_number(value) -> bool:
+    """A real number that fits in a float (not True/False, and not a
+    hand-typed integer so long that converting it would overflow)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        float(value)
+    except OverflowError:
+        return False
+    return True
+
+
+def _clamp(value, limits: tuple[float, float], default: float) -> float:
+    if not _is_number(value) or not math.isfinite(value):
+        return default
+    lo, hi = limits
+    return min(hi, max(lo, float(value)))
 
 
 DEFAULT_PRESET = "Dark Areas"
@@ -168,7 +214,7 @@ def load(path: Path | None = None) -> Config:
     try:
         with open(path, encoding="utf-8") as f:
             return Config.from_json(json.load(f))
-    except (OSError, ValueError):
+    except (OSError, ValueError, ArithmeticError):
         return Config()
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import queue
 import re
@@ -74,6 +75,21 @@ BOOST_STEP = 10
 KEEP_APPLIED_MS = 2000
 AUTO_FRONT_S = 0.25   # re-check which window is in front this often, capture or not
 AUTO_STALE_S = 1.0    # no new picture for this long counts as "can't see it"
+
+
+def auto_number(value, lo: float, hi: float, default):
+    """Auto levels (beta): a setting read from config.json as a number inside
+    lo..hi.  NaN, infinity, True/False or text give the default instead, so a
+    hand-edited file can never push the controller past its own limits."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    try:
+        value = float(value)
+    except OverflowError:       # a hand-typed integer far too long for a float
+        return default
+    if not math.isfinite(value):
+        return default
+    return min(hi, max(lo, value))
 
 
 def auto_tick_plan(now: float, fresh: bool, last_front: float,
@@ -231,6 +247,7 @@ class CatVisionApp:
         self._auto_seq_at = 0.0     # when a new measurement last arrived
         self._auto_front_at = 0.0   # when the window in front was last checked
         self._auto_winding_down = False
+        self._auto_gamma_state = (True, False)
         self._auto_job = None
         self._auto_fader = autolevels.Fader(self._auto_ctrl, self._fader_apply)
         self._auto_shown: dict = {}
@@ -437,12 +454,10 @@ class CatVisionApp:
                      "sent. Works best with games in borderless windowed mode.")
         sl = ttk.Frame(box)
         sl.grid(row=2, column=0, sticky="ew", pady=(2, 0))
+        self._clean_auto_options()
         self.auto_vars = {
-            "auto_strength": tk.DoubleVar(value=min(max(o.auto_strength,
-                                                        autolevels.STRENGTH_LIMITS[0]),
-                                                    autolevels.STRENGTH_LIMITS[1])),
-            "auto_target": tk.DoubleVar(value=min(max(o.auto_target, autolevels.TARGET_LIMITS[0]),
-                                                  autolevels.TARGET_LIMITS[1])),
+            "auto_strength": tk.DoubleVar(value=o.auto_strength),
+            "auto_target": tk.DoubleVar(value=self._auto_aim()),
         }
         self.auto_rows = [
             SliderRow(sl, 0, self.auto_vars["auto_strength"], "How much",
@@ -459,7 +474,7 @@ class CatVisionApp:
         speed_label = ttk.Label(speed_row, text="Speed")
         speed_label.pack(side="left", padx=(0, 10))
         Tooltip(speed_label, "Beta. How quickly it reacts when a scene gets darker or brighter. "
-                             "Flashes are always toned down quickly.")
+                             "Flashes are always toned down much faster than other changes.")
         self.auto_speed_var = tk.StringVar(value=o.auto_speed if o.auto_speed in
                                            autolevels.SPEEDS else "normal")
         controls = [chk, self.auto_keep_btn]
@@ -476,7 +491,8 @@ class CatVisionApp:
             ("auto_game_only", "Only while a game fills the screen",
              "Beta. Pauses on the desktop and in windowed apps and goes back to your preset. "
              "Games in fullscreen or borderless windowed mode count, and so do full-screen "
-             "videos. Only the position and title of the window in front are checked."),
+             "videos. Only the position, style and title of the window in front are checked, "
+             "nothing inside it. A normal maximized window with a title bar doesn't count."),
             ("auto_dim", "Also tone down bright scenes",
              "Beta. Lowers the boost in bright scenes and flashes so you're never blinded. "
              "Untick it to only ever brighten."),
@@ -518,10 +534,39 @@ class CatVisionApp:
             o.auto_target = aim
         self._schedule_save()
 
-    def _auto_aim(self) -> float:
-        """Aim for: the game's own look if it has one, otherwise the default."""
+    def _clean_auto_options(self) -> None:
+        """Make the saved auto levels settings valid (a hand-edited or damaged
+        config.json), so the sliders, the controller and the next save agree."""
         o = self.cfg.options
-        return o.auto_game_looks.get(self._auto_game, o.auto_target)
+        d = config_mod.Options()
+        o.auto_strength = auto_number(o.auto_strength, *autolevels.STRENGTH_LIMITS,
+                                      d.auto_strength)
+        o.auto_target = auto_number(o.auto_target, *autolevels.TARGET_LIMITS, d.auto_target)
+        if o.auto_speed not in autolevels.SPEEDS:
+            o.auto_speed = d.auto_speed
+        looks = {}
+        if isinstance(o.auto_game_looks, dict):
+            for title, aim in o.auto_game_looks.items():
+                title = autolevels.clean_title(str(title))
+                aim = auto_number(aim, *autolevels.TARGET_LIMITS, None)
+                if title and aim is not None:   # "" means no game: never a look
+                    looks[title] = aim
+        o.auto_game_looks = looks
+
+    def _auto_strength(self) -> float:
+        """How much, always inside the slider's limits (options may have been
+        changed elsewhere since the window was built)."""
+        o = self.cfg.options
+        return auto_number(o.auto_strength, *autolevels.STRENGTH_LIMITS,
+                           config_mod.Options().auto_strength)
+
+    def _auto_aim(self) -> float:
+        """Aim for: the game's own look if it has one, otherwise the default.
+        Always inside the slider's limits."""
+        o = self.cfg.options
+        lo, hi = autolevels.TARGET_LIMITS
+        default = auto_number(o.auto_target, lo, hi, config_mod.Options().auto_target)
+        return auto_number(o.auto_game_looks.get(self._auto_game), lo, hi, default)
 
     def _set_auto_game(self, title: str) -> None:
         """A different game (or none) is in front: show its Aim for."""
@@ -625,6 +670,7 @@ class CatVisionApp:
             self.auto_watch.watch({d: rects[d] for d in self._auto_watched})
         shown: dict[str, tuple[str, object]] = {}
         goals = {did: c.want for did, c in self._auto_ctrl.items()}
+        strength, aim = self._auto_strength(), self._auto_aim()
         for did in rects:
             ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
             if did not in self._auto_watched:
@@ -633,11 +679,11 @@ class CatVisionApp:
             elif stale and did in latest:
                 # The capture has stalled: let the controller's lost-picture
                 # logic hold, then ease back to the preset.
-                ctrl.observe(None, o.auto_strength, self._auto_aim(), o.auto_dim)
-                shown[did] = ("watching", latest[did])
+                ctrl.observe(None, strength, aim, o.auto_dim)
+                shown[did] = ("stalled", latest[did])
             elif did in latest:
                 if fresh:
-                    ctrl.observe(latest[did], o.auto_strength, self._auto_aim(), o.auto_dim)
+                    ctrl.observe(latest[did], strength, aim, o.auto_dim)
                 shown[did] = ("watching", latest[did])
             else:
                 shown[did] = ("starting", None)
@@ -646,7 +692,17 @@ class CatVisionApp:
                 del self._auto_ctrl[did]
         if any(c.want != goals.get(did) for did, c in self._auto_ctrl.items()):
             self._auto_fader.wake()   # a new goal (a flash, say): start moving now
-        if fresh or shown.keys() != self._auto_shown.keys():
+        # Fades change whether Windows is holding the strength back: keep the
+        # warning icon in step with what the displays really show.
+        gamma_state = (self.engine.status.gamma_ok, self.engine.status.gamma_limited)
+        if gamma_state != self._auto_gamma_state:
+            self._auto_gamma_state = gamma_state
+            self.refresh_notices()
+        # Redraw on new pictures and state changes, and keep redrawing while
+        # a display eases back, so the readout never shows a stale boost.
+        easing = any(state in ("waiting", "stalled") and abs(self._auto_ctrl[did].offset) > 0.05
+                     for did, (state, _m) in shown.items() if did in self._auto_ctrl)
+        if fresh or stale or easing or shown != self._auto_shown:
             self._auto_shown = shown
             self._render_auto_info(shown)
         self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
@@ -671,14 +727,35 @@ class CatVisionApp:
     def _keep_auto_look(self, quiet: bool = False) -> str:
         """Make auto levels aim for how the game looks right now."""
         o = self.cfg.options
-        msg = "Auto levels (beta): turn it on and start a game first."
+        if not o.auto_levels:
+            msg = "Auto levels (beta) is off: turn it on first."
+        elif not self.engine.enabled:
+            msg = "Auto levels (beta): turn CatVision on first."
+        else:
+            msg = "Auto levels (beta): no game picture yet, so there's no look to keep."
         if self._auto_active():
-            for did, (state, m) in self._auto_shown.items():
+            # Only a picture that is live right now is "this look": not one
+            # that stopped arriving (the display has eased back) or one that
+            # isn't changing (paused, or exclusive fullscreen).
+            shown = self._auto_shown
+            if time.monotonic() - self._auto_seq_at >= AUTO_STALE_S:
+                msg = ("Auto levels (beta): can't see the picture right now, "
+                       "so there's no look to keep.")
+                shown = {}
+            for did, (state, m) in shown.items():
                 ctrl = self._auto_ctrl.get(did)
-                if state != "watching" or m is None or m.black or ctrl is None:
+                if state != "watching" or m is None or ctrl is None:
+                    continue
+                if m.black:
+                    msg = ("Auto levels (beta): the screen is black, "
+                           "so there's no look to keep.")
+                    continue
+                if ctrl.frozen:
+                    msg = ("Auto levels (beta): the picture isn't changing, "
+                           "so there's no look to keep.")
                     continue
                 lo, hi = autolevels.TARGET_LIMITS
-                aim = autolevels.aim_for_current_look(m.key, ctrl.offset, o.auto_strength)
+                aim = autolevels.aim_for_current_look(m.key, ctrl.offset, self._auto_strength())
                 aim = round(min(hi, max(lo, aim)), 3)
                 if self._auto_game:     # remembered for this game only
                     o.auto_game_looks[self._auto_game] = aim
@@ -717,7 +794,7 @@ class CatVisionApp:
     def _forget_game_look(self) -> None:
         o = self.cfg.options
         if o.auto_game_looks.pop(self._auto_game, None) is not None:
-            self.auto_vars["auto_target"].set(o.auto_target)
+            self.auto_vars["auto_target"].set(self._auto_aim())
             for r in self.auto_rows:
                 r.refresh()
             self._schedule_save()
@@ -765,9 +842,11 @@ class CatVisionApp:
                     eff = self.engine.settings_for(did)
                     change = ", ".join(f"{SETTING_NAMES[k]} {getattr(eff, k):.0f}"
                                        for k in [key] + spilled)
+                back = "" if abs(now - base) < 0.5 else f"  \u00b7  easing back to {base:.0f}"
                 if state == "waiting":
-                    back = "" if abs(now - base) < 0.5 else f"  \u00b7  easing back to {base:.0f}"
                     lines.append(f"{name}: waiting for a full-screen game{back}")
+                elif state == "stalled":
+                    lines.append(f"{name}: can't see the picture right now{back}")
                 elif state == "starting":
                     lines.append(f"{name}: starting...")
                 elif m is None:
@@ -776,7 +855,12 @@ class CatVisionApp:
                     lines.append(f"{name}: the picture isn't changing (paused, or exclusive "
                                  f"fullscreen?)  \u00b7  back to your preset")
                 else:
-                    held = "  (black screen: holding)" if m.black else ""
+                    held = ""
+                    if m.black:
+                        ctrl = self._auto_ctrl.get(did)
+                        held = ("  (black for a while: back to your preset)"
+                                if ctrl is not None and ctrl.black_too_long
+                                else "  (black screen: holding)")
                     lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  {change}{held}")
             text = "\n".join(lines)
         self.auto_info.configure(text=text)
@@ -1618,7 +1702,22 @@ class CatVisionApp:
         self.auto_watch.stop()
         self._auto_fader.stop()
         self.engine.shutdown()
+        self._cancel_after_jobs()
         self.root.destroy()
+
+    def _cancel_after_jobs(self) -> None:
+        """Drop every pending Tk timer (auto levels tick, save, polling...)
+        so nothing runs against the destroyed window."""
+        self._auto_job = self._save_job = self._apply_job = None
+        try:
+            jobs = self.root.tk.splitlist(self.root.tk.call("after", "info"))
+        except tk.TclError:
+            return
+        for job in jobs:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
 
 
 class _NoColor:

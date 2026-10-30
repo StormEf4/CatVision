@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import curves
-from .backends import GammaResult, Monitor, apply_ramp_with_fallback
+from .backends import GammaResult, Monitor, apply_ramp_with_fallback, shown_memory
 from .curves import Settings
 
 # How far (in 16-bit units) a ramp read back from the driver may differ from
@@ -68,7 +68,11 @@ class Engine:
         self._lock = threading.RLock()  # force-quit restores from the tray thread
         self._flag = (state_dir / "display_modified.flag") if state_dir else None
         self._applied: dict[str, list[list[int]]] = {}
-        self._fallback: dict = {}   # per display: the weaker ramp Windows last accepted
+        self._fallback: dict = {}   # per display: what fading updates last showed
+        # Per display: (ok, limited) of the last brightness table set, so the
+        # status follows what is on screen now (a fade that Windows held back
+        # must not leave "holding back" showing once it is back to normal).
+        self._gamma_state: dict[str, tuple[bool, bool]] = {}
         self.status = Status()
 
         unclean = self._flag is not None and self._flag.exists()
@@ -133,6 +137,7 @@ class Engine:
         tint, matrix = curves.plan_color(self.settings, self.custom_filters, self.custom_tints,
                                          all_displays=not per_display)
         self._mark_dirty(True)
+        self._gamma_state.clear()
         self._apply_gamma(self._targets(), tint, status)
 
         if curves.is_identity_matrix(matrix):
@@ -176,9 +181,9 @@ class Engine:
             tint, _matrix = curves.plan_color(self.settings, self.custom_filters,
                                               self.custom_tints,
                                               all_displays=self.all_displays_selected())
-            # Back to the bare preset everywhere: a normal full apply, so no
-            # weaker fallback from the fade lingers.
-            self._apply_gamma(changed, tint, self.status, fading=bool(self.auto_offsets))
+            # Displays with no adjustment left get the normal full apply, so
+            # they settle exactly where the preset alone would.
+            self._apply_gamma(changed, tint, self.status, fading=True)
 
     def settings_for(self, display_id: str) -> Settings:
         """The settings a display really gets (the preset plus auto levels)."""
@@ -189,28 +194,36 @@ class Engine:
                                          for k, v in amounts.items()}).clamped()
 
     def _apply_gamma(self, monitors, tint, status: Status, fading: bool = False) -> None:
-        """``fading``: a frequent auto-levels update.  It reuses the weaker
-        ramp Windows last accepted and remembers what it set instead of
-        reading every ramp back (the keep-applied check still compares)."""
+        """``fading``: a frequent auto-levels update.  Displays that carry an
+        adjustment reuse what Windows last accepted and remember what they
+        set instead of reading every ramp back (the keep-applied check still
+        compares); displays with none get the normal full apply."""
         if not fading:
             self._fallback.clear()   # a full apply starts from the full ramp again
         ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
         for m in monitors:
-            if fading and not self.auto_offsets.get(m.id):
-                self._fallback.pop(m.id, None)   # this display is back to its preset
+            adjusted = fading and any(self.auto_offsets.get(m.id, {}).values())
             which = tuple(sorted(self.auto_offsets.get(m.id, {}).items()))
             ramp = ramps.get(which)
             if ramp is None:
                 ramp = ramps[which] = curves.build_ramp(self.settings_for(m.id), tint)
             result: GammaResult = apply_ramp_with_fallback(
-                self.gamma, m.id, ramp, self._fallback if fading else None)
+                self.gamma, m.id, ramp, self._fallback if adjusted else None)
+            if not adjusted:
+                # Remember what is on screen so the next fading update
+                # starts from it (no dip when it is refused).
+                self._fallback.pop(m.id, None)
+                if result.ok:
+                    self._fallback[m.id] = shown_memory(result.applied or ramp)
             if result.ok:
-                if fading:
+                if adjusted:
                     self._applied[m.id] = result.applied or ramp
                 else:
                     self._applied[m.id] = self.gamma.get_ramp(m.id) or ramp
-            status.gamma_ok = status.gamma_ok and result.ok
-            status.gamma_limited = status.gamma_limited or result.limited
+            self._gamma_state[m.id] = (result.ok, result.limited)
+        states = [self._gamma_state[m.id] for m in self._targets() if m.id in self._gamma_state]
+        status.gamma_ok = all(ok for ok, _ in states)
+        status.gamma_limited = any(limited for _, limited in states)
 
     def check_and_reapply(self) -> bool:
         """Re-apply if a game, driver or Windows reset the gamma ramp.
@@ -268,6 +281,7 @@ class Engine:
             if m.id in self._applied:
                 self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())
         self._applied.clear()
+        self._gamma_state.clear()
         self._mark_dirty(False)
 
     def _mark_dirty(self, dirty: bool) -> None:

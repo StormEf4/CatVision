@@ -5,6 +5,7 @@ available, so a plain "python -m unittest" (the Windows CI run) is unaffected.
 The screen is never captured: a fake capture hands the watcher made-up
 pictures and the window in front is simulated.
 """
+import json
 import os
 import shutil
 import tempfile
@@ -77,10 +78,25 @@ if GUI:
 
 @unittest.skipUnless(GUI, _why)
 class AutoLevelsAppStress(unittest.TestCase):
+    # test name -> "options" written to config.json before the app starts
+    PRECONFIG = {
+        "test_corrupt_config_on_disk": {
+            "auto_levels": True, "auto_strength": 1000.0, "auto_target": 5.0,
+            "auto_speed": "warp", "auto_game_looks": {"Game A": 99.0, "Game B": -3.0},
+        },
+    }
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self._old_env = os.environ.get("CATVISION_CONFIG_DIR")
         os.environ["CATVISION_CONFIG_DIR"] = self.tmp
+        pre = self.PRECONFIG.get(self._testMethodName)
+        if pre is not None:
+            data = cm.Config().to_json()
+            data["options"].update(pre)
+            data["active_preset"] = "Pitch Black"
+            with open(os.path.join(self.tmp, "config.json"), "w", encoding="utf-8") as f:
+                json.dump(data, f)
         self.screen = FakeScreen()
         self.front = {"title": "Game A", "displays": {D1}}
         self._real_watcher = autolevels.Watcher
@@ -104,6 +120,10 @@ class AutoLevelsAppStress(unittest.TestCase):
             self.errors.append(f"{exc_type.__name__}: {exc}")
             app_err(exc_type, exc, tb)
         self.root.report_callback_exception = on_error
+        o = self.app.cfg.options
+        # What the app made of config.json, before setUp changes anything.
+        self.loaded = {"auto_speed": o.auto_speed, "auto_strength": o.auto_strength,
+                       "auto_target": o.auto_target, "auto_game_looks": dict(o.auto_game_looks)}
         self.app.cfg.options.hotkey_popup = False
         self.app.auto_speed_var.set("fast")
         self.app._on_auto_option()
@@ -390,7 +410,8 @@ class AutoLevelsAppStress(unittest.TestCase):
         self.pump(1.0)
         before = self.app.cfg.options.auto_target
         msg = self.app._keep_auto_look(quiet=True)
-        self.assertIn("start a game first", msg)
+        # Auto levels is on, there is just no game picture to take a look from.
+        self.assertIn("no game picture", msg)
         self.assertEqual(self.app.cfg.options.auto_target, before)
         self.assertEqual(self.app.cfg.options.auto_game_looks, {})
         self.assert_clean()
@@ -411,7 +432,7 @@ class AutoLevelsAppStress(unittest.TestCase):
         self.assertTrue(self.pump_until(lambda: "black screen" in self.info(), 4), self.info())
         before = self.app.cfg.options.auto_target
         msg = self.app._keep_auto_look(quiet=True)
-        self.assertIn("start a game first", msg)
+        self.assertIn("screen is black", msg)
         self.assertEqual(self.app.cfg.options.auto_game_looks, {})
         self.assertEqual(self.app.cfg.options.auto_target, before)
         self.assert_clean()
@@ -425,6 +446,7 @@ class AutoLevelsAppStress(unittest.TestCase):
         # A frozen (paused / exclusive fullscreen) picture is not "how the
         # game looks right now": it should not be remembered as the look.
         self.assertEqual(self.app.cfg.options.auto_game_looks, {}, msg)
+        self.assertIn("isn't changing", msg)
         self.assert_clean()
 
     def test_capture_returns_nothing(self):
@@ -483,6 +505,89 @@ class AutoLevelsAppStress(unittest.TestCase):
         self.app.handle_action("auto_levels")
         self.assert_at_preset()
         self.assert_clean()
+
+    def test_corrupt_config_on_disk(self):
+        # config.json damaged by hand: auto levels must stay inside its own
+        # limits (the sliders show the clamped value, so must the controller)
+        o = self.app.cfg.options
+        _slo, shi = autolevels.STRENGTH_LIMITS
+        lo, hi = autolevels.TARGET_LIMITS
+        self.assertTrue(o.auto_levels)
+        # The damaged config turned auto levels on but not CatVision itself:
+        # turn it on, or auto levels never runs and nothing here is tested.
+        self.app.handle_action("toggle")
+        self.assertTrue(self.engine.enabled)
+        # Every damaged value was brought back into range when it was loaded.
+        self.assertEqual(self.loaded, {"auto_speed": "normal", "auto_strength": shi,
+                                       "auto_target": hi,
+                                       "auto_game_looks": {"Game A": hi, "Game B": lo}})
+        for t, look in [("Game A", hi), ("Game B", lo), ("Game C", hi)]:
+            self.front["title"] = t
+            self.pump(1.5)
+            # Aim for shows the clamped look of the game in front (Game C has
+            # none, so it shows the normal aim, itself clamped to the top).
+            self.assertAlmostEqual(self.app.auto_vars["auto_target"].get(), look, places=6)
+            self.assert_offsets_sane()
+            for did, amounts in self.engine.auto_offsets.items():
+                for k, v in amounts.items():
+                    self.assertLessEqual(abs(v), shi + 0.01,
+                                         f"{t}: offset {v} beyond the How much limit")
+        self.app.handle_action("auto_levels")
+        self.assert_at_preset()
+        self.app._save()
+        self.assert_config_valid()
+        self.assert_clean()
+
+    def test_keep_look_while_capture_stalled(self):
+        self.start_fade()
+        self.screen.mode = "block"   # no new pictures: the shown one is stale
+        self.assertTrue(self.pump_until(lambda: not self.engine.auto_offsets.get(D1), 10))
+        msg = self.app._keep_auto_look(quiet=True)
+        # The last picture is more than a second old and the display has
+        # eased back: that is not "how the game looks right now".
+        self.assertEqual(self.app.cfg.options.auto_game_looks, {}, msg)
+        self.assertIn("can't see the picture", msg)
+        self.screen.release.set()
+        self.assert_clean()
+
+    def test_settings_changed_at_runtime_stay_in_range(self):
+        # Options changed behind the sliders' back (NaN, out of range, a
+        # bool) never reach the controller: it always gets the slider limits.
+        o = self.app.cfg.options
+        lo, hi = autolevels.TARGET_LIMITS
+        slo, shi = autolevels.STRENGTH_LIMITS
+        for strength, target, look in [(float("nan"), float("inf"), True),
+                                       (-5.0, -1.0, float("nan")), (1e9, 9.0, 99.0)]:
+            o.auto_strength, o.auto_target = strength, target
+            o.auto_game_looks = {"Game A": look}
+            s, a = self.app._auto_strength(), self.app._auto_aim()
+            self.assertTrue(slo <= s <= shi, (strength, s))
+            self.assertTrue(lo <= a <= hi, (target, look, a))
+        self.app._clean_auto_options()
+        self.assertTrue(lo <= o.auto_target <= hi)
+        self.assertEqual(o.auto_game_looks, {"Game A": hi})
+
+    def test_hotkey_actions_through_handle_action(self):
+        self.start_fade()
+        for a in ["auto_keep", "auto_brighter", "auto_darker", "auto_keep",
+                  "auto_levels", "auto_brighter", "auto_keep", "auto_levels"] * 2:
+            self.app.handle_action(a)
+            self.pump(0.05)
+            self.assertNotIn("Error", self.app.status.cget("text"))
+        self.app.set_auto_levels(False)
+        self.pump(0.1)
+        self.assert_at_preset()
+        self.app._save()
+        self.assert_config_valid()
+        self.assert_clean()
+
+    def test_quit_leaves_no_tk_timers(self):
+        # A late auto tick / save / poll after destroy would touch dead widgets.
+        self.start_fade()
+        self.app.handle_action("auto_brighter")   # also schedules a save
+        self.app.quit()
+        self.assertEqual(self.root.tk.splitlist(self.root.tk.call("after", "info")), ())
+        self.assertIsNone(self.app._auto_job)
 
     def test_quit_mid_fade(self):
         self.start_fade()

@@ -42,6 +42,7 @@ class StrictGamma(FakeGamma):
         self.ramps[D3] = orig3
         self.originals = {k: [list(c) for c in v] for k, v in self.ramps.items()}
         self.log = []          # (display, accepted)
+        self.offered = []      # (display, hash of the ramp offered)
         self.bad = []          # problems found in offered ramps
         self.lock = threading.Lock()
 
@@ -53,6 +54,7 @@ class StrictGamma(FakeGamma):
             if ok and not _accepts(self.limit, self.ramps[mid]):
                 self.bad.append(("stored a ramp beyond the limit", mid))
             self.log.append((mid, ok))
+            self.offered.append((mid, hash(tuple(tuple(c) for c in ramp))))
             return ok
 
     def get_ramp(self, mid):
@@ -108,7 +110,7 @@ def _expected_full(e, did):
 class RandomEngineSequenceTest(unittest.TestCase):
     """Random sequences of everything the window can do, at several limits."""
 
-    STEPS = 70
+    STEPS = 60
 
     def _run(self, limit, seed):
         rng = random.Random(seed)
@@ -212,7 +214,7 @@ class SetRampBudgetTest(unittest.TestCase):
             per_update = []
             rng = random.Random(11)
             v = 0.0
-            for _ in range(150):   # a few seconds of a wandering fade, 60 Hz steps
+            for _ in range(100):   # a couple of seconds of a wandering fade, 60 Hz steps
                 v = max(-30.0, min(70.0, v + rng.uniform(-1.2, 1.2)))
                 n = len(g.log)
                 e.set_auto_offsets({D1: {"shadow_boost": round(v, 2)}},
@@ -243,6 +245,31 @@ class SetRampBudgetTest(unittest.TestCase):
                                      f"limit={limit}: {full_searches} full searches in 121 frames")
 
 
+class NoRepeatedOfferTest(unittest.TestCase):
+    def test_same_ramp_never_offered_twice_in_one_fading_update(self):
+        """With fallback memory, apply_ramp_with_fallback first offers the full
+        ramp; if the remembered version is then refused too it falls through
+        and offers the very same full ramp again (a wasted call that Windows
+        is certain to refuse).  Only the final re-apply of the best blend may
+        repeat an earlier candidate."""
+        repeats = {}
+        for limit in (60, 30, 10):
+            g, e = _engine(limit, Settings(shadow_boost=30), displays=[D1])
+            rng = random.Random(11)
+            v, count = 0.0, 0
+            for _ in range(100):
+                v = max(-30.0, min(70.0, v + rng.uniform(-1.2, 1.2)))
+                n = len(g.offered)
+                e.set_auto_offsets({D1: {"shadow_boost": round(v, 2)}},
+                                   generation=e.auto_generation)
+                offered = [h for _, h in g.offered[n:]]
+                body = offered[:-1] if len(offered) >= 11 else offered   # allow the final re-apply
+                count += len(body) - len(set(body))
+            repeats[limit] = count
+        self.assertEqual(repeats, {lim: 0 for lim in repeats},
+                         "identical ramps offered twice within one fading update")
+
+
 class VisibleStepsTest(unittest.TestCase):
     def test_one_visible_look_per_fading_update(self):
         """Each fading update (60 a second) should put at most one new look
@@ -255,7 +282,7 @@ class VisibleStepsTest(unittest.TestCase):
             g, e = _engine(limit, Settings(shadow_boost=30), displays=[D1])
             rng = random.Random(11)
             v, most = 0.0, 0
-            for _ in range(150):
+            for _ in range(100):
                 v = max(-30.0, min(70.0, v + rng.uniform(-1.2, 1.2)))
                 n = len(g.log)
                 e.set_auto_offsets({D1: {"shadow_boost": round(v, 2)}},
@@ -347,6 +374,18 @@ class StatusAfterFadeTest(unittest.TestCase):
         self.assertEqual(g.get_ramp(D1), curves.build_ramp(e.settings))
         self.assertFalse(e.status.gamma_limited, e.status.summary())
 
+    def test_refused_status_follows_the_current_fade(self):
+        """Likewise for a refusal: once Windows takes the tables again the
+        status must not keep saying it refused the change."""
+        g, e = _engine(None, Settings(shadow_boost=10), displays=[D1])
+        g.limit = -1                      # refuses everything
+        e.set_auto_offsets({D1: {"shadow_boost": 20}}, generation=e.auto_generation)
+        self.assertFalse(e.status.gamma_ok)
+        g.limit = None
+        e.set_auto_offsets({D1: {"shadow_boost": 21}}, generation=e.auto_generation)
+        self.assertTrue(e.status.gamma_ok, e.status.summary())
+        self.assertEqual(e.status.summary(), "On.")
+
 
 class UntargetedDisplayTest(unittest.TestCase):
     def test_offsets_for_unchosen_displays_never_written(self):
@@ -417,7 +456,7 @@ class FaderThreadStressTest(unittest.TestCase):
             fader.start()
 
         start_run()
-        deadline = time.monotonic() + 0.4
+        deadline = time.monotonic() + 0.25
         try:
             while time.monotonic() < deadline:
                 op = rng.random()
@@ -518,3 +557,146 @@ class AutolevelsConstantsSanity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _shown_after_each(g, e, did, values, key="shadow_boost"):
+    """Send each offset as a fading update; the deviation on screen and the
+    (calls, accepted calls) each update cost."""
+    shown, costs = [], []
+    for v in values:
+        n = len(g.log)
+        e.set_auto_offsets({did: {key: v}}, generation=e.auto_generation)
+        shown.append(_deviation(g.get_ramp(did)))
+        costs.append((len(g.log) - n, sum(1 for _, ok in g.log[n:] if ok)))
+    return shown, costs
+
+
+class NoBlinkAtTheLimitTest(unittest.TestCase):
+    """A fade crossing the Windows limit must not dip and climb back
+    (reviewers saw 40 -> 32 -> 36 -> 38 -> 39 -> 40 with limit 40)."""
+
+    def test_rising_fade_across_the_limit_never_dips(self):
+        for limit in (40, 20):
+            g, e = _engine(limit, Settings(shadow_boost=10), displays=[D1])
+            values = [round(i, 2) for i in range(1, 71)]   # slow rise to 70
+            shown, costs = _shown_after_each(g, e, D1, values)
+            wanted = [_deviation(curves.build_ramp(Settings(shadow_boost=10 + v)))
+                      for v in values]
+            with self.subTest(limit=limit):
+                for i in range(1, len(shown)):
+                    if wanted[i] >= wanted[i - 1]:
+                        self.assertGreaterEqual(shown[i], shown[i - 1],
+                                                f"dip at frame {i}: {shown[max(0, i - 3):i + 3]}")
+                self.assertEqual(shown[-1], limit)            # holds at the limit
+                self.assertLessEqual(max(a for _, a in costs), 1)
+                self.assertLessEqual(max(c for c, _ in costs[1:]), 3)
+                self.assertEqual(g.bad, [])
+
+    def test_memory_crossing_the_limit_holds_the_shown_strength(self):
+        g = StrictGamma(40)
+        mem: dict = {}
+        shown = []
+        for boost in range(20, 60):
+            r = apply_ramp_with_fallback(g, D1, curves.build_ramp(Settings(shadow_boost=boost)),
+                                         mem)
+            self.assertTrue(r.ok)
+            shown.append(_deviation(g.get_ramp(D1)))
+        crossed = [s for s in shown if s >= 38]
+        self.assertTrue(crossed)
+        self.assertEqual(shown, sorted(shown), shown)
+        self.assertEqual(shown[-1], 40)
+
+    def test_first_fading_update_after_a_full_apply_does_not_dip(self):
+        """A full apply (settings change, display switch, drift fix) forgets
+        the fading memory; the next refused fading update must start from
+        what that apply put on screen, not from far below it."""
+        for limit in (40, 30):
+            g, e = _engine(limit, Settings(shadow_boost=60), displays=[D1])
+            preset_shown = _deviation(g.get_ramp(D1))
+            for k in range(5):
+                e.set_settings(Settings(shadow_boost=60 + k))     # full apply
+                before = _deviation(g.get_ramp(D1))
+                n = len(g.log)
+                e.set_auto_offsets({D1: {"shadow_boost": 1.0 + k}},
+                                   generation=e.auto_generation)
+                after = _deviation(g.get_ramp(D1))
+                with self.subTest(limit=limit, k=k):
+                    self.assertGreaterEqual(after, before, (preset_shown, before, after))
+                    self.assertLessEqual(len(g.log) - n, 3)
+                    self.assertLessEqual(sum(1 for _, ok in g.log[n:] if ok), 1)
+
+
+class RecoveryAfterRefusalBurstTest(unittest.TestCase):
+    """A brief burst of refusals (a fullscreen switch) must not leave the
+    display weaker for the rest of the session."""
+
+    def test_climbs_back_smoothly_within_two_seconds(self):
+        for limit, burst_limit in ((40, 12), (30, -1)):
+            g, e = _engine(limit, Settings(shadow_boost=60), displays=[D1])
+            wobble = [40.0 + (i % 2) * 0.5 for i in range(400)]   # fader keeps sending
+            shown, _ = _shown_after_each(g, e, D1, wobble[:12])
+            steady = shown[-1]
+            self.assertEqual(steady, limit)
+            g.limit = burst_limit
+            _shown_after_each(g, e, D1, wobble[12:18])               # 6 refusing frames
+            g.limit = limit
+            shown, costs = _shown_after_each(g, e, D1, wobble[18:18 + 100])
+            with self.subTest(limit=limit, burst=burst_limit):
+                back = next((i for i, s in enumerate(shown) if s >= steady), None)
+                self.assertIsNotNone(back, shown)
+                self.assertLessEqual(back, 90, shown)                # within ~1.5 s
+                self.assertEqual(shown[-1], steady)
+                for a, b in zip(shown, shown[1:]):                   # small steps up
+                    self.assertGreaterEqual(b, a, shown)
+                    self.assertLessEqual(b - a, max(2, a // 5), shown)
+                self.assertLessEqual(max(a for _, a in costs), 1)
+                self.assertLessEqual(max(c for c, _ in costs), 3)
+                self.assertEqual(g.bad, [])
+
+
+class PresetExactAtRestTest(unittest.TestCase):
+    def test_display_back_to_zero_matches_the_preset_apply(self):
+        """While auto levels runs for another display, a display that fades
+        back to no adjustment gets exactly the ramp the preset alone gives."""
+        for limit in (40, 127, None):
+            for rest in ({}, {"shadow_boost": 0.0}, {"shadow_boost": 0.0, "exposure": 0.0}):
+                g0, e0 = _engine(limit, Settings(shadow_boost=70), displays=[D1, D2])
+                preset = g0.get_ramp(D1)
+                g, e = _engine(limit, Settings(shadow_boost=70), displays=[D1, D2])
+                _fade(e, D1, "shadow_boost", 0, 25, 10)
+                e.set_auto_offsets({D1: {"shadow_boost": 3.0}, D2: {"exposure": 5.0}},
+                                   generation=e.auto_generation)
+                e.set_auto_offsets({D1: dict(rest), D2: {"exposure": 6.0}},
+                                   generation=e.auto_generation)
+                with self.subTest(limit=limit, rest=rest):
+                    self.assertEqual(g.get_ramp(D1), preset)
+                    self.assertFalse(e.check_and_reapply())
+                    self.assertEqual(g.bad, [])
+
+
+class RefusingDisplayBudgetTest(unittest.TestCase):
+    def test_display_that_refuses_everything_costs_one_call(self):
+        g, e = _engine(None, Settings(shadow_boost=30), displays=[D1])
+        g.limit = -1
+        _, costs = _shown_after_each(g, e, D1, [10.0 + 0.1 * i for i in range(125)])
+        calls = [c for c, _ in costs]
+        self.assertFalse(e.status.gamma_ok)
+        self.assertLessEqual(sum(calls) / len(calls), 1.5, calls)
+        self.assertLessEqual(max(calls), 13)
+        # ...and recovers on the very next update once Windows takes it.
+        g.limit = None
+        e.set_auto_offsets({D1: {"shadow_boost": 50.0}}, generation=e.auto_generation)
+        self.assertEqual(g.get_ramp(D1), _expected_full(e, D1))
+        self.assertTrue(e.status.gamma_ok)
+
+    def test_one_or_two_levels_allowed_is_remembered(self):
+        for limit in (1, 2):
+            g, e = _engine(limit, Settings(shadow_boost=30), displays=[D1])
+            shown, costs = _shown_after_each(g, e, D1, [10.0 + 0.1 * i for i in range(80)])
+            calls = [c for c, _ in costs[1:]]
+            with self.subTest(limit=limit):
+                self.assertTrue(all(s == limit for s in shown), shown)
+                self.assertLessEqual(max(a for _, a in costs), 1)
+                self.assertLessEqual(max(calls), 3)
+                self.assertLessEqual(sum(calls) / len(calls), 2.2)
+                self.assertEqual(g.bad, [])

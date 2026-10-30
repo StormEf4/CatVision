@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from catvision import curves
-from catvision.backends import NullColorBackend, apply_ramp_with_fallback
+from catvision.backends import NullColorBackend, apply_ramp_with_fallback, ramp_deviation
 from catvision.curves import Settings
 from catvision.engine import Engine
 from tests.test_catvision import FakeGamma
@@ -61,7 +61,8 @@ class FallbackMemoryTest(unittest.TestCase):
         self.assertTrue(r.ok)
         self.assertFalse(r.limited)
         self.assertEqual(len(g.sets), 1)
-        self.assertEqual(mem, {})
+        # Remembers what is shown now (the full ramp), nothing weaker.
+        self.assertEqual(mem, {D1: ("shown", ramp_deviation(ramp), None, 1)})
         self.assertEqual(r.applied, ramp)
 
     def test_limited_tier_is_tried_first_next_time(self):
@@ -83,7 +84,8 @@ class FallbackMemoryTest(unittest.TestCase):
         r = apply_ramp_with_fallback(g, D1, curves.build_ramp(Settings(shadow_boost=100)), mem)
         self.assertTrue(r.ok and r.limited)
         self.assertLess(r.strength, 1.0)
-        self.assertEqual(mem[D1][0], "blend")
+        self.assertEqual(mem[D1][0], "shown")
+        self.assertEqual(mem[D1][1], ramp_deviation(r.applied))
         g.sets.clear()
         r2 = apply_ramp_with_fallback(g, D1, curves.build_ramp(Settings(shadow_boost=99)), mem)
         self.assertTrue(r2.ok)
@@ -94,22 +96,28 @@ class FallbackMemoryTest(unittest.TestCase):
 
     def test_memory_forgotten_when_it_stops_working(self):
         g = CountingGamma(limit=127)
-        mem = {D1: ("blend", 0.01)}
+        mem = {D1: ("shown", 3, 4, 0)}
         g.limit = None
         ramp = curves.build_ramp(Settings(shadow_boost=40))
         r = apply_ramp_with_fallback(g, D1, ramp, mem)
         # Windows takes the full ramp again: it is used at once and the
-        # remembered weaker blend is forgotten.
+        # remembered weaker version and refusal are forgotten.
         self.assertTrue(r.ok and not r.limited)
         self.assertEqual(r.strength, 1.0)
         self.assertEqual(r.applied, ramp)
-        self.assertNotIn(D1, mem)
-        # A stale tier memory that fails falls back to the normal order.
-        mem = {D1: ("tier", 96)}
+        self.assertEqual(mem[D1][:3], ("shown", ramp_deviation(ramp), None))
+        # A remembered strength that fails now searches weaker, one look.
         g.limit = 10
+        g.sets.clear()
         r = apply_ramp_with_fallback(g, D1, ramp, mem)
         self.assertTrue(r.ok and r.limited)
-        self.assertEqual(mem[D1][0], "blend")
+        self.assertEqual(sum(1 for _, ok in g.sets if ok), 1)
+        self.assertEqual(mem[D1][0], "shown")
+        self.assertLessEqual(mem[D1][1], 10)
+        # Unknown (older) memory entries are ignored safely.
+        mem = {D1: ("blend", 0.01)}
+        r = apply_ramp_with_fallback(g, D1, ramp, mem)
+        self.assertTrue(r.ok and r.limited)
 
 
 class EngineAutoOffsetsTest(unittest.TestCase):

@@ -14,6 +14,7 @@ never knows CatVision is running; it only changes what the monitor shows.
 
 from __future__ import annotations
 
+import operator
 import platform
 import sys
 from dataclasses import dataclass, field
@@ -200,6 +201,35 @@ class WindowsGammaBackend:
         pass
 
 
+_TIERS = (127, 120, 96)   # usual Windows limits (8-bit levels from a straight line)
+# Fading updates: when the remembered strength stops working, weaker clamps
+# to try, strongest first, as fractions of where the search starts.
+_FADE_TARGETS = (0.8, 0.64, 0.5, 0.4, 0.3, 0.2, 0.12, 0.06, 0.03)
+# Fading updates (about 60 a second): forget a refusal after this many, so
+# a brief burst of refusals (a fullscreen switch) can't weaken the look for good.
+_FORGET_AFTER = 60
+
+
+def ramp_deviation(ramp: list[list[int]]) -> int:
+    """How far (8-bit levels) a ramp strays from a straight line at most."""
+    dev = 0
+    for ch in ramp:
+        if ch:
+            levels = [v >> 8 for v in ch]
+            index = range(len(levels))
+            dev = max(dev, max(map(operator.sub, levels, index)),
+                      max(map(operator.sub, index, levels)))
+    return dev
+
+
+def shown_memory(ramp: list[list[int]] | None) -> tuple | None:
+    """A fading-memory entry saying ``ramp`` is what the display shows now
+    (after a normal apply), so the next fading update starts from it."""
+    if ramp is None:
+        return None
+    return ("shown", ramp_deviation(ramp), None, 0)
+
+
 def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]],
                              memory: dict | None = None) -> GammaResult:
     """Apply a ramp, weakening it if Windows refuses the full strength.
@@ -209,45 +239,17 @@ def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]],
     version clamped to the usual Windows limit, then progressively weaker
     blends.
 
-    ``memory`` (optional, a dict kept by the caller) remembers per monitor
-    which weaker version last worked, so frequent small updates (auto levels
-    fading) try that first instead of repeating rejected attempts or
-    flickering through a search.
+    ``memory`` (optional, a dict kept by the caller) marks a frequent small
+    update (auto levels fading) and remembers per monitor what Windows last
+    accepted, so the next update goes straight to it (see ``_apply_fading``).
     """
-    known = memory.get(monitor_id) if memory is not None else None
-    if known is not None:
-        # The full ramp first: a rejected attempt changes nothing on screen,
-        # and once Windows takes it again the remembered weaker version must
-        # not linger.
-        if backend.set_ramp(monitor_id, ramp):
-            memory.pop(monitor_id, None)
-            return GammaResult(True, applied=ramp)
-        kind, value = known
-        if kind == "tier":
-            for steps in (t for t in (127, 120, 96) if t >= value):   # stronger tiers first
-                candidate = curves.limit_ramp_deviation(ramp, steps)
-                if backend.set_ramp(monitor_id, candidate):
-                    memory[monitor_id] = ("tier", steps)
-                    return GammaResult(True, limited=candidate != ramp, applied=candidate)
-        else:
-            # A blend worked last time: try a touch stronger (so it can
-            # recover), then the same, then a touch weaker.
-            for strength in (min(1.0, value + 1 / 64), value, max(0.0, value - 1 / 64)):
-                if strength <= 0.0:
-                    continue
-                candidate = curves.blend_ramp(ramp, strength)
-                if backend.set_ramp(monitor_id, candidate):
-                    memory[monitor_id] = ("blend", strength)
-                    return GammaResult(True, limited=strength < 1.0, strength=strength,
-                                       applied=candidate)
-        memory.pop(monitor_id, None)
+    if memory is not None:
+        return _apply_fading(backend, monitor_id, ramp, memory)
     if backend.set_ramp(monitor_id, ramp):
         return GammaResult(True, applied=ramp)
-    for steps in (127, 120, 96):
+    for steps in _TIERS:
         candidate = curves.limit_ramp_deviation(ramp, steps)
         if backend.set_ramp(monitor_id, candidate):
-            if memory is not None:
-                memory[monitor_id] = ("tier", steps)
             return GammaResult(True, limited=True, applied=candidate)
     # Binary search the strongest blend toward identity that is accepted.
     lo, hi, best = 0.0, 1.0, None
@@ -260,9 +262,90 @@ def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]],
             hi = mid
     if best is not None:
         backend.set_ramp(monitor_id, best)
-        if memory is not None:
-            memory[monitor_id] = ("blend", lo)
         return GammaResult(True, limited=True, strength=lo, applied=best)
+    return GammaResult(False, failed_monitors=[monitor_id])
+
+
+def _apply_fading(backend, monitor_id: str, ramp, memory: dict) -> GammaResult:
+    """apply_ramp_with_fallback for a fading update (see there).
+
+    The full ramp is offered first (a refused call changes nothing on
+    screen).  Otherwise the ramp is clamped to ``ok`` levels from a straight
+    line: the deviation last shown.  Clamping is continuous in the level, so
+    the shown strength moves smoothly while the fade crosses the Windows
+    limit.  Candidates go strongest first and the first accepted one is the
+    result: at most one new look per update, no ramp offered twice.
+
+    Memory entries: ``("shown", ok, bad, age)`` -- ``ok`` the deviation
+    (8-bit levels) on screen now, ``bad`` the smallest clamp level refused
+    (or None), ``age`` updates since ``bad`` was last forgotten; or
+    ``("refused", age, ok)`` when Windows refused everything (then only the
+    full ramp is offered, plus a new search about once a second).  While
+    there is room below ``bad`` (forgotten about once a second), one small
+    step stronger is tried first, so the look climbs back gently after
+    refusals; a refused try is invisible.
+    """
+    known = memory.get(monitor_id)
+    ok = bad = None
+    age = 0
+    refused = False
+    if isinstance(known, tuple) and len(known) == 4 and known[0] == "shown":
+        _, ok, bad, age = known
+    elif isinstance(known, tuple) and len(known) == 3 and known[0] == "refused":
+        _, age, ok = known
+        refused = True
+    age += 1
+    if age >= _FORGET_AFTER:        # forget old refusals: try stronger again
+        bad, age = None, 0
+
+    tried: list = []
+
+    def offer(candidate) -> bool:
+        if candidate in tried:
+            return False
+        tried.append(candidate)
+        return bool(backend.set_ramp(monitor_id, candidate))
+
+    dev = ramp_deviation(ramp)
+    if offer(ramp):
+        memory[monitor_id] = ("shown", dev, bad if bad is not None and bad > dev else None, age)
+        return GammaResult(True, applied=ramp)
+    if refused and age != 0:        # still refusing: re-search about once a second
+        memory[monitor_id] = ("refused", age, ok)
+        return GammaResult(False, failed_monitors=[monitor_id])
+
+    def clamp(level: int):
+        candidate = curves.limit_ramp_deviation(ramp, level)
+        if offer(candidate):
+            memory[monitor_id] = ("shown", level, bad, age)
+            return GammaResult(True, limited=True, strength=level / dev, applied=candidate)
+        return None
+
+    cap = dev - 1 if bad is None else min(dev - 1, bad - 1)
+    if ok is not None and ok >= 1:
+        if ok < cap:                # room above: one small step stronger first
+            t = min(cap, ok + max(2, ok // 5))
+            if bad is not None:
+                t = min(t, max(ok + 1, (ok + bad) // 2))
+            result = clamp(t)
+            if result is not None:
+                return result
+            bad, cap = t, t - 1
+        start = min(ok, cap)
+    else:
+        start = min(cap, _TIERS[0])
+    levels = [start] + [int(start * f) for f in _FADE_TARGETS] + [2, 1]
+    seen: set = set()
+    for level in levels:
+        if level < 1 or level > cap or level in seen:
+            continue
+        seen.add(level)
+        result = clamp(level)
+        if result is not None:
+            return result
+        bad = level
+    # Nothing taken: the screen still shows the last accepted look (``ok``).
+    memory[monitor_id] = ("refused", 0, ok)
     return GammaResult(False, failed_monitors=[monitor_id])
 
 

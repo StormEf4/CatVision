@@ -88,7 +88,7 @@ class Tray:
             ps.MenuItem("CatVision on", do("toggle"), checked=lambda _i: st().enabled),
             ps.MenuItem("Auto levels (beta)", do("auto_levels"),
                         checked=lambda _i: st().auto_levels),
-            ps.MenuItem("Auto levels: keep this look", do("auto_keep"),
+            ps.MenuItem("Auto levels: keep this look (beta)", do("auto_keep"),
                         enabled=lambda _i: st().auto_levels and st().enabled),
             ps.Menu.SEPARATOR,
             ps.MenuItem(lambda _i: f"Preset: {st().preset}", ps.Menu(presets)),

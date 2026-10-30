@@ -21,16 +21,21 @@ from .winutil import IS_WINDOWS
 THUMB_W, THUMB_H = 96, 54       # size of the copy that is measured
 INTERVAL_S = 0.2                # five measurements a second
 RISE_S = 1.2                    # brightening is slow and smooth...
-RISE_FAST_S = 0.5               # ...but catches up quicker after a big change (into a cave)
+RISE_FAST_S = 0.4               # ...but catches up quicker after a big change (into a cave)
 FALL_S = 0.3                    # dimming is fast, so flashes never blind you
 RUSH_S = 0.12                   # a flash fades down in about a tenth of a second
 # Speed limits in slider points per second: with 60 updates a second even
 # the fastest normal fade moves well under one point per update, which the
 # eye can't see as a step.
 MAX_RISE = 25.0
-MAX_RISE_FAST = 40.0
+MAX_RISE_FAST = 55.0
 MAX_FALL = 50.0
 MAX_RUSH = 240.0
+# Whatever speed is chosen, a fade never moves more than this per second
+# (about 1.3 points per update outside a flash, 4 in one), so "fast" is
+# quicker but still below the step the eye notices.
+CEILING = 80.0
+CEILING_RUSH = 240.0
 FADER_HZ = 60                   # how often the displays are moved
 IDLE_S = 0.1                    # how often the fader checks for a new goal while at rest
 STOPS_FOR_FULL = 3.0            # 3 stops darker/brighter than the target = full strength
@@ -38,9 +43,17 @@ DEAD_ZONE = 0.08                # ignore changes smaller than this share of How 
 CENTER_WEIGHT = 2.0             # the middle of the screen counts up to 3x the edges
 SHADOW_SHARE = 0.35             # how much the darkest quarter of the picture counts
 SPEEDS = {"slow": 0.5, "normal": 1.0, "fast": 2.0}
-SETTLE_S = 1.0                  # only brighten once it has stayed dark this long (no pumping)
+SETTLE_S = 1.0                  # only brighten once it has stayed dark this long (no pumping)...
+SETTLE_FAST_S = 0.85            # ...but a steadily dark scene (walked into a cave) waits only this
+STEADY_RATIO = 1.3              # (steady: measurements this close to each other,
+STEADY_S = 0.15                 #  at least two, this far apart)
+CALM_S = 2.0                    # unless a light went on (STEADY_RATIO brighter) this recently
+DARKENING_COUNT = 3             # this many measurements in a row, each darker than the last...
+DARKER = 0.9                    # ...by this much, start brightening early (on the way in)
 FLASH_RATIO = 2.0               # a picture twice as bright as the last one is a flash...
 LOST_S = 2.0                    # ...and a picture lost this long eases back to the preset
+BLACK_HOLD_S = 30.0             # a black screen holds the look this long (loading screens)
+NOISE_KEY = 2.0 / 255           # a wobble this small (about a level each way) is only noise
 FROZEN_S = 3.0                  # a picture that hasn't changed at all this long is stale
 AIM_STEP = 1.25                 # the "aim brighter / darker" hotkeys change Aim for this much
 # When the main slider runs out of room, the rest goes to the other one
@@ -180,15 +193,33 @@ class Controller:
     velocity: float = 0.0
     rush: bool = False                             # a flash: fade down extra fast
     frozen: bool = False                           # the picture has stopped changing
+    _catch_up: bool = False                        # a big brightening: quick pace to the end
     _recent: list = field(default_factory=list)   # (time, key) of the last SETTLE_S
     _last_key: float = 0.0
+    _jump_at: float = -CALM_S                      # when a light last went on (or a flash)
     _missing_since: float | None = None
     _signature: int = 0
     _same_since: float = 0.0
+    _black_since: float | None = None
+    _settings: tuple = ()                          # (strength, target, dim) last seen
 
     def observe(self, m: Measurement | None, strength: float, target: float,
                 dim: bool = True) -> None:
         self.strength = strength
+        if m is not None and m.black:
+            # Loading screen, or capture blocked: hold the look.  A black
+            # screen is pixel-identical every time, so it must not count as
+            # a frozen picture either; only a very long one eases back.
+            self._missing_since = None
+            self._signature, self._same_since = m.signature, self.clock
+            self.frozen = False
+            if self._black_since is None:
+                self._black_since = self.clock
+            elif self.clock - self._black_since >= BLACK_HOLD_S:
+                self.want, self.rush = 0.0, False
+            return
+        if m is not None:
+            self._black_since = None
         if m is not None and m.signature:
             # Some games in exclusive fullscreen leave Windows with an old,
             # frozen picture.  One that hasn't changed at all for a few
@@ -205,21 +236,55 @@ class Controller:
                 self.want = 0.0
             return
         self._missing_since = None
-        if m.black:  # loading screen, or capture blocked: hold
-            return
-        self._recent = [(t, k) for t, k in self._recent if self.clock - t < SETTLE_S]
-        self._recent.append((self.clock, m.key))
+        now = self.clock
+        self._recent = [(t, k) for t, k in self._recent if now - t < SETTLE_S]
+        self._recent.append((now, m.key))
+        if self._last_key and m.key > self._last_key * STEADY_RATIO:
+            self._jump_at = now
         # Steer by the brightest recent picture: dimming reacts at once, but
         # brightening waits until it has stayed dark, so flickering lights,
         # muzzle flashes and lightning don't make the picture pump.
-        want = target_offset(max(k for _t, k in self._recent), strength, target, dim)
+        calm = now - self._jump_at >= CALM_S
+        lately = [(t, k) for t, k in self._recent if now - t < SETTLE_FAST_S]
+        steady = [k for _t, k in lately]
+        newest = [k for _t, k in self._recent[-DARKENING_COUNT:]]
+        early = None
+        if (calm and now - lately[0][0] >= STEADY_S
+                and max(steady) <= min(steady) * STEADY_RATIO):
+            # Steadily dark with no light flashing lately (walked into a
+            # building): only wait SETTLE_FAST_S, so it isn't left too dark.
+            early = max(steady)
+        elif (calm and len(newest) == DARKENING_COUNT
+              and all(b < a * DARKER for a, b in zip(newest, newest[1:]))):
+            # Getting darker and darker (walking into a cave): start
+            # brightening gently on the way, halfway (in stops) to the newest picture.
+            early = math.sqrt(max(k for _t, k in self._recent) * newest[-1])
+        if early is not None:
+            # Brightening granted early is kept: the older, brighter pictures
+            # can't take it back (that would pump), only a brighter new one can.
+            self._recent = [(t, min(k, early)) for t, k in self._recent]
+        key = max(k for _t, k in self._recent)
+        want = target_offset(key, strength, target, dim)
         flash = bool(self._last_key) and m.key >= self._last_key * FLASH_RATIO
         self._last_key = m.key
         # Small changes don't set a new goal, so the picture doesn't keep
-        # "breathing"; the glide itself never stops halfway.
-        if abs(want - self.want) >= max(0.5, strength * DEAD_ZONE) or flash:
+        # "breathing"; the glide itself never stops halfway.  Near black a
+        # one-level wobble (video compression, dithering) is a big change in
+        # stops, so the goal only moves if it is clear of that noise too.
+        near = target_offset(key + NOISE_KEY, strength, target, dim)
+        far = target_offset(max(key - NOISE_KEY, 0.0), strength, target, dim)
+        # (A changed How much / Aim for / dim always applies at once.)
+        settings, before = (strength, target, dim), self._settings
+        self._settings = settings
+        noise = settings == before and near <= self.want <= far
+        if not noise and abs(want - self.want) >= max(0.5, strength * DEAD_ZONE) or flash:
             self.want = want
             self.rush = flash and want < self.offset
+
+    @property
+    def black_too_long(self) -> bool:
+        """A black screen has lasted longer than BLACK_HOLD_S: back to the preset."""
+        return self._black_since is not None and self.clock - self._black_since >= BLACK_HOLD_S
 
     def release(self) -> None:
         """Head back to the preset (no game in front)."""
@@ -227,6 +292,8 @@ class Controller:
         self.rush = False
         self._recent.clear()
         self._last_key = 0.0
+        self._black_since = None
+        self._jump_at = self.clock - CALM_S
 
     def advance(self, dt: float, speed: float = 1.0) -> float:
         self.clock += max(dt, 0.0)
@@ -245,30 +312,46 @@ class Controller:
 
     def follow(self, want: float, strength: float, dt: float, speed: float = 1.0) -> float:
         """Glide toward want: a critically damped spring (smooth start and
-        stop, no overshoot) with a speed limit."""
+        stop, no overshoot) with a speed limit, never past want."""
         dt = max(dt, 0.0)
         gap = want - self.offset
         if abs(gap) < 0.01 and abs(self.velocity) < 0.05:
-            self.offset, self.velocity = want, 0.0
+            self.offset, self.velocity, self._catch_up = want, 0.0, False
             return self.offset
+        if gap < 0:
+            self._catch_up = False
         speed = max(speed, 0.1)
         if gap > 0:
-            fast = bool(strength) and gap > strength * 0.5
-            tau, vmax = (RISE_FAST_S, MAX_RISE_FAST) if fast else (RISE_S, MAX_RISE)
+            # A big change (into a cave) catches up quicker, all the way:
+            # dropping to the slow pace for the last stretch would leave the
+            # picture too dark for seconds.
+            if strength and gap > strength * 0.5:
+                self._catch_up = True
+            tau, vmax = (RISE_FAST_S, MAX_RISE_FAST) if self._catch_up else (RISE_S, MAX_RISE)
         elif self.rush:
             tau, vmax = RUSH_S, MAX_RUSH
         else:
             tau, vmax = FALL_S, MAX_FALL
         w = 2.0 * speed / tau
         c1 = -gap                               # offset - want
-        c2 = self.velocity + w * c1
+        velocity = self.velocity
+        if velocity * gap > 0 and abs(velocity) > w * abs(gap):
+            # Still carrying speed from the speed limit or an earlier goal,
+            # more than this spring could stop in time: brake with a spring
+            # just stiff enough for that speed.  The glide carries on at its
+            # current speed and eases into the goal (c2 becomes 0: a plain
+            # exponential approach), instead of stopping dead or sliding past.
+            w = abs(velocity) / abs(gap)
+        c2 = velocity + w * c1
         e = math.exp(-w * dt)
         new = want + (c1 + c2 * dt) * e
         vel = (c2 - w * (c1 + c2 * dt)) * e
-        limit = vmax * speed
+        limit = min(vmax * speed, CEILING_RUSH if vmax == MAX_RUSH else CEILING)
         if abs(new - self.offset) > limit * dt:  # speed limit: never a visible jump
             new = self.offset + math.copysign(limit * dt, new - self.offset)
             vel = math.copysign(min(abs(vel), limit), vel)
+        if (new - want) * (self.offset - want) < 0:  # never past the goal
+            new, vel = want, 0.0
         self.offset, self.velocity = new, vel
         if self.rush and self.offset <= self.want + 0.01:
             self.rush = False
@@ -380,7 +463,7 @@ class Fader:
 
 
 # --------------------------------------------------------------------------
-# Is a game in front?  (only the foreground window's position is looked at)
+# Is a game in front?  (only the foreground window's position, style and title are looked at)
 # --------------------------------------------------------------------------
 
 _SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
