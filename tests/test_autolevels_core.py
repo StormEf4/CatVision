@@ -112,9 +112,6 @@ class FaderIdleTests(unittest.TestCase):
         self.assertEqual(f.last_error, "")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class FaderLifecycleTests(unittest.TestCase):
     def test_quick_off_and_on_never_leaves_two_faders_running(self):
@@ -152,3 +149,7 @@ class FaderRunCallbackTests(unittest.TestCase):
         self.assertEqual(second, [])
         f.tick(1 / 60)                     # without one, the current callback is used
         self.assertEqual(len(second), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -87,6 +87,9 @@ class Options:
                 looks[title] = _clamp(aim, TARGET_LIMITS, defaults.auto_target)
         # Keep the most recent ones (dicts keep the order they were saved in).
         self.auto_game_looks = dict(list(looks.items())[-MAX_GAME_LOOKS:])
+        # A damaged timestamp (NaN, infinity, negative) means "never unlocked".
+        if not math.isfinite(self.unlock_requested_at) or self.unlock_requested_at < 0:
+            self.unlock_requested_at = 0.0
 
 
 MAX_GAME_LOOKS = 200
@@ -214,7 +217,7 @@ def load(path: Path | None = None) -> Config:
     try:
         with open(path, encoding="utf-8") as f:
             return Config.from_json(json.load(f))
-    except (OSError, ValueError, ArithmeticError):
+    except (OSError, ValueError, ArithmeticError, RecursionError):
         return Config()
 
 

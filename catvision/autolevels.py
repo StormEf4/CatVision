@@ -159,7 +159,9 @@ def split_offset(key: str, offset: float, base: dict[str, float]) -> dict[str, f
 
 
 def clean_title(title: str) -> str:
-    return " ".join((title or "").split())[:60]
+    # rstrip after the cut: a cut ending on a space would not survive
+    # config.py cleaning the saved key again (this must be idempotent).
+    return " ".join((title or "").split())[:60].rstrip()
 
 
 def nudge_aim(aim: float, brighter: bool) -> float:
@@ -387,6 +389,7 @@ class Fader:
         # The run also keeps the apply() it started with, so a thread that
         # is still finishing reports through its own (outdated) callback.
         stop = self._stop = threading.Event()
+        self.last_error = ""
         self._thread = threading.Thread(target=self._run, args=(stop, self.apply),
                                         name="catvision-auto-fader", daemon=True)
         self._thread.start()
@@ -467,6 +470,9 @@ class Fader:
 # --------------------------------------------------------------------------
 
 _SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
+# Title reported while CatVision's own window is in front (the player is
+# changing settings): the game behind it stays the current game.
+OWN_WINDOW = "\x00catvision"
 
 
 _window_api = None
@@ -526,7 +532,7 @@ def window_in_front(rects: dict[str, Rect]) -> tuple[set[str] | None, str]:
         pid = wintypes.DWORD()
         u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if pid.value == os.getpid():
-            return set(), ""        # CatVision's own windows (e.g. the test pattern)
+            return set(), OWN_WINDOW  # CatVision's own windows (e.g. the test pattern)
         cls = ctypes.create_unicode_buffer(64)
         u.GetClassNameW(hwnd, cls, 64)
         if cls.value in _SHELL_CLASSES:
@@ -725,6 +731,7 @@ class Watcher:
             results = self.measure_once()
             with self._lock:
                 if not stop.is_set():
-                    self._latest = results
+                    # watch() may have changed the displays while this ran.
+                    self._latest = {k: v for k, v in results.items() if k in self._rects}
                     self._seq += 1
             stop.wait(INTERVAL_S)

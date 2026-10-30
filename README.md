@@ -228,9 +228,10 @@ things out to you.
   preset. If it can't see the picture at all for a couple of seconds it eases
   back to your preset too.
 - Some games in exclusive fullscreen leave Windows with a frozen, old
-  picture. If the picture doesn't change at all for a few seconds, auto
-  levels stops following it and eases back to your preset, and the Home tab
-  says *the picture isn't changing*. Borderless windowed mode avoids this.
+  picture. If the picture doesn't change at all for about three seconds,
+  auto levels stops following it, holds for a couple more seconds and then
+  eases back to your preset; the Home tab says *the picture isn't changing*.
+  Borderless windowed mode avoids this.
 - If the screen copies stop arriving for a moment, it holds, and after about
   three seconds it eases back to your preset, so it can never stay boosted
   after you leave a game.

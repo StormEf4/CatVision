@@ -340,9 +340,6 @@ class PresetTests(unittest.TestCase):
             self.assertEqual(p.settings, p.settings.clamped(), p.name)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class HotkeyParsingTests(unittest.TestCase):
     def test_parse_and_format_round_trip(self):
@@ -1045,3 +1042,7 @@ class AutoLevelsStaleAndAimTests(unittest.TestCase):
         self.assertAlmostEqual(nudge_aim(0.15, False), 0.12)
         self.assertEqual(nudge_aim(TARGET_LIMITS[1], True), TARGET_LIMITS[1])
         self.assertEqual(nudge_aim(TARGET_LIMITS[0], False), TARGET_LIMITS[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

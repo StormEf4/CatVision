@@ -529,6 +529,7 @@ class CatVisionApp:
         o.auto_strength = round(self.auto_vars["auto_strength"].get(), 3)
         aim = round(self.auto_vars["auto_target"].get(), 3)
         if self._auto_game in o.auto_game_looks:   # editing this game's own look
+            o.auto_game_looks.pop(self._auto_game, None)   # newest last (see MAX_GAME_LOOKS)
             o.auto_game_looks[self._auto_game] = aim
         else:
             o.auto_target = aim
@@ -611,6 +612,9 @@ class CatVisionApp:
             self._auto_seq = -1
             self._auto_watched = set()
             self._auto_shown = {}
+            # No game is being watched now: Aim for shows (and edits) the
+            # normal value again, not the last game's kept look.
+            self._set_auto_game("")
             if self.engine.enabled and any(abs(c.offset) > 0.05 for c in self._auto_ctrl.values()):
                 # Auto levels was turned off while CatVision stays on: glide
                 # back to the preset instead of jumping.
@@ -628,15 +632,28 @@ class CatVisionApp:
         if not self._auto_winding_down or self._closed:
             return
         if self.engine.enabled and any(abs(c.offset) > 0.05 for c in self._auto_ctrl.values()):
+            self._auto_check_gamma()
             self.root.after(100, self._auto_wind_down)
         else:
             self._auto_finish()
+            self.refresh_notices()
 
     def _auto_finish(self) -> None:
         self._auto_winding_down = False
         self._auto_fader.stop()   # before clearing, so nothing moves the displays again
         self._auto_ctrl.clear()
         self.engine.retire_auto_offsets()
+        # Remember what the displays show now, so the next run's check compares
+        # against the real state (callers refresh the notices themselves).
+        self._auto_gamma_state = (self.engine.status.gamma_ok, self.engine.status.gamma_limited)
+
+    def _auto_check_gamma(self) -> None:
+        """Keep the warning icon in step with whether Windows is holding the
+        strength back (fades change that as they go)."""
+        gamma_state = (self.engine.status.gamma_ok, self.engine.status.gamma_limited)
+        if gamma_state != self._auto_gamma_state:
+            self._auto_gamma_state = gamma_state
+            self.refresh_notices()
 
     def _auto_tick(self) -> None:
         """Decide where each display should go as new measurements arrive
@@ -663,7 +680,8 @@ class CatVisionApp:
             self._auto_front_at = now
             # Only adjust displays a game fills; elsewhere drift back to the preset.
             in_front, title = autolevels.window_in_front(rects)
-            self._set_auto_game(title if in_front else "")
+            if title != autolevels.OWN_WINDOW:   # settings open: keep the game's look
+                self._set_auto_game(title if in_front else "")
             if not o.auto_game_only:
                 in_front = None
             self._auto_watched = (set(rects) if in_front is None else set(rects) & in_front)
@@ -694,10 +712,7 @@ class CatVisionApp:
             self._auto_fader.wake()   # a new goal (a flash, say): start moving now
         # Fades change whether Windows is holding the strength back: keep the
         # warning icon in step with what the displays really show.
-        gamma_state = (self.engine.status.gamma_ok, self.engine.status.gamma_limited)
-        if gamma_state != self._auto_gamma_state:
-            self._auto_gamma_state = gamma_state
-            self.refresh_notices()
+        self._auto_check_gamma()
         # Redraw on new pictures and state changes, and keep redrawing while
         # a display eases back, so the readout never shows a stale boost.
         easing = any(state in ("waiting", "stalled") and abs(self._auto_ctrl[did].offset) > 0.05
@@ -758,6 +773,7 @@ class CatVisionApp:
                 aim = autolevels.aim_for_current_look(m.key, ctrl.offset, self._auto_strength())
                 aim = round(min(hi, max(lo, aim)), 3)
                 if self._auto_game:     # remembered for this game only
+                    o.auto_game_looks.pop(self._auto_game, None)   # newest last
                     o.auto_game_looks[self._auto_game] = aim
                     where = f" for {self._auto_game}"
                 else:
@@ -780,6 +796,7 @@ class CatVisionApp:
         o = self.cfg.options
         aim = autolevels.nudge_aim(self._auto_aim(), brighter)
         if self._auto_game in o.auto_game_looks:
+            o.auto_game_looks.pop(self._auto_game, None)   # newest last
             o.auto_game_looks[self._auto_game] = aim
         else:
             o.auto_target = aim
@@ -852,8 +869,10 @@ class CatVisionApp:
                 elif m is None:
                     lines.append(f"{name}: can't see the picture. Try borderless windowed mode.")
                 elif self._auto_ctrl.get(did) and self._auto_ctrl[did].frozen:
+                    gone = ("back to your preset" if self._auto_ctrl[did].want == 0.0
+                            else "holding for now")
                     lines.append(f"{name}: the picture isn't changing (paused, or exclusive "
-                                 f"fullscreen?)  \u00b7  back to your preset")
+                                 f"fullscreen?)  \u00b7  {gone}")
                 else:
                     held = ""
                     if m.black:

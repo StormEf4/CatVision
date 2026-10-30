@@ -432,8 +432,14 @@ class AutoTextTest(unittest.TestCase):
         self.assertIn("see the picture at all for a couple of seconds", flat)
 
     def test_frozen_wording_matches_constant(self):
-        self.assertIn("doesn't change at all for a few", self.sec)
-        self.assertGreaterEqual(autolevels.FROZEN_S, 3.0)
+        # "about three seconds" to be called frozen (FROZEN_S), then the
+        # lost-picture hold of "a couple more seconds" (LOST_S) before it
+        # eases back to the preset.
+        flat = " ".join(self.sec.split())
+        self.assertIn("doesn't change at all for about three seconds", flat)
+        self.assertIn("holds for a couple more seconds", flat)
+        self.assertAlmostEqual(autolevels.FROZEN_S, 3.0)
+        self.assertAlmostEqual(autolevels.LOST_S, 2.0)
         self.assertIn("the picture isn't changing", GUI_SRC)
         self.assertIn("*the picture isn't changing*", self.sec)
 
@@ -614,9 +620,6 @@ class AutoGuiBadConfigTest(unittest.TestCase):
         self.assertTrue(T_LO <= t <= T_HI, t)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class HugeNumberTests(unittest.TestCase):
     """A hand-typed integer far too long for a float must not stop CatVision
@@ -647,3 +650,7 @@ class HugeNumberTests(unittest.TestCase):
             loaded = cfg_mod.load(path)
         self.assertEqual(loaded.options.text_size, "Normal")
         self.assertEqual(loaded.options.auto_strength, cfg_mod.Options().auto_strength)
+
+
+if __name__ == "__main__":
+    unittest.main()
