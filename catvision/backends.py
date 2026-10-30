@@ -39,6 +39,7 @@ class GammaResult:
     limited: bool = False          # Windows only accepted a weaker version
     strength: float = 1.0          # fraction of the requested effect applied
     failed_monitors: list[str] = field(default_factory=list)
+    applied: list[list[int]] | None = None   # the ramp that was actually set
 
 
 # ---------------------------------------------------------------------------
@@ -199,19 +200,55 @@ class WindowsGammaBackend:
         pass
 
 
-def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]]) -> GammaResult:
+def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]],
+                             memory: dict | None = None) -> GammaResult:
     """Apply a ramp, weakening it if Windows refuses the full strength.
 
     Windows (without the registry tweak in ``windows/``) rejects ramps that
     stray too far from a straight line.  First try the full ramp, then a
     version clamped to the usual Windows limit, then progressively weaker
     blends.
+
+    ``memory`` (optional, a dict kept by the caller) remembers per monitor
+    which weaker version last worked, so frequent small updates (auto levels
+    fading) try that first instead of repeating rejected attempts or
+    flickering through a search.
     """
+    known = memory.get(monitor_id) if memory is not None else None
+    if known is not None:
+        # The full ramp first: a rejected attempt changes nothing on screen,
+        # and once Windows takes it again the remembered weaker version must
+        # not linger.
+        if backend.set_ramp(monitor_id, ramp):
+            memory.pop(monitor_id, None)
+            return GammaResult(True, applied=ramp)
+        kind, value = known
+        if kind == "tier":
+            for steps in (t for t in (127, 120, 96) if t >= value):   # stronger tiers first
+                candidate = curves.limit_ramp_deviation(ramp, steps)
+                if backend.set_ramp(monitor_id, candidate):
+                    memory[monitor_id] = ("tier", steps)
+                    return GammaResult(True, limited=candidate != ramp, applied=candidate)
+        else:
+            # A blend worked last time: try a touch stronger (so it can
+            # recover), then the same, then a touch weaker.
+            for strength in (min(1.0, value + 1 / 64), value, max(0.0, value - 1 / 64)):
+                if strength <= 0.0:
+                    continue
+                candidate = curves.blend_ramp(ramp, strength)
+                if backend.set_ramp(monitor_id, candidate):
+                    memory[monitor_id] = ("blend", strength)
+                    return GammaResult(True, limited=strength < 1.0, strength=strength,
+                                       applied=candidate)
+        memory.pop(monitor_id, None)
     if backend.set_ramp(monitor_id, ramp):
-        return GammaResult(True)
+        return GammaResult(True, applied=ramp)
     for steps in (127, 120, 96):
-        if backend.set_ramp(monitor_id, curves.limit_ramp_deviation(ramp, steps)):
-            return GammaResult(True, limited=True)
+        candidate = curves.limit_ramp_deviation(ramp, steps)
+        if backend.set_ramp(monitor_id, candidate):
+            if memory is not None:
+                memory[monitor_id] = ("tier", steps)
+            return GammaResult(True, limited=True, applied=candidate)
     # Binary search the strongest blend toward identity that is accepted.
     lo, hi, best = 0.0, 1.0, None
     for _ in range(7):
@@ -223,7 +260,9 @@ def apply_ramp_with_fallback(backend, monitor_id: str, ramp: list[list[int]]) ->
             hi = mid
     if best is not None:
         backend.set_ramp(monitor_id, best)
-        return GammaResult(True, limited=True, strength=lo)
+        if memory is not None:
+            memory[monitor_id] = ("blend", lo)
+        return GammaResult(True, limited=True, strength=lo, applied=best)
     return GammaResult(False, failed_monitors=[monitor_id])
 
 

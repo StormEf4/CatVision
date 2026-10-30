@@ -62,9 +62,13 @@ class Engine:
         # Auto levels (beta): per display id, amounts added on top of the
         # preset, e.g. {"shadow_boost": 12.5} or {"shadow_boost": 15, "exposure": 4}.
         self.auto_offsets: dict[str, dict[str, float]] = {}
+        # Bumped when auto levels stops, so a late update from a fader that
+        # was still finishing can't put a boost back afterwards.
+        self.auto_generation = 0
         self._lock = threading.RLock()  # force-quit restores from the tray thread
         self._flag = (state_dir / "display_modified.flag") if state_dir else None
         self._applied: dict[str, list[list[int]]] = {}
+        self._fallback: dict = {}   # per display: the weaker ramp Windows last accepted
         self.status = Status()
 
         unclean = self._flag is not None and self._flag.exists()
@@ -149,10 +153,21 @@ class Engine:
         self.status = status
         return status
 
-    def set_auto_offsets(self, offsets: dict[str, dict[str, float]]) -> None:
+    def retire_auto_offsets(self) -> None:
+        """Auto levels has stopped: drop its offsets and ignore any late
+        update from the run that just ended."""
+        with self._lock:
+            self.auto_generation += 1
+            if self.auto_offsets:
+                self.set_auto_offsets({})
+
+    def set_auto_offsets(self, offsets: dict[str, dict[str, float]],
+                         generation: int | None = None) -> None:
         """Auto levels (beta): move Shadow boost / Exposure per display without
         touching the preset.  Only the brightness tables are redone."""
         with self._lock:
+            if generation is not None and generation != self.auto_generation:
+                return  # from a fader run that has already been stopped
             changed = [m for m in self._targets()
                        if offsets.get(m.id) != self.auto_offsets.get(m.id)]
             self.auto_offsets = {d: dict(v) for d, v in offsets.items()}
@@ -161,7 +176,9 @@ class Engine:
             tint, _matrix = curves.plan_color(self.settings, self.custom_filters,
                                               self.custom_tints,
                                               all_displays=self.all_displays_selected())
-            self._apply_gamma(changed, tint, self.status)
+            # Back to the bare preset everywhere: a normal full apply, so no
+            # weaker fallback from the fade lingers.
+            self._apply_gamma(changed, tint, self.status, fading=bool(self.auto_offsets))
 
     def settings_for(self, display_id: str) -> Settings:
         """The settings a display really gets (the preset plus auto levels)."""
@@ -171,16 +188,27 @@ class Engine:
         return replace(self.settings, **{k: getattr(self.settings, k) + v
                                          for k, v in amounts.items()}).clamped()
 
-    def _apply_gamma(self, monitors, tint, status: Status) -> None:
+    def _apply_gamma(self, monitors, tint, status: Status, fading: bool = False) -> None:
+        """``fading``: a frequent auto-levels update.  It reuses the weaker
+        ramp Windows last accepted and remembers what it set instead of
+        reading every ramp back (the keep-applied check still compares)."""
+        if not fading:
+            self._fallback.clear()   # a full apply starts from the full ramp again
         ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
         for m in monitors:
+            if fading and not self.auto_offsets.get(m.id):
+                self._fallback.pop(m.id, None)   # this display is back to its preset
             which = tuple(sorted(self.auto_offsets.get(m.id, {}).items()))
             ramp = ramps.get(which)
             if ramp is None:
                 ramp = ramps[which] = curves.build_ramp(self.settings_for(m.id), tint)
-            result: GammaResult = apply_ramp_with_fallback(self.gamma, m.id, ramp)
+            result: GammaResult = apply_ramp_with_fallback(
+                self.gamma, m.id, ramp, self._fallback if fading else None)
             if result.ok:
-                self._applied[m.id] = self.gamma.get_ramp(m.id) or ramp
+                if fading:
+                    self._applied[m.id] = result.applied or ramp
+                else:
+                    self._applied[m.id] = self.gamma.get_ramp(m.id) or ramp
             status.gamma_ok = status.gamma_ok and result.ok
             status.gamma_limited = status.gamma_limited or result.limited
 

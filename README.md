@@ -200,8 +200,10 @@ display and adjusts it live, the way your eyes adapt:
   Flashes are always toned down quickly.
 - **Only while a game fills the screen** (on by default): on the desktop or in
   a windowed app it pauses and eases back to your preset. Games in fullscreen
-  or borderless windowed mode count, and so do full-screen videos. Only the
-  position and title of the window in front are checked, nothing inside it.
+  or borderless windowed mode count, and so do full-screen videos. A normal
+  maximized window with a title bar (a browser, say) doesn't count, and
+  neither do minimized or hidden ones. Only the position, style and title of
+  the window in front are checked, nothing inside it.
 - **Also tone down bright scenes** (on by default): untick it if you only
   ever want it to brighten.
 - Each ticked display is adjusted on its own, and the Home tab shows what it
@@ -226,6 +228,13 @@ things out to you.
   picture. If the picture doesn't change at all for a few seconds, auto
   levels stops following it and eases back to your preset, and the Home tab
   says *the picture isn't changing*. Borderless windowed mode avoids this.
+- If the screen copies stop arriving for a moment, it holds, and after a
+  couple of seconds it eases back to your preset, so it can never stay
+  boosted after you leave a game.
+- On PCs where Windows limits how strong a brightness change can be (see
+  *Get the full strength*), fades stay smooth and turning auto levels off
+  always brings back your full preset.
+- While nothing is changing it rests and uses almost no processor time.
 - It's off by default, and it stops watching whenever CatVision or auto
   levels is turned off.
 

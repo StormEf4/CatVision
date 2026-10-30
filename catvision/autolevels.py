@@ -32,6 +32,7 @@ MAX_RISE_FAST = 40.0
 MAX_FALL = 50.0
 MAX_RUSH = 240.0
 FADER_HZ = 60                   # how often the displays are moved
+IDLE_S = 0.1                    # how often the fader checks for a new goal while at rest
 STOPS_FOR_FULL = 3.0            # 3 stops darker/brighter than the target = full strength
 DEAD_ZONE = 0.08                # ignore changes smaller than this share of How much
 CENTER_WEIGHT = 2.0             # the middle of the screen counts up to 3x the edges
@@ -286,8 +287,10 @@ class Fader:
         self.speed = 1.0
         self.interval = 1.0 / hz
         self._stop = threading.Event()
+        self._wake = threading.Event()   # a new goal: stop resting at once
         self._thread: threading.Thread | None = None
         self.last_error = ""
+        self._applied: dict[str, float] = {}
 
     @property
     def running(self) -> bool:
@@ -296,34 +299,80 @@ class Fader:
     def start(self) -> None:
         if self.running:
             return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="catvision-auto-fader",
-                                        daemon=True)
+        # Each run gets its own stop signal, so a thread from an earlier run
+        # that is still finishing can never be brought back to life.
+        stop = self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, args=(stop,),
+                                        name="catvision-auto-fader", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         thread, self._thread = self._thread, None
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=1.0)
 
-    def tick(self, dt: float) -> None:
-        positions = {}
-        for did, ctrl in list(self.controllers.items()):
-            positions[did] = ctrl.advance(dt, self.speed)
-        self.apply(positions)
+    def wake(self) -> None:
+        """A goal changed: start moving now instead of after the rest pause."""
+        self._wake.set()
 
-    def _run(self) -> None:
+    def settled(self) -> bool:
+        """Every display is where it wants to be and has stopped moving."""
+        return all(abs(c.want - c.offset) <= 0.001 and abs(c.velocity) < 1e-3
+                   for c in list(self.controllers.values()))
+
+    def tick(self, dt: float, motion_dt: float | None = None, force: bool = False) -> bool:
+        """Move every display one step.  apply() is called only when some
+        position moved noticeably (or force), and always once more when a
+        display comes to rest, so its exact final value is applied.  Returns
+        True if apply() was called."""
+        motion = dt if motion_dt is None else min(motion_dt, dt)
+        # One snapshot: the window may add or remove displays meanwhile.
+        items = list(self.controllers.items())
+        positions, wants = {}, {}
+        for did, ctrl in items:
+            if dt > motion:
+                ctrl.clock += dt - motion   # time passes even while resting
+            positions[did] = ctrl.advance(motion, self.speed)
+            wants[did] = ctrl.want
+        last = self._applied
+        changed = force or positions.keys() != last.keys()
+        if not changed:
+            for did, pos in positions.items():
+                gap = abs(pos - last[did])
+                if gap > 0.001 or (gap > 0 and wants[did] == pos):
+                    changed = True
+                    break
+        if changed:
+            self.apply(positions)
+            self._applied = positions
+        return changed
+
+    def _run(self, stop: threading.Event) -> None:
         last = time.perf_counter()
-        while not self._stop.is_set():
+        idle = False
+        self._applied = {}
+        while not stop.is_set():
             now = time.perf_counter()
             dt, last = min(now - last, 0.25), now
             try:
-                self.tick(dt)
+                # Coming out of a rest, the first step is a normal 60 Hz step,
+                # so a fade starts exactly as it would have anyway.  At rest it
+                # still refreshes apply() a few times a second (cheap, and a
+                # changed preset gets shared out again).
+                self.tick(dt, self.interval if idle else None, force=idle)
+                idle = self.settled()
             except Exception as exc:  # keep fading; the window shows nothing breaks
                 self.last_error = repr(exc)
+                idle = False
+            if idle:
+                # Nothing to move: rest until a new goal (wake()) or a while.
+                self._wake.wait(IDLE_S)
+                self._wake.clear()
+                continue
             spare = self.interval - (time.perf_counter() - now)
-            self._stop.wait(max(spare, 0.002))
+            stop.wait(max(spare, 0.002))
 
 
 # --------------------------------------------------------------------------
@@ -333,20 +382,57 @@ class Fader:
 _SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
 
 
+_window_api = None
+
+
+def _window_functions():
+    """user32/dwmapi functions with their signatures declared once, on
+    private handles (window handles are 64-bit; without argtypes ctypes would
+    squeeze them into 32 bits)."""
+    global _window_api
+    if _window_api is None:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = wintypes.HWND
+        u = ctypes.WinDLL("user32")
+        u.GetForegroundWindow.argtypes = []
+        u.GetForegroundWindow.restype = hwnd
+        u.GetWindowThreadProcessId.argtypes = [hwnd, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u.GetClassNameW.argtypes = [hwnd, wintypes.LPWSTR, ctypes.c_int]
+        u.GetClassNameW.restype = ctypes.c_int
+        for name in ("IsIconic", "IsZoomed"):
+            getattr(u, name).argtypes = [hwnd]
+            getattr(u, name).restype = wintypes.BOOL
+        u.GetWindowLongW.argtypes = [hwnd, ctypes.c_int]
+        u.GetWindowLongW.restype = ctypes.c_long
+        u.GetWindowRect.argtypes = [hwnd, ctypes.POINTER(wintypes.RECT)]
+        u.GetWindowRect.restype = wintypes.BOOL
+        u.GetWindowTextW.argtypes = [hwnd, wintypes.LPWSTR, ctypes.c_int]
+        u.GetWindowTextW.restype = ctypes.c_int
+        try:
+            dwm = ctypes.WinDLL("dwmapi")
+            dwm.DwmGetWindowAttribute.argtypes = [hwnd, wintypes.DWORD, ctypes.c_void_p,
+                                                  wintypes.DWORD]
+            dwm.DwmGetWindowAttribute.restype = ctypes.c_long   # HRESULT
+        except (OSError, AttributeError):
+            dwm = None
+        _window_api = (ctypes, wintypes, u, dwm)
+    return _window_api
+
+
 def window_in_front(rects: dict[str, Rect]) -> tuple[set[str] | None, str]:
     """Which displays the window in front fills (a game in fullscreen or
     borderless mode, a full-screen video...), and that window's title, which
-    is used to remember each game's look.  Only the window's position and
-    title are read, never anything inside it.  (None, "") if it can't be told
-    (not Windows), meaning "don't hold anything back"."""
+    is used to remember each game's look.  Only the window's position, style
+    and title are read, never anything inside it.  (None, "") if it can't be
+    told (not Windows), meaning "don't hold anything back"; if a Windows call
+    fails it holds back instead (set(), "")."""
     if not IS_WINDOWS:
         return None, ""
     try:
-        import ctypes
         import os
-        from ctypes import wintypes
-        u = ctypes.windll.user32
-        u.GetForegroundWindow.restype = wintypes.HWND
+        ctypes, wintypes, u, dwm = _window_functions()
         hwnd = u.GetForegroundWindow()
         if not hwnd:
             return set(), ""
@@ -358,6 +444,19 @@ def window_in_front(rects: dict[str, Rect]) -> tuple[set[str] | None, str]:
         u.GetClassNameW(hwnd, cls, 64)
         if cls.value in _SHELL_CLASSES:
             return set(), ""        # the desktop or taskbar
+        if u.IsIconic(hwnd):
+            return set(), ""        # minimized
+        if dwm is not None:
+            cloaked = wintypes.DWORD(0)
+            if (dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked),   # DWMWA_CLOAKED
+                                          ctypes.sizeof(cloaked)) == 0 and cloaked.value):
+                return set(), ""    # hidden by Windows (another virtual desktop, a suspended app)
+        # A normal maximized window (with a title bar) can cover the whole
+        # monitor when the taskbar hides itself; games in fullscreen or
+        # borderless mode have no title bar.
+        style = u.GetWindowLongW(hwnd, -16) & 0xFFFFFFFF     # GWL_STYLE
+        if (style & 0x00C00000) == 0x00C00000 and u.IsZoomed(hwnd):  # WS_CAPTION
+            return set(), ""
         r = wintypes.RECT()
         if not u.GetWindowRect(hwnd, ctypes.byref(r)):
             return set(), ""
@@ -371,7 +470,7 @@ def window_in_front(rects: dict[str, Rect]) -> tuple[set[str] | None, str]:
         u.GetWindowTextW(hwnd, title, 256)
         return filled, clean_title(title.value)
     except Exception:
-        return None, ""
+        return set(), ""            # can't tell on Windows: hold back, never adjust everything
 
 
 def full_screen_displays(rects: dict[str, Rect]) -> set[str] | None:
@@ -383,7 +482,14 @@ def full_screen_displays(rects: dict[str, Rect]) -> set[str] | None:
 # Screen capture (Windows GDI): a shrunken copy of one display
 # --------------------------------------------------------------------------
 
-def gdi_capture(rect: Rect, w: int = THUMB_W, h: int = THUMB_H) -> bytes | None:
+_gdi = None   # (ctypes, user32, gdi32, BITMAPINFO, BITMAPINFOHEADER), set up once
+
+
+def _gdi_setup():
+    """Declare the GDI functions and structures once (not on every capture)."""
+    global _gdi
+    if _gdi is not None:
+        return _gdi
     import ctypes
     from ctypes import wintypes
 
@@ -398,10 +504,14 @@ def gdi_capture(rect: Rect, w: int = THUMB_W, h: int = THUMB_H) -> bytes | None:
     class BITMAPINFO(ctypes.Structure):
         _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
 
-    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    # Own WinDLL handles, so these declarations never clash with other code
+    # that uses ctypes.windll.user32 / gdi32.
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
     vp = ctypes.c_void_p
     user32.GetDC.restype = vp
     user32.GetDC.argtypes = [vp]
+    user32.ReleaseDC.restype = ctypes.c_int
     user32.ReleaseDC.argtypes = [vp, vp]
     gdi32.CreateCompatibleDC.restype = vp
     gdi32.CreateCompatibleDC.argtypes = [vp]
@@ -409,22 +519,34 @@ def gdi_capture(rect: Rect, w: int = THUMB_W, h: int = THUMB_H) -> bytes | None:
     gdi32.CreateCompatibleBitmap.argtypes = [vp, ctypes.c_int, ctypes.c_int]
     gdi32.SelectObject.restype = vp
     gdi32.SelectObject.argtypes = [vp, vp]
+    gdi32.DeleteObject.restype = wintypes.BOOL
     gdi32.DeleteObject.argtypes = [vp]
+    gdi32.DeleteDC.restype = wintypes.BOOL
     gdi32.DeleteDC.argtypes = [vp]
+    gdi32.SetStretchBltMode.restype = ctypes.c_int
     gdi32.SetStretchBltMode.argtypes = [vp, ctypes.c_int]
+    gdi32.SetBrushOrgEx.restype = wintypes.BOOL
     gdi32.SetBrushOrgEx.argtypes = [vp, ctypes.c_int, ctypes.c_int, vp]
+    gdi32.StretchBlt.restype = wintypes.BOOL
     gdi32.StretchBlt.argtypes = [vp, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                  vp, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                  wintypes.DWORD]
+    gdi32.GetDIBits.restype = ctypes.c_int
     gdi32.GetDIBits.argtypes = [vp, vp, wintypes.UINT, wintypes.UINT, vp, vp, wintypes.UINT]
+    _gdi = (ctypes, user32, gdi32, BITMAPINFO, BITMAPINFOHEADER)
+    return _gdi
 
+
+def gdi_capture(rect: Rect, w: int = THUMB_W, h: int = THUMB_H) -> bytes | None:
+    ctypes, user32, gdi32, BITMAPINFO, BITMAPINFOHEADER = _gdi_setup()
     left, top, right, bottom = rect
     screen = user32.GetDC(None)
     if not screen:
         return None
-    mem = gdi32.CreateCompatibleDC(screen)
-    bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+    mem = bmp = None
     try:
+        mem = gdi32.CreateCompatibleDC(screen)
+        bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
         if not mem or not bmp:
             return None
         old = gdi32.SelectObject(mem, bmp)
@@ -445,10 +567,10 @@ def gdi_capture(rect: Rect, w: int = THUMB_W, h: int = THUMB_H) -> bytes | None:
         lines = gdi32.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(info), 0)
         return buf.raw if lines == h else None
     finally:
+        if mem:
+            gdi32.DeleteDC(mem)                  # first, so the bitmap is never still selected
         if bmp:
             gdi32.DeleteObject(bmp)
-        if mem:
-            gdi32.DeleteDC(mem)
         user32.ReleaseDC(None, screen)
 
 
@@ -479,9 +601,10 @@ class Watcher:
             self._rects = dict(rects)
             self._latest = {k: v for k, v in self._latest.items() if k in rects}
         if self.available and not self.running:
-            self._stop.clear()
-            self._thread = threading.Thread(target=self._run, name="catvision-auto-levels",
-                                            daemon=True)
+            # A fresh stop signal per run (see Fader.start).
+            stop = self._stop = threading.Event()
+            self._thread = threading.Thread(target=self._run, args=(stop,),
+                                            name="catvision-auto-levels", daemon=True)
             self._thread.start()
 
     def stop(self) -> None:
@@ -510,11 +633,11 @@ class Watcher:
         self.capture_ms = (time.perf_counter() - start) * 1000
         return out
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
+    def _run(self, stop: threading.Event) -> None:
+        while not stop.is_set():
             results = self.measure_once()
             with self._lock:
-                if not self._stop.is_set():
+                if not stop.is_set():
                     self._latest = results
                     self._seq += 1
-            self._stop.wait(INTERVAL_S)
+            stop.wait(INTERVAL_S)

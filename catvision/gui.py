@@ -72,6 +72,21 @@ TIPS = {
 
 BOOST_STEP = 10
 KEEP_APPLIED_MS = 2000
+AUTO_FRONT_S = 0.25   # re-check which window is in front this often, capture or not
+AUTO_STALE_S = 1.0    # no new picture for this long counts as "can't see it"
+
+
+def auto_tick_plan(now: float, fresh: bool, last_front: float,
+                   last_fresh: float) -> tuple[bool, bool]:
+    """Auto levels (beta): (re-check the window in front?, picture stale?).
+    The window in front is re-checked on its own clock, so a stalled capture
+    can't keep a display boosted after the game is gone; a picture that
+    hasn't changed for AUTO_STALE_S is treated as lost."""
+    recheck = fresh or now - last_front >= AUTO_FRONT_S
+    stale = not fresh and now - last_fresh >= AUTO_STALE_S
+    return recheck, stale
+
+
 SETTING_NAMES = {"shadow_boost": "Shadow boost", "exposure": "Exposure"}
 AUTO_TICK_MS = 100      # auto levels (beta) checks for new measurements this often
 
@@ -213,7 +228,10 @@ class CatVisionApp:
         self._auto_ctrl: dict[str, autolevels.Controller] = {}
         self._auto_key = ""
         self._auto_seq = -1
+        self._auto_seq_at = 0.0     # when a new measurement last arrived
+        self._auto_front_at = 0.0   # when the window in front was last checked
         self._auto_winding_down = False
+        self._auto_gen = 0
         self._auto_job = None
         self._auto_fader = autolevels.Fader(self._auto_ctrl, self._fader_apply)
         self._auto_shown: dict = {}
@@ -533,6 +551,8 @@ class CatVisionApp:
             for did in list(self._auto_ctrl):
                 if did not in rects:
                     del self._auto_ctrl[did]
+            if not self._auto_fader.running:
+                self._auto_gen = self.engine.auto_generation   # this run's updates count
             self._auto_fader.start()
             if self._auto_job is None and not self._closed:
                 self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
@@ -549,6 +569,7 @@ class CatVisionApp:
                 # back to the preset instead of jumping.
                 for ctrl in self._auto_ctrl.values():
                     ctrl.release()
+                self._auto_fader.wake()
                 if not self._auto_winding_down:
                     self._auto_winding_down = True
                     self.root.after(100, self._auto_wind_down)
@@ -568,8 +589,7 @@ class CatVisionApp:
         self._auto_winding_down = False
         self._auto_fader.stop()   # before clearing, so nothing moves the displays again
         self._auto_ctrl.clear()
-        if self.engine.auto_offsets:
-            self.engine.set_auto_offsets({})
+        self.engine.retire_auto_offsets()
 
     def _auto_tick(self) -> None:
         """Decide where each display should go as new measurements arrive
@@ -580,15 +600,20 @@ class CatVisionApp:
             return
         o = self.cfg.options
         key = self._auto_setting()
-        if key != self._auto_key:  # the preset switched between Shadow boost and Exposure
-            self._auto_ctrl.clear()
-            self._auto_key = key
+        # The preset may switch between Shadow boost and Exposure: the
+        # controllers keep their offsets and split_offset hands them to the
+        # new setting, so nothing jumps.
+        self._auto_key = key
         self._auto_fader.speed = autolevels.SPEEDS.get(o.auto_speed, 1.0)
         rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
         seq, latest = self.auto_watch.latest()
         fresh = seq != self._auto_seq
-        if fresh or not self._auto_shown:
-            self._auto_seq = seq
+        now = time.monotonic()
+        if fresh:
+            self._auto_seq, self._auto_seq_at = seq, now
+        recheck, stale = auto_tick_plan(now, fresh, self._auto_front_at, self._auto_seq_at)
+        if recheck or not self._auto_shown:
+            self._auto_front_at = now
             # Only adjust displays a game fills; elsewhere drift back to the preset.
             in_front, title = autolevels.window_in_front(rects)
             self._set_auto_game(title if in_front else "")
@@ -597,11 +622,17 @@ class CatVisionApp:
             self._auto_watched = (set(rects) if in_front is None else set(rects) & in_front)
             self.auto_watch.watch({d: rects[d] for d in self._auto_watched})
         shown: dict[str, tuple[str, object]] = {}
+        goals = {did: c.want for did, c in self._auto_ctrl.items()}
         for did in rects:
             ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
             if did not in self._auto_watched:
                 ctrl.release()
                 shown[did] = ("waiting", None)
+            elif stale and did in latest:
+                # The capture has stalled: let the controller's lost-picture
+                # logic hold, then ease back to the preset.
+                ctrl.observe(None, o.auto_strength, self._auto_aim(), o.auto_dim)
+                shown[did] = ("watching", latest[did])
             elif did in latest:
                 if fresh:
                     ctrl.observe(latest[did], o.auto_strength, self._auto_aim(), o.auto_dim)
@@ -611,6 +642,8 @@ class CatVisionApp:
         for did in list(self._auto_ctrl):
             if did not in rects:
                 del self._auto_ctrl[did]
+        if any(c.want != goals.get(did) for did, c in self._auto_ctrl.items()):
+            self._auto_fader.wake()   # a new goal (a flash, say): start moving now
         if fresh or shown.keys() != self._auto_shown.keys():
             self._auto_shown = shown
             self._render_auto_info(shown)
@@ -631,7 +664,7 @@ class CatVisionApp:
             if amounts or did in self.engine.auto_offsets:
                 offsets[did] = amounts
         if offsets != self.engine.auto_offsets:
-            self.engine.set_auto_offsets(offsets)
+            self.engine.set_auto_offsets(offsets, generation=self._auto_gen)
 
     def _keep_auto_look(self, quiet: bool = False) -> str:
         """Make auto levels aim for how the game looks right now."""
