@@ -215,15 +215,18 @@ class SceneScenarioTests(unittest.TestCase):
         """The whole picture wobbling one level up and down (compression,
         dithering) must not keep changing the goal, even in dark scenes."""
         rng = random.Random(8)
+        # Its own pictures: the shared bank's noise depends on which tests
+        # ran first, which made this test pass or fail with the test order.
+        pics = _Pictures()
         failures = []
         for level in range(4, 240, 3):
             for strength in (30.0, 60.0):
                 ctrl = Controller()
                 target = 0.12
-                entries = [PICS.get(level + rng.randint(-1, 1), rng.randrange(VARIANTS))
+                entries = [pics.get(level + rng.randint(-1, 1), rng.randrange(VARIANTS))
                            for _ in range(15)]
                 _run(ctrl, entries, strength, target)
-                entries = [PICS.get(level + rng.randint(-1, 1), rng.randrange(VARIANTS))
+                entries = [pics.get(level + rng.randint(-1, 1), rng.randrange(VARIANTS))
                            for _ in range(75)]
                 frames = _run(ctrl, entries, strength, target)
                 changes = sum(1 for a, b in zip(frames, frames[1:]) if a[1] != b[1])

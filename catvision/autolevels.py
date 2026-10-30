@@ -54,7 +54,7 @@ DARKER = 0.9                    # ...by this much, start brightening early (on t
 FLASH_RATIO = 2.0               # a picture twice as bright as the last one is a flash...
 LOST_S = 2.0                    # ...and a picture lost this long eases back to the preset
 BLACK_HOLD_S = 30.0             # a black screen holds the look this long (loading screens)
-NOISE_KEY = 2.0 / 255           # a wobble this small (about a level each way) is only noise
+NOISE_KEY = 2.5 / 255           # a wobble this small (about a level each way, with margin) is only noise
 FROZEN_S = 3.0                  # a picture that hasn't changed at all this long is stale
 AIM_STEP = 1.25                 # the "aim brighter / darker" hotkeys change Aim for this much
 # When the main slider runs out of room, the rest goes to the other one
