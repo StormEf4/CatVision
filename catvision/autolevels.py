@@ -24,9 +24,9 @@ RISE_S = 1.2                    # brightening is slow and smooth...
 RISE_FAST_S = 0.4               # ...but catches up quicker after a big change (into a cave)
 FALL_S = 0.3                    # dimming is fast, so flashes never blind you
 RUSH_S = 0.12                   # a flash fades down in about a tenth of a second
-# Speed limits in slider points per second: with 60 updates a second even
-# the fastest normal fade moves well under one point per update, which the
-# eye can't see as a step.
+# Speed limits in slider points per second: with 60 updates a second (more
+# on faster screens) even the fastest normal fade moves well under one point
+# per update, which the eye can't see as a step.
 MAX_RISE = 25.0
 MAX_RISE_FAST = 55.0
 MAX_FALL = 50.0
@@ -36,7 +36,8 @@ MAX_RUSH = 240.0
 # quicker but still below the step the eye notices.
 CEILING = 80.0
 CEILING_RUSH = 240.0
-FADER_HZ = 60                   # how often the displays are moved
+FADER_HZ = 60                   # how often the displays are moved (a 60 Hz screen)...
+FADER_MAX_HZ = 120              # ...and on faster screens up to this, so each step is smaller
 IDLE_S = 0.1                    # how often the fader checks for a new goal while at rest
 STOPS_FOR_FULL = 3.0            # 3 stops darker/brighter than the target = full strength
 DEAD_ZONE = 0.08                # ignore changes smaller than this share of How much
@@ -185,7 +186,7 @@ class Controller:
     """Decides where one display should go and glides it there.
 
     observe() takes each new measurement (five a second) and sets the goal;
-    advance() moves toward it in tiny steps (60 a second, on the fader
+    advance() moves toward it in tiny steps (60-120 a second, on the fader
     thread).  The motion eases in and out like a spring and has a speed
     limit, so there is never a visible jump."""
     offset: float = 0.0
@@ -280,8 +281,12 @@ class Controller:
         self._settings = settings
         noise = settings == before and near <= self.want <= far
         if not noise and abs(want - self.want) >= max(0.5, strength * DEAD_ZONE) or flash:
+            # A flash fades down fast; so does a picture that keeps getting
+            # brighter while that fast fade is still going (walking out into
+            # daylight takes several measurements, not one).
+            brighter = self.rush and want < self.want
             self.want = want
-            self.rush = flash and want < self.offset
+            self.rush = (flash or brighter) and want < self.offset
 
     @property
     def black_too_long(self) -> bool:
@@ -360,6 +365,12 @@ class Controller:
         return self.offset
 
 
+def fader_rate(refresh_rates) -> int:
+    """Fader updates a second for these displays: their fastest refresh
+    rate, from FADER_HZ up to FADER_MAX_HZ."""
+    return min(FADER_MAX_HZ, max([FADER_HZ] + [int(hz) for hz in refresh_rates if hz]))
+
+
 class Fader:
     """Moves every display toward where auto levels wants it, FADER_HZ times
     a second on its own thread, so fades are smooth and never wait on the
@@ -370,7 +381,7 @@ class Fader:
         self.controllers = controllers
         self.apply = apply
         self.speed = 1.0
-        self.interval = 1.0 / hz
+        self.interval = 1.0 / hz     # may be changed while running (set_rate)
         self._stop = threading.Event()
         self._wake = threading.Event()   # a new goal: stop resting at once
         self._thread: threading.Thread | None = None
@@ -404,6 +415,10 @@ class Fader:
     def wake(self) -> None:
         """A goal changed: start moving now instead of after the rest pause."""
         self._wake.set()
+
+    def set_rate(self, hz: float) -> None:
+        """Updates a second (the displays' refresh rate; see fader_rate)."""
+        self.interval = 1.0 / max(1.0, hz)
 
     def settled(self) -> bool:
         """Every display is where it wants to be and has stopped moving."""
@@ -440,7 +455,7 @@ class Fader:
 
     def _run(self, stop: threading.Event,
              apply: Callable[[dict[str, float]], None] | None = None) -> None:
-        last = time.perf_counter()
+        last = due = time.perf_counter()
         idle = False
         self._applied = {}
         while not stop.is_set():
@@ -460,9 +475,19 @@ class Fader:
                 # Nothing to move: rest until a new goal (wake()) or a while.
                 self._wake.wait(IDLE_S)
                 self._wake.clear()
+                due = time.perf_counter()
                 continue
-            spare = self.interval - (time.perf_counter() - now)
-            stop.wait(max(spare, 0.002))
+            # The next step on a steady beat.  time.sleep is precise on
+            # Windows (Python 3.11+ uses a high-resolution timer); waiting on
+            # an Event snaps to Windows' 15.6 ms clock tick, which would turn
+            # 60 updates a second into about 32 (each step twice as big).
+            interval = self.interval
+            due += interval
+            now = time.perf_counter()
+            if due < now - interval:   # fell well behind (a stall): restart the beat, no rush to catch up
+                due = now
+            if due > now:
+                time.sleep(due - now)
 
 
 # --------------------------------------------------------------------------

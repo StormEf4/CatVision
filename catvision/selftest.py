@@ -360,7 +360,7 @@ def run(report_path: str) -> int:
         out["key_before"] = round(before.key, 4)
         original = gamma.get_ramp(m.id)
         if original is not None:
-            # How long one brightness change takes (the fader makes up to 60 a second).
+            # How long one brightness change takes (the fader makes up to 120 a second).
             ramps = [curves.build_ramp(curves.Settings(shadow_boost=40 + i % 2)) for i in range(2)]
             start = time.perf_counter()
             for i in range(20):
@@ -386,8 +386,38 @@ def run(report_path: str) -> int:
         out["watcher_stopped"] = not w.running
         return out
 
+    def fader_timing():
+        """Auto levels (beta): how many updates a second the fader really
+        makes on this PC, the old way of waiting for comparison, and each
+        display's refresh rate.  Information only: never fails the test."""
+        import threading
+        import time
+        from . import autolevels
+        out = {"refresh_hz": {m.short or m.id: m.hz for m in gamma.monitors()}}
+        try:
+            for hz in (autolevels.FADER_HZ, autolevels.FADER_MAX_HZ):
+                stamps = []
+                ctrl = autolevels.Controller(want=1e6, strength=1e6)   # always moving
+                fader = autolevels.Fader({"test": ctrl}, lambda pos: stamps.append(time.perf_counter()))
+                fader.set_rate(hz)
+                fader.start()
+                time.sleep(0.6)
+                fader.stop()
+                gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+                out[f"fader_{hz}_hz"] = round(len(gaps) / sum(gaps), 1) if gaps else 0.0
+                out[f"fader_{hz}_max_gap_ms"] = round(max(gaps) * 1000, 1) if gaps else None
+            stop, n, start = threading.Event(), 0, time.perf_counter()
+            while time.perf_counter() - start < 0.5:    # how 1.14 waited between updates
+                stop.wait(1 / 60)
+                n += 1
+            out["old_wait_hz"] = round(n / (time.perf_counter() - start), 1)
+        except Exception as exc:
+            out["error"] = repr(exc)
+        return out
+
     check("gamma", gamma_roundtrip)
     check("auto_levels", auto_levels)
+    check("fader", fader_timing)
     check("color_filter", color_filter)
     check("hotkeys", hotkeys)
     def full_strength():

@@ -32,6 +32,7 @@ class Monitor:
     original: list[list[int]] | None = None
     short: str = ""    # e.g. "Display 1 (main)"
     rect: tuple[int, int, int, int] | None = None  # left, top, right, bottom
+    hz: int = 60       # refresh rate (auto levels fades this many steps a second, up to a cap)
 
 
 @dataclass
@@ -105,6 +106,8 @@ class WindowsGammaBackend:
         g.DeleteDC.argtypes = [wintypes.HDC]
         g.DeleteDC.restype = wintypes.BOOL
         g.SetDeviceGammaRamp.argtypes = [wintypes.HDC, ctypes.c_void_p]
+        g.GetDeviceCaps.argtypes = [wintypes.HDC, ctypes.c_int]
+        g.GetDeviceCaps.restype = ctypes.c_int
         g.SetDeviceGammaRamp.restype = wintypes.BOOL
         g.GetDeviceGammaRamp.argtypes = [wintypes.HDC, ctypes.c_void_p]
         g.GetDeviceGammaRamp.restype = wintypes.BOOL
@@ -132,7 +135,8 @@ class WindowsGammaBackend:
             number = name.replace("\\\\.\\DISPLAY", "")
             short = f"Display {number}" + (" (main)" if primary else "")
             label = f"Display {number} - {friendly}" + (" (main)" if primary else "")
-            result.append(Monitor(name, label, primary, short=short, rect=rects.get(name)))
+            result.append(Monitor(name, label, primary, short=short, rect=rects.get(name),
+                                  hz=self._refresh_rate(name)))
         result.sort(key=lambda m: (not m.primary, m.id))
         return result
 
@@ -168,6 +172,15 @@ class WindowsGammaBackend:
         except OSError:
             pass
         return rects
+
+    def _refresh_rate(self, monitor_id: str) -> int:
+        """How many times a second the display refreshes (60 if Windows
+        doesn't say: 0 and 1 mean "the hardware default")."""
+        try:
+            hz = self._with_dc(monitor_id, lambda hdc: self._gdi32.GetDeviceCaps(hdc, 116))
+        except (OSError, AttributeError, ValueError):   # 116 = VREFRESH
+            return 60
+        return hz if isinstance(hz, int) and 1 < hz < 1000 else 60
 
     def _with_dc(self, monitor_id: str, fn):
         hdc = self._gdi32.CreateDCW(monitor_id, None, None, None)
@@ -205,7 +218,7 @@ _TIERS = (127, 120, 96)   # usual Windows limits (8-bit levels from a straight l
 # Fading updates: when the remembered strength stops working, weaker clamps
 # to try, strongest first, as fractions of where the search starts.
 _FADE_TARGETS = (0.8, 0.64, 0.5, 0.4, 0.3, 0.2, 0.12, 0.06, 0.03)
-# Fading updates (about 60 a second): forget a refusal after this many, so
+# Fading updates (60-120 a second): forget a refusal after this many, so
 # a brief burst of refusals (a fullscreen switch) can't weaken the look for good.
 _FORGET_AFTER = 60
 

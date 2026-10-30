@@ -104,7 +104,7 @@ def auto_tick_plan(now: float, fresh: bool, last_front: float,
 
 
 SETTING_NAMES = {"shadow_boost": "Shadow boost", "exposure": "Exposure"}
-AUTO_TICK_MS = 100      # auto levels (beta) checks for new measurements this often
+AUTO_TICK_MS = 50       # auto levels (beta) checks for new measurements this often
 
 
 MONITOR_EMOJI = "\U0001F5A5\uFE0F"   # desktop computer
@@ -596,6 +596,9 @@ class CatVisionApp:
             for did in list(self._auto_ctrl):
                 if did not in rects:
                     del self._auto_ctrl[did]
+            # Smaller, more frequent steps on faster screens (120 Hz and up).
+            self._auto_fader.set_rate(autolevels.fader_rate(
+                m.hz for m in self.engine.target_monitors()))
             if not self._auto_fader.running:
                 # This run's updates carry its own generation; once auto
                 # levels stops, anything still in flight from it is dropped.
@@ -657,7 +660,7 @@ class CatVisionApp:
 
     def _auto_tick(self) -> None:
         """Decide where each display should go as new measurements arrive
-        (five a second).  The fader thread does the actual moving, 60 times a
+        (five a second).  The fader thread does the actual moving, 60-120 times a
         second, so the picture glides instead of stepping."""
         self._auto_job = None
         if self._closed or not self._auto_active():
