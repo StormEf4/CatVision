@@ -12,6 +12,10 @@ it looks for hotkeys, so GetAsyncKeyState reports the physical key even for
 a press it turned into WM_HOTKEY (the release isn't a hotkey and goes through
 as usual).  Only the main key is checked, never the modifiers: letting go of
 Ctrl or Alt alone doesn't matter, letting go of the main key ends the peek.
+A Peek bound to a mouse button (Mouse 4, Middle, Ctrl+Mouse 5...) or to a
+plain key other than an F-key / Pause / Scroll Lock is seen by the key poller
+(hotkeys.KeyPoller, also read-only), and the key or button is checked here
+the same way (VK_XBUTTON1 and so on).
 Numpad keys: a hotkey on a numpad digit is the NumLock-on code (VK_NUMPAD5
 ...), and that is the code GetAsyncKeyState knows it by while it is held.
 Extended keys (the arrows, Insert, the numpad Enter) share their code with

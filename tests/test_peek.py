@@ -249,6 +249,26 @@ class EnginePeekTest(unittest.TestCase):
         glide(eng, 40)
         self.assertEqual(ramps(eng), before)
 
+    def test_haze_cut_gives_way_to_the_peek(self):
+        # Cut through haze lowers the black point, which would swallow most
+        # of a Peek's lift in the dark corners it is for: like auto levels'
+        # own lift (autolevels.HAZE_LIFT_OFF) the Peek comes first, and the
+        # cut comes back as the Peek glides out.
+        from catvision import autolevels
+        eng = two_engine()
+        eng.set_auto_offsets({D1: {"haze_cut": 60.0}})
+        before = ramps(eng)
+        self.assertEqual(eng.settings_for(D1).haze_cut, 60.0)
+        eng.set_peek(autolevels.HAZE_LIFT_OFF / 2)
+        self.assertAlmostEqual(eng.settings_for(D1).haze_cut, 30.0)
+        self.assertEqual(eng.settings_for(D1, peek=False).haze_cut, 60.0)
+        eng.set_peek(35)
+        self.assertEqual(eng.settings_for(D1).haze_cut, 0.0)
+        lifted = ramps(eng)
+        self.assertEqual(lifted[D1], lifted[D2])    # the same as a clear view's Peek
+        glide(eng, 35)
+        self.assertEqual(ramps(eng), before)
+
     def test_peek_and_auto_levels_updates_interleaved(self):
         # The fader keeps sending offsets while the peek moves: each update
         # shows both, and neither undoes the other.

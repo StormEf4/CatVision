@@ -264,6 +264,28 @@ class ControllerTest(unittest.TestCase):
         c.observe(self.clear, 30.0, 0.12)
         self.assertEqual(c.haze_want, 0.0)
 
+    def test_quick_capture_pace_waits_as_long(self):
+        # Ten pictures a second (twenty in bursts) when capturing is cheap:
+        # a puff of smoke a few tenths of a second long still moves nothing,
+        # as at five a second; haze that stays is still cut within a second
+        # or so.
+        for every, puff in ((0.1, 0.4), (0.05, 0.3)):
+            c, t = Controller(), [1.0]
+
+            def show(m, seconds):
+                for _ in range(round(seconds / every)):
+                    c.observe(replace(m, at=t[0]), 30.0, 0.12)
+                    for _ in range(round(every * 120)):
+                        c.advance(1 / 120)
+                    t[0] += every
+            show(self.clear, 1.0)
+            show(self.foggy, puff)
+            self.assertEqual(c.haze_want, 0.0, every)
+            show(self.clear, 1.0)
+            self.assertEqual(c.haze_want, 0.0, every)
+            show(self.foggy, 1.2)
+            self.assertGreater(c.haze_want, 30, every)
+
     def test_dead_band(self):
         c = Controller()
         self._run(c, self.foggy, 2.0)
@@ -323,8 +345,8 @@ class ControllerTest(unittest.TestCase):
         applied = []
         fader = Fader({"d": c}, applied.append)
         fader.tick(1 / 120, force=True)
-        for _ in range(4):
-            c.observe(self.foggy, 30.0, 0.12)
+        for i in range(4):      # (five a second: see HAZE_GAP_S)
+            c.observe(replace(self.foggy, at=1.0 + 0.2 * i), 30.0, 0.12)
         self.assertGreater(c.haze_want, 30)
         self.assertFalse(fader.settled())
         n = len(applied)

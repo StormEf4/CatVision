@@ -113,6 +113,7 @@ TEXTURE2D_GET_DESC = 10
 CONTEXT_MAP = 14
 CONTEXT_UNMAP = 15
 CONTEXT_COPY_SUBRESOURCE_REGION = 46
+CONTEXT_UPDATE_SUBRESOURCE = 48      # self-test only (Duplication.shrink_picture)
 CONTEXT_GENERATE_MIPS = 54
 
 IID_IDXGI_FACTORY1 = "770aae78-f26f-4dba-a829-253c83d1b387"
@@ -147,8 +148,10 @@ def mip_size(width: int, height: int, level: int) -> tuple[int, int]:
 
 def choose_mip(width: int, height: int, w: int = THUMB_W, h: int = THUMB_H) -> tuple[int, int, int]:
     """The smallest mip level still at least w x h (so the last shrink is a
-    small box average, like GDI's HALFTONE): (level, width, height).
-    A display smaller than the thumbnail uses level 0."""
+    small box average): (level, width, height).  A display smaller than the
+    thumbnail uses level 0.  The GDI route (autolevels.gdi_capture) shrinks
+    to this same size first and then uses the same resample(), so both
+    routes make the same thumbnail."""
     level = 0
     while True:
         nw, nh = mip_size(width, height, level + 1)
@@ -173,7 +176,8 @@ def resample(data: bytes, pitch: int, width: int, height: int,
     """Box-average a BGRA picture (rows ``pitch`` bytes apart, as the
     graphics card hands them over) to exactly w x h BGRA, top-down rows.
     Each thumbnail pixel is the rounded average of the source pixels it
-    covers, like GDI's HALFTONE shrink.  Alpha is left 0 (GDI's is too)."""
+    covers.  Alpha is left 0 (GDI's is too).  Both capture routes end with
+    this, from the same in-between size (choose_mip)."""
     if pitch < width * 4 or len(data) < pitch * (height - 1) + width * 4:
         raise ValueError("picture too small for its size")
     xs = _spans(width, w)
@@ -409,6 +413,7 @@ def _setup():
         "Unmap": proto(None, vp, vp, u32),
         "CopySubresourceRegion": proto(None, vp, vp, u32, u32, u32, u32, vp, u32, vp),
         "GenerateMips": proto(None, vp, vp),
+        "UpdateSubresource": proto(None, vp, vp, u32, vp, vp, u32, u32),
     }
 
     dxgi = ctypes.WinDLL("dxgi")
@@ -623,6 +628,19 @@ class Duplication:
     def shrink(self) -> bytes:
         """Shrink the copied picture on the graphics card (mipmaps), read the
         small level back and box-average it to the thumbnail size."""
+        data, pitch = self.read_mip()
+        return resample(data, pitch, self.mip_w, self.mip_h)
+
+    def read_mip(self) -> tuple[bytes, int]:
+        """Shrink the copied picture on the graphics card and read the small
+        mip level back: (BGRA rows, bytes from one row to the next).
+        (The card rounds to whole levels at each mip level.  Rounding half
+        up would measure grainy night scenes about 4% brighter in key than
+        GDI does (8% at worst, simulated on night frames): under
+        autolevels.NOISE_KEY,
+        and reading a bigger level would only halve it at 2-4x the Python
+        work, so it isn't guarded against.  The self-test's capture_probes
+        reports how the card rounds.)"""
         api = self.api
         byref = api.ctypes.byref
         if not self.context or not self.staging or (self.level and not self.view):
@@ -641,7 +659,32 @@ class Duplication:
             data = api.ctypes.string_at(mapped.pData, pitch * (self.mip_h - 1) + self.mip_w * 4)
         finally:
             _call(api, self.context, CONTEXT_UNMAP, "Unmap", self.staging, 0)
-        return resample(data, pitch, self.mip_w, self.mip_h)
+        return data, pitch
+
+    def shrink_picture(self, bgra: bytes, width: int, height: int) -> tuple[bytes, int]:
+        """Self-test only: shrink a known BGRA picture (top-down rows) on
+        this graphics card exactly as a screen picture is (mip chain, same
+        level choice): (the mip level's BGRA rows, pitch).  Shows how the
+        card rounds while averaging.  The textures are made for this size,
+        so the next grab() makes its own again."""
+        api = self.api
+        if (not self.context or width <= 0 or height <= 0
+                or len(bgra) < width * height * 4):
+            raise DxgiError("shrink_picture", DXGI_ERROR_INVALID_CALL)
+        try:
+            # (inside the try: a texture made before a failure is released too)
+            self._make_textures(width, height)
+            if not self.level or not self.mips or not self.view:
+                raise Unsupported("picture too small for a mip chain")
+            # The copy is the size UpdateSubresource reads (pitch x height),
+            # kept alive until it returns.
+            buf = api.ctypes.create_string_buffer(bytes(bgra[:width * height * 4]),
+                                                  width * height * 4)
+            _call(api, self.context, CONTEXT_UPDATE_SUBRESOURCE, "UpdateSubresource",
+                  self.mips, 0, None, buf, width * 4, 0)
+            return self.read_mip()
+        finally:
+            self._free_textures()
 
     def close(self) -> None:
         api = self.api

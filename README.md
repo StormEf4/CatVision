@@ -36,8 +36,11 @@ CatVision **never touches your games**:
 - It does **not** draw an overlay on the game. It doesn't look at your screen
   either, unless you turn on **Auto levels (beta)**, which only measures how
   bright the picture is (see [Auto levels](#auto-levels-beta)).
-- It does **not** use keyboard hooks. Hotkeys use the normal Windows
-  `RegisterHotKey` feature, the same one Discord and OBS use.
+- It does **not** use keyboard or mouse hooks, and never sends input.
+  Hotkeys with Ctrl, Alt or Win (and F-keys, Pause, Scroll Lock) use the
+  normal Windows `RegisterHotKey` feature, the same one Discord and OBS use.
+  Other plain keys and mouse buttons are watched by asking Windows "is this
+  key down?" (`GetAsyncKeyState`, read-only).
 
 It only uses two standard Windows display features:
 
@@ -119,7 +122,10 @@ You can make the close button quit instead in Settings.
 
 CatVision starts with **no hotkeys**, so it never takes a key you use for
 something else. Set the ones you want in the **Hotkeys** tab: double-click an
-action and press the keys.
+action and press the keys, or click the mouse button you want. Any key or
+combination works, and so do mouse buttons: **Middle mouse**, **Mouse 4**
+(back), **Mouse 5** (forward), alone or with Ctrl, Alt, Shift or Win
+(e.g. *Ctrl+Mouse 5*).
 
 | Action | What it does |
 | --- | --- |
@@ -143,8 +149,24 @@ all** removes them again. Everything is also in the tray menu.
 
 - Every built-in preset has its own on/off row. **Add preset hotkey...** gives
   your own presets one too.
-- CatVision won't let you pick a plain letter key like `Q`, because that key
-  would stop working in your games. Use Ctrl or Alt with it, or an F-key.
+- **Taken or shared?** A combination with **Ctrl, Alt or Win** (like
+  Ctrl+Alt+V) is *taken*: Windows gives it to CatVision and the game doesn't
+  see it. So are the **F-keys, Pause and Scroll Lock**, alone or with Shift
+  (like F8 or Shift+F8), exactly as before. Any **other plain key** (like
+  `Q`), any other **Shift** combination (like Shift+Q) and every **mouse
+  button** are *shared*: CatVision only watches them (about 60 times a
+  second, only the keys you bound) and **the game gets them too**, so pick one
+  you don't use in the game (a letter key also fires when you type it in chat
+  or another app). The list marks these *"shared with game"*.
+  While CatVision's own window is in front, shared keyboard keys and
+  left / right clicks are ignored (so typing a preset name or Shift-clicking
+  doesn't fire them); Middle mouse, Mouse 4 and Mouse 5 still work there.
+- The left and right mouse buttons only work with Ctrl, Alt, Shift or Win
+  (e.g. *Shift+Right mouse*): a plain click would fire all the time while you
+  play. Careful with Shift or Ctrl: if you sprint or crouch with them, a
+  *Shift+Left mouse* hotkey also fires whenever you shoot while sprinting.
+- Peek works with a mouse button too: hold Mouse 4 (for example) to peek, let
+  go and it glides back.
 - If another program already uses a key combination, the list marks it
   *"taken by another app"*. Pick a different one.
 - A small popup confirms each hotkey at the top of every ticked display. It
@@ -155,7 +177,8 @@ all** removes them again. Everything is also in the tray menu.
   and glides back to exactly the look you had when you let go. It raises
   Shadow boost first, since that lifts the darkest corners the most (also with
   the Night Vision presets), and Exposure when Shadow boost is nearly full.
-  A quick tap gives a short look. Set how much
+  While it is held, *Cut through haze* makes way for it, as it does for
+  auto levels' own lift. A quick tap gives a short look. Set how much
   with **Peek strength** on the Tune tab (10 to 60, normally 35). It only
   works while CatVision is on, and ends by itself after 10 seconds. To tell
   when you let go, CatVision asks Windows whether that key is still down
@@ -238,8 +261,14 @@ display and adjusts it live, the way your eyes adapt:
   the next one, about 0.07 seconds later, is still bright, so a flash
   shorter than that (a lightning stroke, a muzzle flash) doesn't dim the
   picture more often than at the usual pace and stormy nights aren't left
-  darker; one that lasts (a flashbang, a flare, daylight) still dims about
-  as soon. Glimpses of
+  darker; one that lasts (a flashbang, a flare) still dims about as soon.
+  A brighter copy that is a different view all over (turning toward the
+  sky or a bright doorway, stepping out into daylight) only needs the next
+  copy, about 0.05 seconds later, so a quick glance at it dims no more often
+  than at the usual pace while really walking out dims sooner (about 5%
+  less glare); lightning lighting one side or the sky of a night scene, a
+  muzzle flash or a flare lights only part of the view and still waits.
+  Glimpses of
   something bright (running past windows) don't count as a new view or as
   looking away, and if you keep turning back and forth between bright and
   dark it waits the usual way until you stop for a few seconds.
@@ -343,8 +372,10 @@ changing a lot; twice that when taking the copy is cheap, a few
 milliseconds, so it reacts a little sooner for no more CPU than the slower
 route) it takes a tiny, low-resolution copy of what Windows is
 already showing and measures only how bright it is: overall, how much of it
-is bright, and in 32 large blocks of the picture (8 across, 4 down) to tell turning to a
-new view from a light going off. It never touches the game, never saves or
+is bright, how bright its darkest few percent are and how spread out its tones
+are (for *Cut through haze*), and the same in 32 large blocks of the picture (8
+across, 4 down) to tell turning to a new view from a light going off and haze
+from a clear view. It never touches the game, never saves or
 sends the pictures, and never looks for anything in them. It only changes
 brightness, nothing that would point things out to you. The copy comes from
 one of two standard Windows screen-copy routes, both only reading the finished
@@ -557,7 +588,8 @@ the tray icon), then `python run_catvision.py` (or `CatVision.bat`).
 - `catvision/filters.py`: user color filters
 - `catvision/backends.py`: the two Windows display APIs (plus no-op versions)
 - `catvision/engine.py`: applies settings and always knows how to undo them
-- `catvision/hotkeys.py`: hotkey parsing and the `RegisterHotKey` listener
+- `catvision/hotkeys.py`: hotkey parsing, the `RegisterHotKey` listener and
+  the read-only key poller (plain keys, Shift combinations, mouse buttons)
 - `catvision/gui*.py`, `theme.py`, `tray.py`: the window, tabs and tray icon
 
 Run the tests with `python -m unittest -v`.

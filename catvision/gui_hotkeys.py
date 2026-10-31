@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from tkinter import ttk
 
 from . import dialogs
 from .dialogs import Modal
-from .hotkeys import (ACTION_LABELS, MODIFIER_NAMES, TK_MODIFIER_KEYSYMS, action_label,
-                      combo_problem, key_name_from_tk, suggested_hotkeys)
+from .hotkeys import (ACTION_LABELS, MODIFIER_NAMES, MOUSE_NAME, NEEDS_MODIFIER_BUTTONS,
+                      SHARED_NOTE, TK_MODIFIER_KEYSYMS, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+                      VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_TO_NAME, VK_XBUTTON1,
+                      VK_XBUTTON2, action_label, async_key_down,
+                      combo_is_shared, combo_problem, key_name_from_tk, suggested_hotkeys)
 from .theme import ACCENT, BG, FG, MUTED, WARN
 
 
@@ -22,11 +26,22 @@ class HotkeysTab:
 
         hint = ttk.Label(f, text="No hotkeys are set until you choose them. Double-click an "
                                  "action (or select it and click Change) and press the keys "
-                                 "you want. Preset hotkeys turn that preset on and off.",
+                                 "or mouse button you want. Preset hotkeys turn that preset "
+                                 "on and off.",
                          style="Muted.TLabel", justify="left",
                          wraplength=app.px_(380))
         hint.grid(row=0, column=0, sticky="w", pady=(0, 6))
-        f.bind("<Configure>", lambda e: hint.configure(wraplength=max(100, e.width - 24)))
+        # Shown while some hotkey is shared with the game (plain key, Shift
+        # combo or mouse button: watched, not taken).
+        self.shared_note = ttk.Label(f, text=SHARED_NOTE, style="Muted.TLabel",
+                                     justify="left", wraplength=app.px_(380))
+        self.shared_note.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.shared_note.grid_remove()
+
+        def wrap(e):
+            hint.configure(wraplength=max(100, e.width - 24))
+            self.shared_note.configure(wraplength=max(100, e.width - 24))
+        f.bind("<Configure>", wrap)
 
         self.tree = ttk.Treeview(f, columns=("action", "keys"), show="headings",
                                  selectmode="browse", height=12)
@@ -84,9 +99,18 @@ class HotkeysTab:
             if action in failed:
                 keys += "  (taken by another app)"
                 tags = ("warn",)
+            elif combo and combo_problem(combo):
+                keys += "  (not used: pick another)"   # e.g. a hand-edited plain click
+                tags = ("warn",)
+            elif combo and combo_is_shared(combo):
+                keys += "  (shared with game)"
             self.tree.insert("", "end", iid=action, values=(label, keys), tags=tags)
         if selected and self.tree.exists(selected[0]):
             self.tree.selection_set(selected[0])
+        if any(c and combo_is_shared(c) for c in self.cfg.hotkeys.values()):
+            self.shared_note.grid()
+        else:
+            self.shared_note.grid_remove()
 
     def _selected(self) -> str | None:
         sel = self.tree.selection()
@@ -154,54 +178,165 @@ class HotkeysTab:
             self.tree.selection_set(select)
 
 
-class KeyRecorder(Modal):
-    """Waits for the user to press a key combination."""
+# Tk mouse button numbers -> our button (Tk on Windows: 2 middle, 3 right;
+# X buttons arrive as 4/5 on some Windows builds, 8/9 on newer Tk and on
+# Linux, where 4/5 are the scroll wheel; or not at all, hence the poll).
+_TK_BUTTONS = {1: VK_LBUTTON, 2: VK_MBUTTON, 3: VK_RBUTTON, 8: VK_XBUTTON1, 9: VK_XBUTTON2}
+if sys.platform == "win32":
+    _TK_BUTTONS.update({4: VK_XBUTTON1, 5: VK_XBUTTON2})
+# Buttons read with GetAsyncKeyState while recording (Windows; read-only).
+_POLL_BUTTONS = (VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2, VK_LBUTTON, VK_RBUTTON)
+_MOD_VKS = (("Ctrl", (VK_CONTROL,)), ("Alt", (VK_MENU,)), ("Shift", (VK_SHIFT,)),
+            ("Win", (VK_LWIN, VK_RWIN)))
+RECORD_POLL_MS = 20
+ARM_MS = 200     # the click that opened the recorder never counts
 
-    def __init__(self, root: tk.Misc, what: str, fonts):
+
+class KeyRecorder(Modal):
+    """Waits for the user to press a key combination or mouse button."""
+
+    def __init__(self, root: tk.Misc, what: str, fonts,
+                 key_down=async_key_down, run: bool = True):
         super().__init__(root, "Press new keys")
         self.held: set[str] = set()
+        self._close_job = None
+        self.key_down = key_down
+        self.armed = False
+        # Buttons already down when recording starts (the opening click) only
+        # count once they have been let go and pressed again.
+        self._buttons_down = {vk: bool(key_down(vk)) for vk in _POLL_BUTTONS}
+        # Likewise keys already down (Space on the Change button, Enter in the
+        # preset picker): held on into auto-repeat they would be recorded as
+        # the new hotkey, now that plain keys are allowed.  Windows only (Tk's
+        # keycode is the virtual-key code there); empty elsewhere.
+        self._keys_down = {vk for vk in VK_TO_NAME if key_down(vk)}
         tk.Label(self, text="Press the new keys for:", bg=BG, fg=MUTED, font=fonts.normal).pack()
         tk.Label(self, text=what, bg=BG, fg=FG, font=fonts.bold).pack(pady=(0, 10))
         self.combo = tk.Label(self, text="...", bg=BG, fg=ACCENT, font=fonts.big, width=22)
         self.combo.pack()
-        self.msg = tk.Label(self, text="Hold Ctrl and/or Alt, then press a key.\nEsc cancels.",
+        self.msg = tk.Label(self, text="Press a key or a mouse button (Middle, Mouse 4, "
+                                       "Mouse 5), with Ctrl, Alt, Shift or Win if you "
+                                       "like.\nEsc cancels.",
                             bg=BG, fg=MUTED, font=fonts.small, justify="center", wraplength=360)
         self.msg.pack(pady=(10, 0))
         self.bind("<KeyPress>", self._press)
         self.bind("<KeyRelease>", self._release)
-        self.run()
+        self.bind("<ButtonPress>", self._button)
+        self._arm_job = self.after(ARM_MS, self._arm)
+        self._poll_job = self.after(RECORD_POLL_MS, self._poll)
+        if run:
+            self.run()
+
+    def _arm(self) -> None:
+        self._arm_job = None
+        self.armed = True
+
+    def destroy(self) -> None:
+        # (No timer may outlive the dialog: Esc, the window's X or a capture.)
+        for name in ("_poll_job", "_arm_job", "_close_job"):
+            job = getattr(self, name, None)
+            setattr(self, name, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+        super().destroy()
 
     def _mods(self) -> list[str]:
-        return [name for name, _v in MODIFIER_NAMES if name in self.held]
+        held = set(self.held)
+        # Windows: also a modifier already held when the dialog opened (Tk
+        # only sees its KeyPress if it is pressed afterwards).  Without this,
+        # Ctrl+Alt held early and then V would be taken as a plain V, which
+        # is now allowed (and shared with the game).
+        for name, vks in _MOD_VKS:
+            if any(self.key_down(vk) for vk in vks):
+                held.add(name)
+        return [name for name, _v in MODIFIER_NAMES if name in held]
+
+    def _poll(self) -> None:
+        """Mouse buttons by GetAsyncKeyState, whatever the Tk build passes on
+        (a read-only question; does nothing off Windows)."""
+        self._poll_job = None
+        if self.result is not None or not self.winfo_exists():
+            return
+        if self._keys_down:   # (a key released while the dialog lacked focus)
+            self._keys_down = {vk for vk in self._keys_down if self.key_down(vk)}
+        for vk in _POLL_BUTTONS:
+            down = bool(self.key_down(vk))
+            was = self._buttons_down.get(vk, False)
+            self._buttons_down[vk] = down
+            if down and not was and self.armed:
+                self._take_button(vk)
+                if self.result is not None:
+                    return
+        self._poll_job = self.after(RECORD_POLL_MS, self._poll)
+
+    def _button(self, e: tk.Event) -> str:
+        vk = _TK_BUTTONS.get(getattr(e, "num", 0))
+        if vk in NEEDS_MODIFIER_BUTTONS and self.key_down(vk) is not None:
+            # Windows: left / right are taken from the key-state poll only.
+            # Like the hotkey poller it sees the physical button, while Tk
+            # reports the logical one (they differ when the buttons are
+            # swapped for left-handed use).
+            return "break"
+        if vk is not None and self.armed:
+            self._take_button(vk)
+        return "break"
+
+    def _take_button(self, vk: int) -> None:
+        if self.result is not None:
+            return
+        if vk in NEEDS_MODIFIER_BUTTONS and not self._mods():
+            # Clicking around in the dialog is normal: just a gentle hint.
+            self.msg.configure(text=combo_problem(MOUSE_NAME[vk]), fg=WARN)
+            return
+        self._take("+".join(self._mods() + [MOUSE_NAME[vk]]))
+
+    def _take(self, combo: str) -> None:
+        self.combo.configure(text=combo)
+        problem = combo_problem(combo)
+        if problem:
+            self.msg.configure(text=problem, fg=WARN)
+            return
+        self.result = combo
+        if combo_is_shared(combo):
+            self.msg.configure(text="Shared with the game: it gets this key / button too.",
+                               fg=MUTED)
+            self._close_job = self.after(900, self.destroy)   # time to read the note
+        else:
+            self._close_job = self.after(250, self.destroy)   # let the user see what was recorded
 
     def _press(self, e: tk.Event) -> str:
         mod = TK_MODIFIER_KEYSYMS.get(e.keysym)
         if mod:
             self.held.add(mod)
-            self.combo.configure(text="+".join(self._mods()) + "+ ...")
+            if self.result is None:   # (keep showing what was recorded)
+                self.combo.configure(text="+".join(self._mods()) + "+ ...")
             return "break"
         if e.keysym == "Escape" and not self.held:
+            # Esc cancels, even while the "shared with the game" note of a
+            # key just pressed is still showing.
+            self.result = None
             self.destroy()
             return "break"
+        if self.result is not None:
+            return "break"
+        if getattr(e, "keycode", None) in self._keys_down:
+            return "break"   # held since before the dialog opened (auto-repeat)
         key = key_name_from_tk(e.keysym, e.keycode)
         if key is None:
             self.msg.configure(text=f"'{e.keysym}' can't be used as a hotkey. Try another key.",
                                fg=WARN)
             return "break"
-        combo = "+".join(self._mods() + [key])
-        self.combo.configure(text=combo)
-        problem = combo_problem(combo)
-        if problem:
-            self.msg.configure(text=problem, fg=WARN)
-            return "break"
-        self.result = combo
-        self.after(250, self.destroy)  # let the user see what was recorded
+        self._take("+".join(self._mods() + [key]))
         return "break"
 
     def _release(self, e: tk.Event) -> str:
         mod = TK_MODIFIER_KEYSYMS.get(e.keysym)
         if mod:
             self.held.discard(mod)
+        self._keys_down.discard(getattr(e, "keycode", None))
         return "break"
 
 

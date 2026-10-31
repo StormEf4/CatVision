@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import traceback
+from operator import add
 
 
 def _screenshots(root, app, report_path: str) -> list[str]:
@@ -487,7 +488,7 @@ def _median_ms(fn, n: int) -> float:
 def capture_costs(gamma) -> dict:
     """See run()'s capture_cost."""
     import ctypes
-    from .autolevels import gdi_capture
+    from .autolevels import THUMB_H, THUMB_W, gdi_capture, gdi_shrink
     mons = [m for m in gamma.monitors() if m.rect]
     if not mons:
         return {"skipped": "no display positions"}
@@ -496,6 +497,8 @@ def capture_costs(gamma) -> dict:
     out: dict = {"size": [right - left, bottom - top]}
     gdi_capture(rect)   # the first one sets things up
     out["capture_ms"] = _median_ms(lambda i: gdi_capture(rect), 8)
+    # Before: HALFTONE straight to the thumbnail, without the Python resample.
+    out["direct_shrink_ms"] = _median_ms(lambda i: gdi_shrink(rect, THUMB_W, THUMB_H), 8)
     # The same display copied at full size, without HALFTONE averaging.
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -541,7 +544,342 @@ def _thumb_diff(a: bytes, b: bytes) -> float:
     return round(total / (n * 3), 2)
 
 
-def dxgi_capture_check(gamma) -> dict:
+def write_png(path: str, bgra: bytes, width: int, height: int) -> str:
+    """Save a small BGRA picture (top-down rows) as an RGB PNG with only
+    the standard library.  Self-test diagnostics only: the app itself
+    never saves a screen copy."""
+    import struct
+    import zlib
+    rows = bytearray()
+    for y in range(height):
+        row = bgra[y * width * 4:(y + 1) * width * 4]
+        rgb = bytearray(width * 3)
+        rgb[0::3], rgb[1::3], rgb[2::3] = row[2::4], row[1::4], row[0::4]
+        rows += b"\x00" + rgb                  # filter type 0 (none)
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(rows), 9)) + chunk(b"IEND", b""))
+    with open(path, "wb") as f:
+        f.write(png)
+    return path
+
+
+def _save_pictures(report_path: str | None, pictures: dict) -> list[str]:
+    """``pictures``: suffix -> (bgra, width, height).  Best effort."""
+    saved: list[str] = []
+    if not report_path:
+        return saved
+    for suffix, (pixels, width, height) in pictures.items():
+        if not pixels:
+            continue
+        try:
+            saved.append(write_png(f"{report_path.rsplit('.', 1)[0]}.{suffix}.png",
+                                   pixels, width, height))
+        except Exception as exc:  # pictures are only a diagnostic
+            saved.append(f"{suffix} failed: {exc!r}")
+    return saved
+
+
+def _mean_level(bgra: bytes) -> float:
+    """Average blue, green and red value (0-255) of a BGRA picture."""
+    n = len(bgra) // 4
+    return (sum(bgra[0::4]) + sum(bgra[1::4]) + sum(bgra[2::4])) / (3 * n) if n else 0.0
+
+
+def _tight(data: bytes, pitch: int, width: int, height: int) -> bytes:
+    """Rows ``pitch`` bytes apart -> rows exactly width * 4 bytes."""
+    return b"".join(data[y * pitch:y * pitch + width * 4] for y in range(height))
+
+
+def capture_parity(dup, dxgi_thumb: bytes, rect, report_path: str | None = None) -> dict:
+    """The same still screen through both routes: the DXGI thumbnail (mip
+    level -> resample), the GDI one as it is made now (HALFTONE to the same
+    mip size -> the same resample) and as it was made before (HALFTONE
+    straight to the thumbnail).  Keys, differences, and the thumbnails and
+    in-between pictures as small PNGs next to the report."""
+    from .autolevels import THUMB_H, THUMB_W, gdi_shrink, measure
+    from .dxgicapture import resample
+    out: dict = {}
+    mw, mh = dup.mip_w, dup.mip_h
+
+    def safe(name, fn):
+        try:
+            return fn()
+        except Exception as exc:
+            out[f"{name}_error"] = repr(exc)
+            return None
+    mip = safe("dxgi_mip", dup.read_mip)
+    dxgi_mid = _tight(mip[0], mip[1], mw, mh) if mip else None
+    gdi_mid = safe("gdi_mip", lambda: gdi_shrink(rect, mw, mh))
+    gdi_old = safe("gdi_before", lambda: gdi_shrink(rect, THUMB_W, THUMB_H))
+    gdi_new = None
+    if gdi_mid:
+        gdi_new = gdi_mid if (mw, mh) == (THUMB_W, THUMB_H) else safe(
+            "gdi_resample", lambda: resample(gdi_mid, mw * 4, mw, mh))
+    keys: dict = {}
+    for name, pixels, width in (("dxgi", dxgi_thumb, THUMB_W), ("gdi", gdi_new, THUMB_W),
+                                ("gdi_before", gdi_old, THUMB_W),
+                                ("dxgi_mip", dxgi_mid, mw), ("gdi_mip", gdi_mid, mw)):
+        if pixels:
+            keys[name] = safe(f"measure_{name}", lambda p=pixels, w=width: measure(p, w))
+            if keys[name] is not None:
+                out[f"key_{name}"] = round(keys[name].key, 4)
+    a, b, old = keys.get("dxgi"), keys.get("gdi"), keys.get("gdi_before")
+    if a and b:
+        out["key_diff"] = round(abs(a.key - b.key), 4)
+        out["key_ratio"] = round(a.key / max(b.key, 1e-9), 4)
+        out["average_diff"] = round(abs(a.average - b.average), 4)
+        out["pixel_diff"] = _thumb_diff(dxgi_thumb, gdi_new)
+    if a and old:
+        out["key_diff_before"] = round(abs(a.key - old.key), 4)
+        out["average_diff_before"] = round(abs(a.average - old.average), 4)
+        out["pixel_diff_before"] = _thumb_diff(dxgi_thumb, gdi_old)
+    if dxgi_mid and gdi_mid:
+        # Same size, same screen: what is left is HALFTONE's averaging next
+        # to the mip chain's, or content one route sees and the other
+        # doesn't (layered windows aren't in a GDI copy without CAPTUREBLT).
+        out["mip_pixel_diff"] = _thumb_diff(dxgi_mid, gdi_mid)
+        out["mip_mean_diff"] = round(_mean_level(dxgi_mid) - _mean_level(gdi_mid), 3)
+        out["dxgi_mip_alpha"] = [min(dxgi_mid[3::4]), max(dxgi_mid[3::4])]
+    out["pictures"] = _save_pictures(report_path, {
+        "capture-dxgi": (dxgi_thumb, THUMB_W, THUMB_H),
+        "capture-gdi": (gdi_new, THUMB_W, THUMB_H),
+        "capture-gdi-before": (gdi_old, THUMB_W, THUMB_H),
+        "capture-dxgi-mip": (dxgi_mid, mw, mh),
+        "capture-gdi-mip": (gdi_mid, mw, mh)})
+    return out
+
+
+def probe_picture(width: int, height: int) -> bytes:
+    """A night-like test picture (BGRA, top-down): dark ground, small
+    lights and a bright HUD bar."""
+    dark = bytes((14, 12, 10, 0)) * width
+    lights = bytearray(dark)
+    for x in range(5, width - 4, 37):
+        lights[x * 4:(x + 3) * 4] = bytes((230, 240, 250, 0)) * 3
+    hud = bytearray(dark)
+    end = max(17, width // 3)
+    hud[16 * 4:end * 4] = bytes((200, 200, 200, 0)) * (end - 16)
+    top = height - height // 10
+    # The upper third is dark grain (levels 4-27, like a night scene's
+    # texture), so every 2 x 2 sum the mip chain rounds turns up and the
+    # rounding shows (an even dark area averages exactly).
+    import random
+    grain = bytearray(random.Random(7).randbytes(width * (height // 3) * 4).translate(
+        bytes(4 + i % 24 for i in range(256))))
+    grain[3::4] = bytes(len(grain) // 4)
+    rows = []
+    for y in range(height):
+        if top <= y < top + max(2, height // 40):
+            rows.append(bytes(hud))
+        elif (y // 3) % 13 == 5:
+            rows.append(bytes(lights))
+        elif y < height // 3:
+            rows.append(bytes(grain[y * width * 4:(y + 1) * width * 4]))
+        else:
+            rows.append(dark)
+    return b"".join(rows)
+
+
+def _mip_down(bgra: bytes, width: int, height: int, rounding: str) -> bytes:
+    """One mip level as a graphics card makes it from the level above (BGRA,
+    top-down): each pixel the average of a 2 x 2 box, rounded to a whole
+    level ``rounding`` = "half_up", "half_even" or "down".  Alpha 0."""
+    nw, nh = max(1, width // 2), max(1, height // 2)
+    if rounding == "half_up":
+        table = bytes(min(255, (s + 2) // 4) for s in range(1021))
+    elif rounding == "half_even":
+        table = bytes(min(255, s // 4 + (s % 4 > 2 or (s % 4 == 2 and s // 4 % 2 == 1)))
+                      for s in range(1021))
+    else:
+        table = bytes(s // 4 for s in range(1021))
+    out = bytearray(nw * nh * 4)
+    row = width * 4
+    for y in range(nh):
+        r0 = bgra[2 * y * row:(2 * y + 1) * row]
+        r1 = bgra[(2 * y + 1) * row:(2 * y + 2) * row] if height > 1 else r0
+        for c in range(3):
+            if width > 1:
+                sums = map(add, map(add, r0[c::8], r0[c + 4::8]), map(add, r1[c::8], r1[c + 4::8]))
+            else:
+                sums = map(add, map(add, r0[c::4], r0[c::4]), map(add, r1[c::4], r1[c::4]))
+            out[y * nw * 4 + c:(y + 1) * nw * 4:4] = bytes(map(table.__getitem__, sums))[:nw]
+    return bytes(out)
+
+
+def mip_chain(bgra: bytes, width: int, height: int, level: int, rounding: str) -> bytes:
+    """``level`` mip levels down (see _mip_down)."""
+    for _ in range(level):
+        bgra = _mip_down(bgra, width, height, rounding)
+        width, height = max(1, width // 2), max(1, height // 2)
+    return bgra
+
+
+def halftone_probe(report_path: str | None = None, width: int = 1024,
+                   height: int = 768) -> dict:
+    """GDI's HALFTONE shrink measured on a known picture in memory (no
+    screen content involved): straight to the thumbnail (before) and to the
+    mip size then resample (now), next to the exact box average.  Shows
+    whether HALFTONE itself averages like a box."""
+    from .autolevels import THUMB_H, THUMB_W, _gdi_setup, measure
+    from .dxgicapture import choose_mip, resample
+    ctypes, user32, gdi32, BITMAPINFO, BITMAPINFOHEADER = _gdi_setup()
+    vp = ctypes.c_void_p
+    gdi32.SetDIBits.restype = ctypes.c_int
+    gdi32.SetDIBits.argtypes = [vp, vp, ctypes.c_uint, ctypes.c_uint, vp, vp, ctypes.c_uint]
+    picture = probe_picture(width, height)
+    _, mw, mh = choose_mip(width, height)
+
+    def info_for(w, h):
+        info = BITMAPINFO()
+        info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        info.bmiHeader.biWidth, info.bmiHeader.biHeight = w, -h
+        info.bmiHeader.biPlanes, info.bmiHeader.biBitCount = 1, 32
+        return info
+    screen = user32.GetDC(None)
+    if not screen:
+        return {"error": "no screen DC"}
+    src = dst = src_bmp = None
+    shrunk = {}
+    try:
+        src, dst = gdi32.CreateCompatibleDC(screen), gdi32.CreateCompatibleDC(screen)
+        src_bmp = gdi32.CreateCompatibleBitmap(screen, width, height)
+        if not (src and dst and src_bmp):
+            return {"error": "no memory DC / bitmap"}
+        buf = ctypes.create_string_buffer(picture, len(picture))
+        if gdi32.SetDIBits(screen, src_bmp, 0, height, buf,
+                           ctypes.byref(info_for(width, height)), 0) != height:
+            return {"error": "SetDIBits failed"}
+        old_src = gdi32.SelectObject(src, src_bmp)
+        try:
+            for w, h in ((THUMB_W, THUMB_H), (mw, mh)):
+                bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+                if not bmp:
+                    continue
+                try:
+                    old = gdi32.SelectObject(dst, bmp)
+                    gdi32.SetStretchBltMode(dst, 4)          # HALFTONE
+                    gdi32.SetBrushOrgEx(dst, 0, 0, None)
+                    ok = gdi32.StretchBlt(dst, 0, 0, w, h, src, 0, 0, width, height,
+                                          0x00CC0020)        # SRCCOPY
+                    gdi32.SelectObject(dst, old)
+                    out_buf = ctypes.create_string_buffer(w * h * 4)
+                    if ok and gdi32.GetDIBits(dst, bmp, 0, h, out_buf,
+                                              ctypes.byref(info_for(w, h)), 0) == h:
+                        shrunk[(w, h)] = out_buf.raw
+                finally:
+                    gdi32.DeleteObject(bmp)
+        finally:
+            gdi32.SelectObject(src, old_src)
+    finally:
+        for dc in (src, dst):
+            if dc:
+                gdi32.DeleteDC(dc)
+        if src_bmp:
+            gdi32.DeleteObject(src_bmp)
+        user32.ReleaseDC(None, screen)
+    box = resample(picture, width * 4, width, height)              # exact box average
+    box_mid = resample(picture, width * 4, width, height, mw, mh)  # = an exact mip level
+    out: dict = {"size": [width, height], "mip_size": [mw, mh],
+                 "key_box": round(measure(box, THUMB_W).key, 4)}
+    direct, mid = shrunk.get((THUMB_W, THUMB_H)), shrunk.get((mw, mh))
+    now = resample(mid, mw * 4, mw, mh) if mid else None
+    if direct:
+        out["key_halftone_before"] = round(measure(direct, THUMB_W).key, 4)
+        out["pixel_diff_before"] = _thumb_diff(direct, box)
+    if mid and now:
+        out["key_halftone_now"] = round(measure(now, THUMB_W).key, 4)
+        out["pixel_diff_now"] = _thumb_diff(now, box)
+        out["mip_pixel_diff"] = _thumb_diff(mid, box_mid)
+        # An exact average keeps the picture's mean level: + = HALFTONE brightens.
+        out["mip_bias_levels"] = round(_mean_level(mid) - _mean_level(picture), 3)
+    if direct:
+        out["bias_levels_before"] = round(_mean_level(direct) - _mean_level(picture), 3)
+    out["pictures"] = _save_pictures(report_path, {
+        "probe-box": (box, THUMB_W, THUMB_H),
+        "probe-halftone-before": (direct, THUMB_W, THUMB_H),
+        "probe-halftone-now": (now, THUMB_W, THUMB_H),
+        "probe-halftone-mip": (mid, mw, mh)})
+    return out
+
+
+def gpu_probe(dup, report_path: str | None = None, width: int = 1024,
+              height: int = 768) -> dict:
+    """The same known picture as halftone_probe, shrunk by this graphics
+    card's mip chain (as a screen picture is): how its rounding at each
+    level moves the brightness next to an exact average."""
+    from .autolevels import THUMB_H, THUMB_W, measure
+    from .dxgicapture import resample
+    picture = probe_picture(width, height)
+    data, pitch = dup.shrink_picture(picture, width, height)
+    mw, mh = dup.mip_w, dup.mip_h
+    mid = _tight(data, pitch, mw, mh)
+    thumb = resample(mid, mw * 4, mw, mh)
+    box = resample(picture, width * 4, width, height)
+    box_mid = resample(picture, width * 4, width, height, mw, mh)
+    out = {"size": [width, height], "mip_level": dup.level, "mip_size": [mw, mh],
+           "key_box": round(measure(box, THUMB_W).key, 4),
+           "key_gpu": round(measure(thumb, THUMB_W).key, 4),
+           "pixel_diff": _thumb_diff(thumb, box),
+           "mip_pixel_diff": _thumb_diff(mid, box_mid),
+           # An exact average keeps the picture's mean level: + = the card brightens.
+           "mip_bias_levels": round(_mean_level(mid) - _mean_level(picture), 3)}
+    # Which rounding the card does at each level: the share of mip values
+    # that differ from each way of rounding (0 = that is how it rounds).
+    # "exact" = averaged at once, rounded only at the end.  Half up makes
+    # dark scenes measure a few % brighter than GDI; half even doesn't.
+    if dup.level:
+        n = mw * mh * 3
+        ways = {"exact": box_mid}
+        for rounding in ("half_up", "half_even", "down"):
+            ways[rounding] = mip_chain(picture, width, height, dup.level, rounding)
+        differ = {}
+        for name, sim in ways.items():
+            differ[name] = round(sum(1 for c in range(3) for a, b in zip(mid[c::4], sim[c::4])
+                                     if a != b) / n, 4)
+        out["rounding_differs"] = differ
+        out["rounding"] = min(differ, key=differ.get)
+        out["sim_bias_levels"] = {name: round(_mean_level(sim) - _mean_level(picture), 3)
+                                  for name, sim in ways.items()}
+    out["pictures"] = _save_pictures(report_path, {
+        "probe-gpu": (thumb, THUMB_W, THUMB_H), "probe-gpu-mip": (mid, mw, mh)})
+    return out
+
+
+def capture_probes(gamma, report_path: str | None = None) -> dict:
+    """See run()'s capture_probes: HALFTONE and the graphics card's mip
+    chain on a known picture.  Runs after every other check, with a fresh
+    duplication, so nothing else's textures are touched."""
+    from . import dxgicapture
+    out: dict = {}
+    try:
+        out["halftone_probe"] = halftone_probe(report_path)
+    except Exception as exc:
+        out["halftone_probe"] = {"error": repr(exc)}
+    mons = [m for m in gamma.monitors() if m.rect]
+    if not mons:
+        out["gpu_probe"] = {"skipped": "no display positions"}
+        return out
+    try:
+        dup = dxgicapture.Duplication(mons[0].id, mons[0].rect)
+    except Exception as exc:
+        out["gpu_probe"] = {"skipped": repr(exc)}
+        return out
+    try:
+        out["gpu_probe"] = gpu_probe(dup, report_path)
+    except Exception as exc:
+        out["gpu_probe"] = {"error": repr(exc)}
+    finally:
+        dup.close()
+        out["released"] = dup.dup is None and dup.device is None
+    return out
+
+
+def dxgi_capture_check(gamma, report_path: str | None = None) -> dict:
     """See run()'s fast_capture."""
     import statistics
     import time
@@ -599,13 +937,11 @@ def dxgi_capture_check(gamma) -> dict:
         again = dup.grab()
         out["unchanged_gives_last"] = again is dup.last
         # The same (still) screen both ways: should measure about the same.
-        gdi = gdi_capture(m.rect)
-        if gdi and again:
-            a, b = measure(again, THUMB_W), measure(gdi, THUMB_W)
-            out["key_dxgi"], out["key_gdi"] = round(a.key, 4), round(b.key, 4)
-            out["key_diff"] = round(abs(a.key - b.key), 4)
-            out["average_diff"] = round(abs(a.average - b.average), 4)
-            out["pixel_diff"] = _thumb_diff(again, gdi)
+        if again:
+            try:
+                out.update(capture_parity(dup, again, m.rect, report_path))
+            except Exception as exc:
+                out["parity_error"] = repr(exc)
     finally:
         dup.close()
         out["released"] = dup.dup is None and dup.device is None
@@ -692,14 +1028,55 @@ def run(report_path: str) -> int:
         return {"apply": ok, "reset": reset}
 
     def hotkeys():
+        # Information only: registers one unlikely combination, reads a few
+        # mouse buttons' state and runs the key poller briefly.  Nothing is
+        # pressed or sent.
         import time
-        from .hotkeys import HotkeyListener, bindings_from_config
-        listener = HotkeyListener(lambda a: None)
-        listener.start(bindings_from_config({"toggle": "Ctrl+Alt+Shift+F12"}))
+        from . import hotkeys as hk
+        listener = hk.HotkeyListener(lambda a: None)
+        # RegisterHotKey as before, plus a binding the key poller watches.
+        listener.start(hk.bindings_from_config({"toggle": "Ctrl+Alt+Shift+F12",
+                                                "off": "Mouse 5"}))
         time.sleep(0.2)
         failed = list(listener.failed)
-        listener.stop()
-        return {"supported": listener.supported, "failed": failed}
+        out = {"supported": listener.supported, "failed": failed,
+               "registered": [b.action for b in listener.registered_bindings],
+               "polled": [b.action for b in listener.polled_bindings]}
+        try:
+            poller = listener.poller
+            out["poller_running"] = bool(poller is not None and poller.running)
+            listener.stop()
+            out["poller_stopped"] = bool(poller is None or not poller.running)
+        except Exception as exc:
+            out["poller_error"] = repr(exc)
+            listener.stop()
+        # Mouse buttons nobody should be holding during the test read as up.
+        buttons = {}
+        for name, vk in (("middle", hk.VK_MBUTTON), ("mouse4", hk.VK_XBUTTON1),
+                         ("mouse5", hk.VK_XBUTTON2)):
+            try:
+                buttons[name] = {"down": hk.async_key_down(vk)}
+                if listener.supported:
+                    import ctypes
+                    raw = int(ctypes.windll.user32.GetAsyncKeyState(vk)) & 0xFFFF
+                    buttons[name]["raw"] = raw
+            except Exception as exc:
+                buttons[name] = {"error": repr(exc)}
+        out["mouse_buttons"] = buttons
+        out["mouse_buttons_read_up"] = all(b.get("down") is False for b in buttons.values())
+        # The poller on its own: starts, runs a few passes, stops cleanly.
+        try:
+            p = hk.KeyPoller(hk.bindings_from_config({"off": "Mouse 4"}), lambda a: None)
+            p.start()
+            time.sleep(0.1)
+            out["standalone_poller_ran"] = p.running
+            t0 = time.perf_counter()
+            p.stop()
+            out["standalone_poller_stop_s"] = round(time.perf_counter() - t0, 3)
+            out["standalone_poller_stopped"] = not p.running
+        except Exception as exc:
+            out["standalone_poller_error"] = repr(exc)
+        return out
 
     def tray():
         from .tray import Tray, TrayState
@@ -913,7 +1290,7 @@ def run(report_path: str) -> int:
         everything.  Information only: never fails the test."""
         out: dict = {}
         try:
-            out.update(dxgi_capture_check(gamma))
+            out.update(dxgi_capture_check(gamma, report_path))
         except Exception as exc:
             out["error"] = repr(exc)
         return out
@@ -949,6 +1326,23 @@ def run(report_path: str) -> int:
     check("peek_key", peek_key)
     check("displays", displays)
     check("window", window)
+
+    def probes():
+        """Auto levels (beta): how GDI's HALFTONE and this graphics card's
+        mip chain average a known night-like picture (in memory, no screen
+        content) next to an exact average, and how the card rounds.  Last:
+        it uploads a picture to the card (UpdateSubresource), and a mistake
+        there could end the process.  Information only."""
+        out: dict = {}
+        try:
+            out.update(capture_probes(gamma, report_path))
+        except Exception as exc:
+            out["error"] = repr(exc)
+        return out
+
+    checks["capture_probes"] = "started (still this: it ended the process)"
+    save_so_far()
+    check("capture_probes", probes)
 
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

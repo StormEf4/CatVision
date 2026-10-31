@@ -417,7 +417,8 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual((d.DEVICE_CREATE_TEXTURE_2D, d.DEVICE_CREATE_SHADER_RESOURCE_VIEW), (5, 7))
         self.assertEqual(d.TEXTURE2D_GET_DESC, 10)
         self.assertEqual((d.CONTEXT_MAP, d.CONTEXT_UNMAP, d.CONTEXT_COPY_SUBRESOURCE_REGION,
-                          d.CONTEXT_GENERATE_MIPS), (14, 15, 46, 54))
+                          d.CONTEXT_UPDATE_SUBRESOURCE, d.CONTEXT_GENERATE_MIPS),
+                         (14, 15, 46, 48, 54))
 
 
 # --------------------------------------------------------------------------
@@ -663,6 +664,10 @@ class FakeWorld:
         def generate_mips(this, view):
             self.calls.append(("GenerateMips", self.kind_of(view)))
 
+        def update(this, dst, dsub, box, data, pitch, depth_pitch):
+            self.calls.append(("UpdateSubresource", self.kind_of(dst), dsub, box, pitch,
+                               depth_pitch, bool(data)))
+
         def map_(this, res, sub, kind, flags, pmapped):
             self.calls.append(("Map", self.kind_of(res), sub, kind, flags))
             if "Map" in self.fail:
@@ -683,6 +688,7 @@ class FakeWorld:
             14: (c.CFUNCTYPE(HR, VP, VP, U, c.c_int32, U, VP), map_),
             15: (c.CFUNCTYPE(None, VP, VP, U), unmap),
             46: (c.CFUNCTYPE(None, VP, VP, U, U, U, U, VP, U, VP), copy),
+            48: (c.CFUNCTYPE(None, VP, VP, U, VP, VP, U, U), update),
             54: (c.CFUNCTYPE(None, VP, VP), generate_mips)})
         self.out(pdevice, device)
         self.out(pcontext, context)
@@ -873,6 +879,43 @@ class FakeComTest(unittest.TestCase):
         dup.close()
         self.assertEqual((world.alive(), world.errors), ([], []))
 
+    def test_shrink_picture_for_the_selftest(self):
+        # A known picture through the card's mip chain: uploaded to level 0,
+        # shrunk and read back like a screen picture; the textures are
+        # released after, so the next grab makes its own again.
+        world = self.world()
+        dup = dxgicapture.Duplication(D1)
+        data, pitch = dup.shrink_picture(bytes(1024 * 768 * 4), 1024, 768)
+        self.assertEqual((dup.level, dup.mip_w, dup.mip_h, pitch), (3, 128, 96, 128 * 4 + 64))
+        self.assertEqual(len(data), pitch * 95 + 128 * 4)
+        self.assertEqual(self.calls(world, "UpdateSubresource"),
+                         [("UpdateSubresource", "mips", 0, None, 1024 * 4, 0, True)])
+        self.assertEqual(self.calls(world, "GenerateMips"), [("GenerateMips", "view")])
+        self.assertEqual(dup.size, (0, 0))
+        self.assertIsNone(dup.mips)
+        with self.assertRaises(dxgicapture.DxgiError):
+            dup.shrink_picture(b"short", 1024, 768)
+        dup.close()
+        self.assertEqual((world.alive(), world.errors), ([], []))
+
+    def test_shrink_picture_releases_textures_when_setup_fails(self):
+        # The mip texture is made, its view fails: nothing is left behind
+        # and nothing is uploaded.
+        world = self.world()
+        dup = dxgicapture.Duplication(D1)
+        world.fail["CreateShaderResourceView"] = -2147024882   # E_OUTOFMEMORY
+        with self.assertRaises(dxgicapture.DxgiError):
+            dup.shrink_picture(bytes(1024 * 768 * 4), 1024, 768)
+        self.assertEqual(self.calls(world, "UpdateSubresource"), [])
+        self.assertIsNone(dup.mips)
+        # Too small for a mip chain: refused, released, nothing uploaded.
+        del world.fail["CreateShaderResourceView"]
+        with self.assertRaises(dxgicapture.Unsupported):
+            dup.shrink_picture(bytes(64 * 32 * 4), 64, 32)
+        self.assertEqual(self.calls(world, "UpdateSubresource"), [])
+        dup.close()
+        self.assertEqual((world.alive(), world.errors), ([], []))
+
     def test_method_signatures(self):
         # Argument counts after the object pointer and the return types, from
         # the SDK headers.
@@ -885,7 +928,8 @@ class FakeComTest(unittest.TestCase):
                 "AcquireNextFrame": (hr, 3), "ReleaseFrame": (hr, 0),
                 "CreateTexture2D": (hr, 3), "CreateShaderResourceView": (hr, 3),
                 "TextureGetDesc": (None, 1), "Map": (hr, 5), "Unmap": (None, 2),
-                "CopySubresourceRegion": (None, 8), "GenerateMips": (None, 1)}
+                "CopySubresourceRegion": (None, 8), "GenerateMips": (None, 1),
+                "UpdateSubresource": (None, 6)}
         self.assertEqual(set(api.methods), set(want))
         for name, (restype, n) in want.items():
             proto = api.methods[name]

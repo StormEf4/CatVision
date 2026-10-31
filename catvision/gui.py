@@ -1281,7 +1281,8 @@ class CatVisionApp:
             box, 1, self.peek_var, "Peek strength", *peek.STRENGTH_LIMITS, "int", self.fonts,
             self._on_peek_strength,
             tip="How much the Peek hotkey brightens while you hold it, to check a dark "
-                "corner. Let go and it glides back. Pick the key in the Hotkeys tab. "
+                "corner. Let go and it glides back. Pick the key (or a mouse button, "
+                "such as Mouse 4) in the Hotkeys tab. "
                 "Saved straight away (not part of the preset).")
 
     def _on_peek_strength(self) -> None:

@@ -52,6 +52,16 @@ BURST_QUICK_S = 0.05            # ...and twenty while the brightness is changing
 QUICK_GAP_S = (INTERVAL_S + INTERVAL_QUICK_S) / 2
 FLASH_CONFIRM_S = 0.06
 FLASH_AGAIN_S = 0.07            # (a little more: without capture times the clock steps by a frame)
+# A brighter picture that is a different view all over (see _brighter_view:
+# turned toward the sky or a window, stepped out into daylight) is looked at
+# again BURST_QUICK_S later instead and counts once seen again this long
+# after: a glance at it as short as a flash is caught about as often as at
+# the usual pace (half the time for a tenth of a second), and one that lasts
+# dims about as soon (within a tenth of a second on average).
+VIEW_CONFIRM_S = 0.04
+VIEW_CONFIRM_MOVED = 0.9        # (all over: at least this share of the parts changed, see
+                                # VIEW_MOVED; lightning lighting one side or the sky of a
+                                # night scene, a muzzle flash or a flare light less of it)
 RISE_S = 1.2                    # brightening is slow and smooth...
 RISE_FAST_S = 0.4               # ...but catches up quicker after a big change (into a cave)
 FALL_S = 0.3                    # dimming is fast, so flashes never blind you
@@ -259,7 +269,10 @@ HAZE_PART_KEY_TOP = (0.50, 0.60)  # a view this bright (key) is all bright (open
                                 #  field, a white menu with a HUD): less, then none
 HAZE_SHARE = 0.6                # take this share of the veil off (the rest stays: it's air)
 HAZE_FRAMES = 5                 # the middle of the last this many pictures counts (one smoke
-                                #  puff or muzzle flash moves nothing)
+                                #  puff or muzzle flash moves nothing)...
+HAZE_GAP_S = INTERVAL_S - INTERVAL_QUICK_S / 2  # ...at the usual pace: pictures closer than
+                                #  this (the quick pace, bursts) share a place, the newest
+                                #  counting, so the window stays about a second at any pace
 HAZE_RISE_S = 0.5               # eases in over about 1.5 s...
 HAZE_FALL_S = 0.7               # ...and out over about 2 s
 HAZE_STEP = 0.5                 # the fader passes it on when it moved this much (points)...
@@ -489,6 +502,19 @@ def view_layout(a: Measurement, b: Measurement) -> float | None:
     return sum(x * y for x, y in zip(da, db)) / norm
 
 
+def _brighter_view(last: Measurement | None, m: Measurement) -> bool:
+    """m is a different, brighter view than last (see
+    Controller._new_brighter_view) all over (see VIEW_CONFIRM_MOVED:
+    lightning lighting one side or the sky of a night scene, a muzzle flash
+    or a flare lights only part of it, though its layout changes) and not a
+    white-out (lightning whiting the screen out has a layout of its own
+    under a HUD)."""
+    if _white_out(m) or not Controller._new_brighter_view(last, m):
+        return False
+    moved = view_moved(last, m)
+    return moved is not None and moved >= VIEW_CONFIRM_MOVED
+
+
 def measure(bgra: bytes, width: int | None = None) -> Measurement:
     """Brightness of a 32-bit BGRA picture (as Windows hands it over).
     With the picture's width (a real capture), the middle of the screen
@@ -566,10 +592,12 @@ def capture_interval(prev: Measurement | None, m: Measurement | None,
     prev), so a new view is still seen VIEW_STEADY_S after it first was a
     tenth of a second later, not at the next picture at rest.  Right after
     a brightening, the quick pace looks again FLASH_AGAIN_S later instead
-    (a flash then counts only if it is still there: see FLASH_CONFIRM_S)."""
+    (a flash then counts only if it is still there: see FLASH_CONFIRM_S),
+    or BURST_QUICK_S later for a different view (see VIEW_CONFIRM_S)."""
     if cost_ms is not None and cost_ms <= QUICK_CAPTURE_MS:
         if _changed(prev, m) and m.key > prev.key:
-            return FLASH_AGAIN_S
+            # (A different view sooner: see VIEW_CONFIRM_S.)
+            return BURST_QUICK_S if _brighter_view(prev, m) else FLASH_AGAIN_S
         return BURST_QUICK_S if _changed(prev, m) or _changed(older, prev) else INTERVAL_QUICK_S
     return BURST_S if _changed(prev, m) else INTERVAL_S
 
@@ -799,9 +827,10 @@ class Controller:
     haze_on: bool = True                           # "Cut through haze (beta)" is ticked
     haze: float = 0.0                              # haze cut now (curves.haze_cut points)...
     haze_want: float = 0.0                         # ...and where it is heading
-    _hazes: list = field(default_factory=list)    # haze_for_view of the last HAZE_FRAMES pictures
+    _hazes: list = field(default_factory=list)    # haze_for_view of the last HAZE_FRAMES places
     _seen: list = field(default_factory=list)     # (time, Measurement): every picture of the last SETTLE_S
     _unconfirmed: tuple | None = None              # (time, Measurement): a brighter picture not yet counted
+    _unconfirmed_view: bool = False                # (and it is a different view: see VIEW_CONFIRM_S)
 
     def observe(self, m: Measurement | None, strength: float, target: float,
                 dim: bool = True, now: float | None = None) -> None:
@@ -827,7 +856,7 @@ class Controller:
             self._signature, self._same_since = m.signature, clock
             self.frozen = False
             self._stretch = []
-            self._aim_haze(m)            # (none for a black picture)
+            self._aim_haze(m, clock)     # (none for a black picture)
             if self._black_since is None:
                 self._black_since = clock
             elif clock - self._black_since >= BLACK_HOLD_S:
@@ -853,7 +882,7 @@ class Controller:
                 self.haze_want, self._hazes = 0.0, []   # (a frozen picture's haze is no guide)
             return
         self._missing_since = None
-        self._aim_haze(m)              # (a held-back flash never gets here)
+        self._aim_haze(m, clock)       # (a held-back flash never gets here)
         held, self._unconfirmed = self._unconfirmed, None
         if held is not None:
             # Seen again (see FLASH_CONFIRM_S): the first picture counts too,
@@ -876,16 +905,26 @@ class Controller:
         if not self._last_key or m.key <= self._last_key * STEADY_RATIO:
             self._unconfirmed = None
             return False
-        if self._unconfirmed is None:
-            if quick:
-                self._unconfirmed = entry
-            return quick
-        if m.key * STEADY_RATIO < self._unconfirmed[1].key:
-            # Already much dimmer than the flash (a lightning stroke's
-            # afterglow): it starts again from this one.
+        if self._unconfirmed is None or m.key * STEADY_RATIO < self._unconfirmed[1].key:
+            # (Already much dimmer than the flash, a lightning stroke's
+            # afterglow: it starts again from this one.)
+            if not quick and self._unconfirmed is None:
+                return False
             self._unconfirmed = entry
+            # A different view (turned toward the sky or a window, stepped
+            # out into daylight) is confirmed by the next picture, taken
+            # BURST_QUICK_S later (see capture_interval): a glance at it as
+            # short as a flash is still caught no more often than at the
+            # usual pace, and one that lasts dims as soon.  Lightning
+            # lights the same view, or only part of it (see
+            # VIEW_CONFIRM_MOVED),
+            # or whites it out, and still waits.
+            # (Against the last picture counted, as capture_interval does.)
+            self._unconfirmed_view = _brighter_view(
+                self._stretch[-1][1] if self._stretch else None, m)
             return True
-        return _apart(self._unconfirmed, entry) < FLASH_CONFIRM_S
+        wait = VIEW_CONFIRM_S if self._unconfirmed_view else FLASH_CONFIRM_S
+        return _apart(self._unconfirmed, entry) < wait
 
     def _count(self, now: float, m: Measurement, strength: float, target: float,
                dim: bool) -> None:
@@ -1005,7 +1044,11 @@ class Controller:
         """The newest DARKENING_COUNT brightnesses (oldest first), at the
         usual pace: at the quick capture pace (see QUICK_CAPTURE_MS) only
         every other picture counts, so a light fading off over a fifth of a
-        second is no more "darker and darker" than it was."""
+        second is no more "darker and darker" than it was.  (Every other
+        one even when the change is gentle: pictures a fifth of a second
+        apart, checked ten times a second, start brightening while a light
+        swelling and fading every second or two fades, at night or in
+        drifting fog, and the picture pumps.)"""
         keys, last = [], None
         for t, k in reversed(self._recent):
             if last is None or last - t >= BURST_S - BURST_QUICK_S / 2:
@@ -1262,11 +1305,12 @@ class Controller:
     def _ease_room(self, dt: float) -> None:
         """Glide the Outside detail toward room_want: quicker up than down
         (an even exponential approach, so no step is ever visible)."""
-        gap = self.room_want - self.room
+        want = self.room_want      # (read once: the window thread may change it)
+        gap = want - self.room
         if not gap:
             return
         if abs(gap) < ROOM_SNAP:
-            self.room = self.room_want
+            self.room = want
             return
         # (Back to the preset, as auto levels stops, at the quick pace.)
         pace = ROOM_RISE_S if gap > 0 or self._room_back else ROOM_FALL_S
@@ -1280,16 +1324,23 @@ class Controller:
             self.haze_want, self._hazes = 0.0, []
         self.haze_on = on
 
-    def _aim_haze(self, m: Measurement) -> None:
+    def _aim_haze(self, m: Measurement, now: float) -> None:
         """Where the haze cut heads: the middle of the last HAZE_FRAMES
         pictures' haze_for_view (none while unticked; pictures not seen yet
         count as clear, so it takes more than half of them), moved only when
         that is HAZE_DEADBAND away (or none), so a still view never keeps
-        rewriting the brightness table."""
-        hazes = self._hazes
-        hazes.append(haze_for_view(m) if self.haze_on else 0.0)
+        rewriting the brightness table.  Pictures less than HAZE_GAP_S after
+        the first of their place (the quick capture pace, see
+        QUICK_CAPTURE_MS) take that place over instead of a new one."""
+        hazes = self._hazes      # [((time, Measurement) the place began, haze)]
+        entry, haze = (now, m), (haze_for_view(m) if self.haze_on else 0.0)
+        if hazes and _apart(hazes[-1][0], entry) < HAZE_GAP_S:
+            hazes[-1] = (hazes[-1][0], haze)
+        else:
+            hazes.append((entry, haze))
         del hazes[:-HAZE_FRAMES]
-        haze = (sorted([0.0] * (HAZE_FRAMES - len(hazes)) + hazes)[HAZE_FRAMES // 2]
+        values = [h for _e, h in hazes]
+        haze = (sorted([0.0] * (HAZE_FRAMES - len(values)) + values)[HAZE_FRAMES // 2]
                 if self.haze_on else 0.0)
         if not haze or abs(haze - self.haze_want) >= HAZE_DEADBAND:
             self.haze_want = haze
@@ -1782,6 +1833,26 @@ def _gdi_setup():
 
 
 def gdi_capture(rect: Rect, w: int = THUMB_W, h: int = THUMB_H) -> bytes | None:
+    """The display as a w x h BGRA thumbnail, made exactly like the DXGI
+    route's (dxgicapture), so both measure the same brightness: HALFTONE
+    shrinks the display to the size of the mip level the graphics card
+    would read back (an area average, like the mip chain's 2 x 2 boxes),
+    then the same Python box average (dxgicapture.resample) makes the
+    thumbnail.  (Shrinking straight to w x h used HALFTONE's own pixel
+    grid and weights; the CI self-test measured the routes 13% apart.)
+    The rect is in physical pixels (the app is per-monitor DPI aware), so
+    it is the size of the desktop picture DXGI hands over."""
+    left, top, right, bottom = rect
+    _, mw, mh = dxgicapture.choose_mip(right - left, bottom - top, w, h)
+    pixels = gdi_shrink(rect, mw, mh)
+    if pixels is None or (mw, mh) == (w, h):
+        return pixels
+    return dxgicapture.resample(pixels, mw * 4, mw, mh, w, h)
+
+
+def gdi_shrink(rect: Rect, w: int, h: int) -> bytes | None:
+    """The display shrunk by GDI (StretchBlt, HALFTONE) straight to w x h
+    BGRA (alpha 0), top-down rows."""
     ctypes, user32, gdi32, BITMAPINFO, BITMAPINFOHEADER = _gdi_setup()
     left, top, right, bottom = rect
     screen = user32.GetDC(None)

@@ -789,6 +789,8 @@ for _name, _fn in (("day", _day), ("room", _room), ("cave", _cave), ("lit", _lit
     PICS["hud " + _name] = measure(_frame(_hud(_vignette(_fn))), THUMB_W)
 PICS["centre lit"] = measure(_frame(_lit_part(0.5, 0.55, 0.4, 9)), THUMB_W)   # a muzzle flash
 PICS["corner lit"] = measure(_frame(_lit_part(0.08, 0.12, 0.5, 8)), THUMB_W)  # a lamp in a corner
+PICS["side lit"] = measure(_frame(_lit_part(0.1, 0.5, 0.7, 9)), THUMB_W)     # lightning, one side
+PICS["sky lit"] = measure(_frame(_lit_part(0.5, 0.1, 0.8, 9)), THUMB_W)      # ...the sky and more
 PICS["hud white"] = measure(_frame(_hud(_vignette(lambda fx, fy: 250))), THUMB_W)
 for _k in FADE_STEPS:
     PICS[f"hud fade {_k}"] = measure(_frame(_hud(_vignette(
@@ -969,16 +971,43 @@ class FlashAtTheQuickPaceTests(unittest.TestCase):
         c = Controller()
         c.offset = c.want = _settled("room")
         t = self._feed(c, ["room"] * 20, INTERVAL_QUICK_S)
-        t = self._feed(c, ["day"], autolevels.FLASH_AGAIN_S, t)
+        t = self._feed(c, ["lit"], autolevels.FLASH_AGAIN_S, t)
         self.assertEqual(c.want, _settled("room"))
         # A burst picture sooner than FLASH_CONFIRM_S doesn't confirm it...
-        t = self._feed(c, ["day"], autolevels.FLASH_AGAIN_S, t - autolevels.FLASH_AGAIN_S
+        t = self._feed(c, ["lit"], autolevels.FLASH_AGAIN_S, t - autolevels.FLASH_AGAIN_S
                        + BURST_QUICK_S)
         self.assertEqual(c.want, _settled("room"))
         # ...one FLASH_CONFIRM_S or more after the first does, as a flash.
-        self._feed(c, ["day"], INTERVAL_QUICK_S, t)
-        self.assertAlmostEqual(c.want, _settled("day"), delta=1.0)
+        self._feed(c, ["lit"], INTERVAL_QUICK_S, t)
+        self.assertAlmostEqual(c.want, _settled("lit"), delta=1.0)
         self.assertTrue(c.rush)
+
+    def test_a_new_brighter_view_is_confirmed_by_the_next_burst_picture(self):
+        # Turning toward the daylight (a different view, see VIEW_CONFIRM_S)
+        # counts once seen again BURST_QUICK_S later; the same brightening
+        # in the same view (a light, lightning) still waits FLASH_CONFIRM_S,
+        # and a white-out does too, and so does a light reaching only part
+        # of the view, though its layout changes (a muzzle flash, lightning
+        # lighting one side or the sky and most of the view: see
+        # VIEW_CONFIRM_MOVED).
+        for flash, counted in (("day", True), ("lit", False), ("white", False),
+                               ("centre lit", False), ("side lit", False), ("sky lit", False)):
+            with self.subTest(flash=flash):
+                c = Controller()
+                c.offset = c.want = _settled("room")
+                t = self._feed(c, ["room"] * 20, INTERVAL_QUICK_S)
+                t = self._feed(c, [flash], BURST_QUICK_S, t)
+                self.assertEqual(c.want, _settled("room"))
+                self._feed(c, [flash], BURST_QUICK_S, t)
+                self.assertEqual(c.want < _settled("room") - 1.0, counted)
+                if counted:
+                    self.assertTrue(c.rush)
+                # ...and a glance gone by the next picture isn't counted.
+                c = Controller()
+                c.offset = c.want = _settled("room")
+                t = self._feed(c, ["room"] * 20, INTERVAL_QUICK_S)
+                self._feed(c, [flash, "room", "room"], BURST_QUICK_S, t)
+                self.assertEqual(c.want, _settled("room"))
 
     def test_a_strokes_afterglow_starts_again(self):
         # A stroke (the day, 9.6x) and then its afterglow (the lit room,
@@ -1007,17 +1036,24 @@ class FlashAtTheQuickPaceTests(unittest.TestCase):
                 t = self._feed(c, ["room"] * 20, INTERVAL_QUICK_S, ats=ats)
                 ats = [ats[-1] + INTERVAL_QUICK_S, ats[-1] + INTERVAL_QUICK_S + apart]
                 # (seen 0.1 s apart either way: the window checks now and then)
-                self._feed(c, ["day", "day"], INTERVAL_QUICK_S, t, ats=ats)
+                self._feed(c, ["lit", "lit"], INTERVAL_QUICK_S, t, ats=ats)
                 self.assertEqual(c.want < _settled("room") - 1.0, counted)
 
     def test_capture_looks_again_soon_after_a_brightening(self):
         quick = QUICK_CAPTURE_MS
-        room, day = PICS["room"], PICS["day"]
-        self.assertEqual(capture_interval(room, day, quick), autolevels.FLASH_AGAIN_S)
+        room, day, lit, white = PICS["room"], PICS["day"], PICS["lit"], PICS["white"]
+        self.assertEqual(capture_interval(room, lit, quick), autolevels.FLASH_AGAIN_S)
+        self.assertEqual(capture_interval(room, white, quick), autolevels.FLASH_AGAIN_S)
+        for part in ("centre lit", "side lit", "sky lit"):
+            self.assertEqual(capture_interval(room, PICS[part], quick), autolevels.FLASH_AGAIN_S)
+        # (a different view, sooner: see VIEW_CONFIRM_S)
+        self.assertEqual(capture_interval(room, day, quick), BURST_QUICK_S)
         self.assertEqual(capture_interval(day, room, quick), BURST_QUICK_S)
         self.assertEqual(capture_interval(room, day, quick + 5.0), BURST_S)
+        self.assertEqual(capture_interval(room, lit, quick + 5.0), BURST_S)
         self.assertGreater(autolevels.FLASH_AGAIN_S, autolevels.FLASH_CONFIRM_S)
         self.assertGreater(autolevels.FLASH_CONFIRM_S, BURST_QUICK_S)
+        self.assertGreater(BURST_QUICK_S, autolevels.VIEW_CONFIRM_S)
         self.assertGreater(INTERVAL_S, autolevels.QUICK_GAP_S)
         self.assertGreater(autolevels.QUICK_GAP_S, INTERVAL_QUICK_S)
 
@@ -1038,6 +1074,22 @@ class FlashAtTheQuickPaceTests(unittest.TestCase):
                 dimmed[cost] = total
             with self.subTest(stroke_s=stroke_s):
                 self.assertLessEqual(dimmed[3.0], dimmed[None] * 0.75)
+
+    def test_a_light_swelling_and_fading_doesnt_pump_at_the_quick_pace(self):
+        # A light fading by 8% every tenth of a second (swelling and fading
+        # every second or two, at night or in drifting fog) is not "darker
+        # and darker" at the quick pace (see _darkening): every other
+        # picture is 15% darker, but brightening early as it fades would
+        # be taken back as it swells again.
+        room = PICS["room"]
+        c = Controller()
+        c.offset = c.want = _settled("room")
+        t = self._feed(c, ["room"] * 25, INTERVAL_QUICK_S)
+        for i in range(1, 9):
+            m = replace(room, key=room.key * 0.92 ** i, signature=10_000 + i)
+            c.observe(m, STRENGTH, AIM, now=t)
+            t += INTERVAL_QUICK_S
+        self.assertLessEqual(c.want, _settled("room") + 0.5)
 
     def test_a_lasting_flash_dims_about_as_soon_as_at_the_usual_pace(self):
         firsts = {}

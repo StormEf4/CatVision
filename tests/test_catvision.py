@@ -409,8 +409,11 @@ class HotkeyParsingTests(unittest.TestCase):
         self.assertIsNone(hk.combo_problem("Ctrl+Alt+V"))
         self.assertIsNone(hk.combo_problem("F8"))
         self.assertIsNone(hk.combo_problem("Shift+F8"))
-        self.assertIsNotNone(hk.combo_problem("Q"))          # would block typing in games
-        self.assertIsNotNone(hk.combo_problem("Shift+Q"))
+        # Plain keys and Shift combos are fine since 1.19: the key poller
+        # watches them and the game still gets them (see test_hotkeys_any_key).
+        self.assertIsNone(hk.combo_problem("Q"))
+        self.assertIsNone(hk.combo_problem("Shift+Q"))
+        self.assertIsNotNone(hk.combo_problem("Left mouse"))  # would fire all the time
         self.assertIsNotNone(hk.combo_problem("Ctrl+Alt+Delete"))
 
     def test_tk_key_names(self):

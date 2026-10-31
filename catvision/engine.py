@@ -331,6 +331,11 @@ class Engine:
         if peek and lift:   # Peek goes on top of everything
             for k, v in peek_lift(s, amounts, lift).items():
                 amounts[k] = amounts.get(k, 0.0) + v
+            if amounts.get("haze_cut"):
+                # Auto levels' haze cut (a lower black point) gives way to
+                # the Peek's lift as to its own (autolevels.HAZE_LIFT_OFF),
+                # or it would swallow the dark corners a Peek is for.
+                amounts["haze_cut"] *= max(0.0, 1.0 - lift / autolevels.HAZE_LIFT_OFF)
         if not amounts:
             return s
         return s.clamped({k: getattr(s, k) + v for k, v in amounts.items()})
