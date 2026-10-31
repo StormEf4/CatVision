@@ -110,6 +110,8 @@ def random_settings(rng: random.Random) -> Settings:
         data["green"] = data["blue"] = data["red"]
     if rng.random() < 0.3:   # Outside detail off (most saved looks), exactly
         data["highlight_room"] = rng.choice([0.0, -0.0, 0])
+    if rng.random() < 0.5:   # Cut through haze off (every saved look), exactly
+        data["haze_cut"] = rng.choice([0.0, -0.0, 0])
     return Settings(**data)
 
 
@@ -282,10 +284,12 @@ class BuildRampExactTest(unittest.TestCase):
 
     def test_outside_detail_off_is_the_old_curve(self):
         """highlight_room 0 (every look saved before it existed) gives
-        exactly the old curve and tables."""
+        exactly the old curve and tables (and so does haze_cut 0: the
+        reference is from before both)."""
         rng = random.Random(SEED + 5)
         for _ in range(400):
-            s = replace(random_settings(rng), highlight_room=0.0).clamped()
+            s = replace(random_settings(rng), highlight_room=0.0,
+                        haze_cut=rng.choice([0.0, -0.0, 0])).clamped()
             want = [reference_tone_curve_1_16(i / 255, s) for i in range(256)]
             self.assertEqual([x.hex() for x in curves._tone_table(s)],
                              [x.hex() for x in want])

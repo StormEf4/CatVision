@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import curves
+from . import autolevels, curves
 from .backends import GammaResult, Monitor, apply_ramp_with_fallback, shown_memory
 from .curves import Settings
 
@@ -27,6 +28,18 @@ _RETRY_S = 0.5
 # it: one or two calls.  A short refusal (a fullscreen switch) is searched at
 # every retry as before, so the look comes back as soon as Windows takes it.
 _SEARCH_EVERY_S = 10.0
+
+
+def peek_lift(settings: Settings, amounts: dict[str, float], lift: float) -> dict[str, float]:
+    """What a Peek of ``lift`` points adds on top of the preset plus auto
+    levels' ``amounts``: Shadow boost goes up first, because it lifts the
+    darkest parts the most (even with the night vision presets, where it
+    beats Exposure in the dark corners a Peek is for), and whatever doesn't
+    fit spills to Exposure (autolevels.split_offset).  Only ever brightens."""
+    base = {k: getattr(settings, k) + amounts.get(k, 0.0)
+            for k in ("shadow_boost", "exposure", "anti_glare")}
+    out = autolevels.split_offset("shadow_boost", lift, base)
+    return {k: v for k, v in out.items() if v > 0}
 
 
 @dataclass
@@ -78,6 +91,12 @@ class Engine:
         # Bumped when auto levels stops, so a late update from a fader that
         # was still finishing can't put a boost back afterwards.
         self.auto_generation = 0
+        # Peek: points added on top of everything (see peek_lift) on every
+        # chosen display while the Peek hotkey is held (0 = not peeking).
+        self.peek_amount = 0.0
+        # Bumped when a peek is cut short (CatVision off, quit), so a late
+        # step from that peek can't put the lift back.
+        self.peek_generation = 0
         self._lock = threading.RLock()  # force-quit restores from the tray thread
         self._flag = (state_dir / "display_modified.flag") if state_dir else None
         self._applied: dict[str, list[list[int]]] = {}
@@ -170,6 +189,7 @@ class Engine:
 
     def _apply(self) -> Status:
         if not self.enabled:
+            self._end_peek()   # a peek never outlives CatVision being on
             self._restore_gamma()
             self.color.reset()
             self.status = Status(enabled=False)
@@ -227,19 +247,57 @@ class Engine:
             self.auto_offsets = {d: dict(v) for d, v in offsets.items()}
             if not self.enabled:
                 return
-            now = time.monotonic()
-            due = {m.id for m in targets if not self._gamma_state.get(m.id, (True,))[0]
-                   and now - self._retry_at.get(m.id, now) >= _RETRY_S}
-            redo = changed + [m for m in targets if m.id in due and m not in changed]
-            if not redo:
+            self._redo_fading(changed)
+
+    def set_peek(self, amount: float, generation: int | None = None) -> None:
+        """Peek: lift by ``amount`` (see peek_lift) on every chosen display, on
+        top of the preset and auto levels (0 = back to exactly what showed
+        before).  Takes the same quick path as auto levels updates."""
+        with self._lock:
+            if generation is not None and generation != self.peek_generation:
+                return   # from a peek that was cut short
+            try:
+                amount = max(0.0, float(amount))
+            except (TypeError, ValueError):
+                amount = 0.0
+            if not math.isfinite(amount):
+                amount = 0.0
+            changed = amount != self.peek_amount
+            self.peek_amount = amount
+            if not self.enabled:
                 return
-            # Only the tint is needed (the color matrix is not redone).
-            tint = curves.plan_tint(self.settings, self.custom_tints)
-            search, offer_only = self._plan_retry(due)
-            # Displays with no adjustment left get the normal full apply, so
-            # they settle exactly where the preset alone would.
-            self._apply_gamma(redo, tint, self.status, fading=True, search=search,
-                              offer_only=offer_only)
+            self._redo_fading(self._targets() if changed else [])
+
+    def end_peek(self) -> None:
+        """Stop any peek at once and ignore its late steps."""
+        with self._lock:
+            lifted = self.peek_amount
+            self._end_peek()
+            if lifted and self.enabled:
+                self._redo_fading(self._targets())
+
+    def _end_peek(self) -> None:
+        self.peek_generation += 1
+        self.peek_amount = 0.0
+
+    def _redo_fading(self, changed: list) -> None:
+        """Redo the brightness tables of the displays whose adjustment
+        changed (auto levels or Peek), plus those Windows refused that are
+        due to be offered their look again (see _RETRY_S)."""
+        targets = self._targets()
+        now = time.monotonic()
+        due = {m.id for m in targets if not self._gamma_state.get(m.id, (True,))[0]
+               and now - self._retry_at.get(m.id, now) >= _RETRY_S}
+        redo = changed + [m for m in targets if m.id in due and m not in changed]
+        if not redo:
+            return
+        # Only the tint is needed (the color matrix is not redone).
+        tint = curves.plan_tint(self.settings, self.custom_tints)
+        search, offer_only = self._plan_retry(due)
+        # Displays with no adjustment left get the normal full apply, so
+        # they settle exactly where the preset alone would.
+        self._apply_gamma(redo, tint, self.status, fading=True, search=search,
+                          offer_only=offer_only)
 
     def _plan_retry(self, refused: set[str]) -> tuple[set[str], set[str]]:
         """Displays Windows refused, about to be offered their look again:
@@ -262,14 +320,19 @@ class Engine:
         without the lock; set_auto_offsets decides when to try again)."""
         return self.enabled and not self.status.gamma_ok
 
-    def settings_for(self, display_id: str) -> Settings:
-        """The settings a display really gets (the preset plus auto levels):
+    def settings_for(self, display_id: str, peek: bool = True) -> Settings:
+        """The settings a display really gets (the preset plus auto levels,
+        plus a Peek in progress unless ``peek`` is False):
         replace(...).clamped() in one pass (this runs on every auto levels
         update)."""
-        amounts = {k: v for k, v in self.auto_offsets.get(display_id, {}).items() if v}
-        if not amounts:
-            return self.settings
         s = self.settings
+        amounts = {k: v for k, v in self.auto_offsets.get(display_id, {}).items() if v}
+        lift = self.peek_amount
+        if peek and lift:   # Peek goes on top of everything
+            for k, v in peek_lift(s, amounts, lift).items():
+                amounts[k] = amounts.get(k, 0.0) + v
+        if not amounts:
+            return s
         return s.clamped({k: getattr(s, k) + v for k, v in amounts.items()})
 
     def _apply_gamma(self, monitors, tint, status: Status, fading: bool = False,
@@ -286,8 +349,9 @@ class Engine:
             self._fallback.clear()   # a full apply starts from the full ramp again
         ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
         for m in monitors:
-            adjusted = fading and any(self.auto_offsets.get(m.id, {}).values())
-            which = tuple(sorted(self.auto_offsets.get(m.id, {}).items()))
+            lifted = bool(any(self.auto_offsets.get(m.id, {}).values()) or self.peek_amount)
+            adjusted = fading and lifted
+            which = (tuple(sorted(self.auto_offsets.get(m.id, {}).items())), self.peek_amount)
             ramp = ramps.get(which)
             if ramp is None:
                 ramp = ramps[which] = curves.build_ramp(self.settings_for(m.id), tint)
@@ -311,7 +375,7 @@ class Engine:
                     result = self._apply_rest(m.id, ramp)
                 if result is None:
                     result = apply_ramp_with_fallback(self.gamma, m.id, ramp, None)
-                if result.ok and not any(self.auto_offsets.get(m.id, {}).values()):
+                if result.ok and not lifted:
                     # Only the preset's own look (a full apply during a boost
                     # shows the boosted one).
                     self._rest[m.id] = (ramp, result.applied or ramp)
@@ -422,6 +486,7 @@ class Engine:
     def shutdown(self) -> None:
         with self._lock:
             self.enabled = False
+            self._end_peek()
             self._restore_gamma()
             self.color.close()
             self.gamma.close()
@@ -441,12 +506,14 @@ class Engine:
             try:
                 self.enabled = False
                 self.auto_generation += 1
+                self._end_peek()
                 self._restore_gamma()
             finally:
                 self._lock.release()
         else:  # something is stuck holding the lock: restore without it
             self.enabled = False
             self.auto_generation += 1
+            self._end_peek()
             refused = [m for m in self._monitors
                        if not self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())]
             self._mark_dirty(bool(refused))

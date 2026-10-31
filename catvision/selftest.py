@@ -531,6 +531,120 @@ def capture_costs(gamma) -> dict:
     return out
 
 
+def _thumb_diff(a: bytes, b: bytes) -> float:
+    """Average difference (0-255) of the blue, green and red values of two
+    thumbnails of the same size."""
+    n = min(len(a), len(b)) // 4
+    if not n:
+        return 0.0
+    total = sum(abs(a[i] - b[i]) for i in range(n * 4) if i % 4 != 3)
+    return round(total / (n * 3), 2)
+
+
+def dxgi_capture_check(gamma) -> dict:
+    """See run()'s fast_capture."""
+    import statistics
+    import time
+    from . import curves, dxgicapture
+    from .autolevels import THUMB_W, Watcher, gdi_capture, measure
+    mons = [m for m in gamma.monitors() if m.rect]
+    if not mons:
+        return {"skipped": "no display positions"}
+    m = mons[0]
+    out: dict = {"monitor": m.short}
+    start = time.perf_counter()
+    try:
+        dup = dxgicapture.Duplication(m.id, m.rect)
+    except Exception as exc:
+        out["dxgi_available"] = False
+        out["reason"] = repr(exc)
+        return out
+    out["dxgi_available"] = True
+    out["open_ms"] = round((time.perf_counter() - start) * 1000, 1)
+
+    def first_picture(d):
+        for _ in range(20):          # up to about a second for the first picture
+            pixels = d.grab()
+            if pixels is not None:
+                return pixels
+            time.sleep(0.05)
+        return None
+    try:
+        pixels = first_picture(dup)
+        out["first_picture"] = pixels is not None
+        out["desktop_size"] = list(dup.size)
+        out["mip_level"] = dup.level
+        out["mip_size"] = [dup.mip_w, dup.mip_h]
+        if pixels is None:
+            return out
+        out["thumb_bytes"] = len(pixels)
+
+        def median_ms(fn, n=10):
+            times = []
+            for _ in range(n):
+                t = time.perf_counter()
+                fn()
+                times.append(time.perf_counter() - t)
+            return round(statistics.median(times) * 1000, 2)
+        frames, unchanged = dup.frames, dup.unchanged
+        out["dxgi_capture_ms"] = median_ms(dup.grab)
+        out["dxgi_new_pictures_in_10"] = dup.frames - frames
+        out["dxgi_unchanged_in_10"] = dup.unchanged - unchanged
+        # What a new picture costs (a game makes one every frame): shrinking
+        # on the graphics card, reading back and the last shrink in Python.
+        out["dxgi_new_picture_ms"] = median_ms(dup.shrink)
+        gdi_capture(m.rect)
+        out["gdi_capture_ms"] = median_ms(lambda: gdi_capture(m.rect))
+        # No new picture (a still screen): the last thumbnail comes back as is.
+        again = dup.grab()
+        out["unchanged_gives_last"] = again is dup.last
+        # The same (still) screen both ways: should measure about the same.
+        gdi = gdi_capture(m.rect)
+        if gdi and again:
+            a, b = measure(again, THUMB_W), measure(gdi, THUMB_W)
+            out["key_dxgi"], out["key_gdi"] = round(a.key, 4), round(b.key, 4)
+            out["key_diff"] = round(abs(a.key - b.key), 4)
+            out["average_diff"] = round(abs(a.average - b.average), 4)
+            out["pixel_diff"] = _thumb_diff(again, gdi)
+    finally:
+        dup.close()
+        out["released"] = dup.dup is None and dup.device is None
+    # CatVision's own brightness change (a gamma ramp) must not be in the
+    # copy, or auto levels would chase its own tail.  A new duplication (one
+    # display can only have one per program, so after the first is closed)
+    # hands over a whole new picture even on a still screen.
+    original = gamma.get_ramp(m.id)
+    if "key_dxgi" in out and original is not None and gamma.set_ramp(
+            m.id, curves.build_ramp(curves.Settings(shadow_boost=100))):
+        boosted = None
+        try:
+            time.sleep(0.2)
+            fresh = dxgicapture.Duplication(m.id, m.rect)
+            try:
+                boosted = first_picture(fresh)
+            finally:
+                fresh.close()
+        except Exception as exc:
+            out["boost_error"] = repr(exc)
+        finally:
+            gamma.set_ramp(m.id, original)
+        if boosted:
+            out["key_with_boost"] = round(measure(boosted, THUMB_W).key, 4)
+            out["capture_sees_boost"] = abs(out["key_with_boost"] - out["key_dxgi"]) > 0.02
+    # The Watcher's own thread: which route it chose, and letting go on stop.
+    w = Watcher()
+    w.watch({m.id: m.rect})
+    time.sleep(0.6)
+    seq, _ = w.latest()
+    w.stop()
+    out["watcher_measurements"] = seq
+    out["watcher_routes"] = dict(w.routes)
+    out["watcher_reasons"] = dict(w.route_reasons)
+    out["watcher_capture_ms"] = round(w.capture_ms, 2)
+    out["watcher_stopped"] = not w.running
+    return out
+
+
 def run(report_path: str) -> int:
     report: dict = {"platform": sys.platform, "frozen": bool(getattr(sys, "frozen", False)),
                     "checks": {}, "errors": []}
@@ -679,7 +793,9 @@ def run(report_path: str) -> int:
                 out["capture_sees_boost"] = abs(out["key_with_boost"] - out["key_before"]) > 0.02
         found = full_screen_displays({x.id: x.rect for x in mons})
         out["full_screen_now"] = None if found is None else sorted(found)
-        w = Watcher()
+        # The GDI copy only: the faster capture (DXGI) is first used by the
+        # fast_capture check, after the report marks it as started.
+        w = Watcher(fast=False)
         w.watch({m.id: m.rect})
         time.sleep(1.0)
         seq, latest = w.latest()
@@ -789,6 +905,32 @@ def run(report_path: str) -> int:
     check("update_cost", update_cost)
     check("gamma_calls", lambda: gamma_call_cost(gamma))
     check("capture_cost", capture_cost)
+
+    def fast_capture():
+        """Auto levels (beta): the faster screen capture (DXGI Desktop
+        Duplication): whether it works here (or why not), its speed next to
+        the GDI copy, whether both measure the same, and that it lets go of
+        everything.  Information only: never fails the test."""
+        out: dict = {}
+        try:
+            out.update(dxgi_capture_check(gamma))
+        except Exception as exc:
+            out["error"] = repr(exc)
+        return out
+
+    # A mistake in a COM call could end the process rather than raise: save
+    # what is known so far, so the report shows where it stopped.
+    def save_so_far():
+        try:
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+        except (OSError, TypeError, ValueError):
+            pass
+
+    checks["fast_capture"] = "started (still this: it ended the process)"
+    save_so_far()
+    check("fast_capture", fast_capture)
+    save_so_far()       # a later check ending the process isn't blamed on this one
     check("fader_load", fader_load)
     check("color_filter", color_filter)
     check("hotkeys", hotkeys)
@@ -798,8 +940,13 @@ def run(report_path: str) -> int:
         return {"unlocked": winutil.full_strength_unlocked(),
                 "boot_time_ok": winutil.boot_time() > 0 if winutil.IS_WINDOWS else None}
 
+    def peek_key():   # information only: reads one key's state, presses nothing
+        from .peek import key_state_check
+        return key_state_check()
+
     check("tray", tray)
     check("full_strength", full_strength)
+    check("peek_key", peek_key)
     check("displays", displays)
     check("window", window)
 

@@ -37,6 +37,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "contrast": (0.5, 2.0),
     "white_cap": (0.5, 1.0),
     "highlight_room": (0.0, 100.0),
+    "haze_cut": (0.0, 100.0),
     "red": (0.5, 1.5),
     "green": (0.5, 1.5),
     "blue": (0.5, 1.5),
@@ -84,6 +85,7 @@ class Settings:
     contrast: float = 1.0          # around mid-grey
     white_cap: float = 1.0         # maximum output, tames flashes/glare
     highlight_room: float = 0.0    # 0..100, keeps bright areas (a window from a dark room) apart
+    haze_cut: float = 0.0          # 0..100, takes a hazy veil off (auto levels' "Cut through haze")
     red: float = 1.0               # per-channel gain (tint)
     green: float = 1.0
     blue: float = 1.0
@@ -254,6 +256,33 @@ def highlight_room_cap(s: Settings, x: float) -> float:
     return min(100.0, max(0.0, headroom / (1.0 - x) / HIGHLIGHT_SLOPE * 100.0))
 
 
+# Cut through haze (haze_cut): fog, smoke, dust or rain lay an even veil
+# over the picture, so its darkest parts are well above black and every tone
+# is squeezed into what is left.  A levels black point takes the veil off:
+# the tones are moved down toward black from the haze floor and spread over
+# the full range again, (y - floor) / (1 - floor) from twice the floor up,
+# with a rounded toe below it (y * y / (4 * floor), scaled the same), so
+# nothing under the floor is cut to black.  It only ever darkens (white stays white and
+# the Outside detail ceiling is kept), it is the same for every pixel of a
+# brightness (a function of the value, like the rest of the table), and it
+# comes after the lift: a dark room's lift is auto levels' shadow work, and
+# auto levels keeps this low while it lifts (see autolevels.HAZE_LIFT_OFF).
+HAZE_FLOOR_MAX = 0.24        # the output level taken to (near) black at 100
+
+
+def haze_floor(haze_cut: float) -> float:
+    """The level the black point moves from for the 0..100 amount (0 = off)."""
+    return HAZE_FLOOR_MAX * (min(max(haze_cut, 0.0), 100.0) / 100.0)
+
+
+def _cut_haze(y: float, floor: float) -> float:
+    """y (0..1) with the haze black point at ``floor`` (0 < floor <= 0.25):
+    rises from 0 to 1 with no step and no flat part, never above y."""
+    if y >= 2.0 * floor:
+        return (y - floor) / (1.0 - floor)
+    return y * y / (4.0 * floor) / (1.0 - floor)
+
+
 def tone_curve(x: float, s: Settings) -> float:
     """Brightness transfer function shared by all three channels.
 
@@ -266,6 +295,9 @@ def tone_curve(x: float, s: Settings) -> float:
         y = _under_ceiling(y, 1.0 - slope * (1.0 - x),
                            HIGHLIGHT_SOFT * min(1.0, (1.0 - x) / HIGHLIGHT_SOFT_TOP))
     y = _clamp01(y)
+    haze = haze_floor(s.haze_cut)
+    if haze > 0:
+        y = _cut_haze(y, haze)
     y = s.black_floor + (1.0 - s.black_floor) * y
     return y
 
@@ -316,6 +348,16 @@ def _tone_table(s: Settings) -> list[float]:
     same order, as tone_curve and exposure_curve, so the results are
     bit-for-bit the same (the tests compare them over thousands of looks).
     """
+    haze = haze_floor(s.haze_cut)
+    if haze > 0:
+        # Cut through haze: the table without it and without the black floor
+        # (floor 0 leaves every clamped tone exactly as it is), then the black
+        # point and the floor, as tone_curve does them.
+        floor = s.black_floor
+        rest, cut = 1.0 - floor, _cut_haze
+        plain = Settings(**{**{name: getattr(s, name) for name in _SETTINGS_FIELDS},
+                            "haze_cut": 0.0, "black_floor": 0.0})
+        return [floor + rest * cut(y, haze) for y in _tone_table(plain)]
     ys = _exposure_tones(s.exposure, s.anti_glare, s.gamma)
     a = shadow_boost_factor(s.shadow_boost)
     gain, contrast, floor = s.brightness, s.contrast, s.black_floor

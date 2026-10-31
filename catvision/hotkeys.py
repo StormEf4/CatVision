@@ -154,10 +154,15 @@ ACTION_LABELS: dict[str, str] = {
     "auto_keep": "Auto levels: keep this look (beta)",
     "auto_brighter": "Auto levels: aim brighter (beta)",
     "auto_darker": "Auto levels: aim darker (beta)",
+    "peek": "Peek (hold to see in the dark)",
     "show_window": "Show the CatVision window",
 }
 
 REPEATING_ACTIONS = {"boost_up", "boost_down"}
+# Actions that last while their key is held (Peek): the press starts them and
+# CatVision checks the key itself to see when it is let go (Windows only
+# reports presses).  Never repeating, so holding gives exactly one press.
+HOLD_ACTIONS = {"peek"}
 
 _SUGGESTED_KEYS = {
     "toggle": "Ctrl+Alt+V",
@@ -171,6 +176,7 @@ _SUGGESTED_KEYS = {
     "auto_keep": "Ctrl+Alt+K",
     "auto_brighter": "Ctrl+Alt+]",
     "auto_darker": "Ctrl+Alt+[",
+    "peek": "Ctrl+Alt+P",
     "show_window": "Ctrl+Alt+C",
 }
 
@@ -256,6 +262,14 @@ class HotkeyListener:
     def supported(self) -> bool:
         return sys.platform == "win32"
 
+    def key_of(self, action: str) -> int | None:
+        """The key (virtual-key code, without modifiers) of an action's
+        hotkey, so a hold action can tell when it is let go."""
+        for b in self.bindings:
+            if b.action == action:
+                return b.vk
+        return None
+
     def start(self, bindings: list[Binding]) -> None:
         self.stop()
         self.bindings = list(bindings)
@@ -296,7 +310,7 @@ class HotkeyListener:
         registered: dict[int, Binding] = {}
         failed = []
         for idx, b in enumerate(self.bindings, start=1):
-            repeat = b.action in REPEATING_ACTIONS
+            repeat = b.action in REPEATING_ACTIONS and b.action not in HOLD_ACTIONS
             mods = b.modifiers | (0 if repeat else MOD_NOREPEAT)
             if user32.RegisterHotKey(None, idx, mods, b.vk):
                 registered[idx] = b

@@ -18,12 +18,40 @@ from dataclasses import dataclass, field, fields, replace
 from itertools import compress
 from typing import Callable
 
-from . import curves
+from . import curves, dxgicapture
 from .winutil import IS_WINDOWS
 
 THUMB_W, THUMB_H = 96, 54       # size of the copy that is measured
 INTERVAL_S = 0.2                # five measurements a second...
 BURST_S = 0.1                   # ...and ten while the brightness is changing a lot
+# A capture (with its measuring, every ticked display) this cheap measures
+# twice as often, so a new darker view is followed about a tenth of a
+# second sooner.  A GPU copy takes about 1-3 ms and measuring it 2, so ten
+# a second is about 5% of one CPU core, and even at this limit less than
+# the GDI route's 20-40 ms five times a second; that slow route keeps the
+# pace above, so it costs no more CPU than it did.
+QUICK_CAPTURE_MS = 8.0
+QUICK_LEAVE_MS = 10.0           # (once quick, until a capture takes this long: no flapping;
+                                #  ten a second at this is still no more than GDI's 20 ms five)
+INTERVAL_QUICK_S = 0.1          # ten measurements a second at rest...
+BURST_QUICK_S = 0.05            # ...and twenty while the brightness is changing a lot
+# Measuring twice as often would catch twice as many lightning strokes and
+# muzzle flashes (under a tenth of a second, gone by the next picture), and
+# each one caught dims the picture for a second or more: stormy nights
+# would be left too dark.  So at the quick pace (pictures under
+# QUICK_GAP_S apart, all of the last SETTLE_S) a picture STEADY_RATIO
+# brighter than the last one only counts once a picture at least
+# FLASH_CONFIRM_S later still is: then both count, and it dims as before.
+# The next picture is taken FLASH_AGAIN_S after a brightening for that.  So
+# a flash under about a tenth of a second is caught less often than at the
+# usual pace (five a second), and one that lasts (a flashbang, a flare lit
+# near you, walking out into daylight) still dims about as soon on average
+# and never later (seen within a tenth of a second, then again
+# FLASH_AGAIN_S later, against within a fifth plus the slow capture's own
+# time).
+QUICK_GAP_S = (INTERVAL_S + INTERVAL_QUICK_S) / 2
+FLASH_CONFIRM_S = 0.06
+FLASH_AGAIN_S = 0.07            # (a little more: without capture times the clock steps by a frame)
 RISE_S = 1.2                    # brightening is slow and smooth...
 RISE_FAST_S = 0.4               # ...but catches up quicker after a big change (into a cave)
 FALL_S = 0.3                    # dimming is fast, so flashes never blind you
@@ -100,8 +128,11 @@ VIEW_STILL = 0.25               # than this (stops): a light that reaches only p
                                 # turning changes nearly every part (all but a static HUD's
                                 # few, which are the same in every view)
 VIEW_SETTLED_S = 1.0            # brightness held this long is settled (not a flash or a glance)
-VIEW_STEADY_S = 0.08            # a new view seen this long (two measurements) is followed...
+VIEW_STEADY_S = 0.08            # a new view seen this long (two measurements; three at the
+                                # quick pace, see QUICK_CAPTURE_MS) is followed...
 VIEW_TURN_S = 2.0               # ...if it came this soon after the settled one (a turn, a walk in)
+STRETCH_KEEP = 3                # (the newest pictures of a stretch kept: VIEW_STEADY_S back
+                                #  at the quickest capture pace, BURST_QUICK_S)
 # Back from a quick look at a brighter, different view (glancing out of a
 # door, a door opened and shut, a menu opened for a moment): the settled
 # view it left is followed again once it has been back a little while, at
@@ -189,6 +220,54 @@ ROOM_KEEP_LEVEL = 40            # the room comes first: the extra never reaches 
 ROOM_STRENGTH_FULL = 10.0       # How much below this many points scales the extra down with
                                 #  it: 0 turns auto levels' window response off too
 
+# Cut through haze (beta): fog, smoke, dust or rain lift the darkest parts
+# of the view well above black and squeeze every tone together; a levels
+# black point (curves.haze_cut) takes part of that veil off.  Only from
+# brightness statistics (see haze_for_view), never for a dark view (night
+# fog is auto levels' shadow lift's to handle) or a flat one (a white menu,
+# open sky, a loading screen, a plain wall), and held low while auto levels
+# lifts the view.  It eases in and out on its own, like the room.
+HAZE_LOW_SHARE = 0.03           # "the darkest few percent": this share of the view
+HAZE_LOW = (0.12, 0.24)         # the darkest few percent this bright: a veil starts / is full
+HAZE_LOW_TOP = (0.42, 0.58)     # ...but this bright and more: the whole view is bright
+                                #  (a white menu, the open sky, a snow white-out): less, then none
+HAZE_SPREAD = (0.48, 0.30)      # tones spread this widely (5th-95th percentile): no veil /
+                                #  squeezed by one (a clear desert or sky view spreads ~0.5)
+HAZE_FLAT = (0.05, 0.12)        # narrower than this is a flat picture (a menu, a loading
+                                #  screen, a wall), not haze: none, full from the second
+HAZE_DARK = (0.07, 0.12)        # views darker than this (key) are the shadow lift's: none, full
+                                #  from the second (night fog, a dark room)
+# A game's view under haze is rarely veiled all over: the HUD, the player's
+# own character or a near wall stay dark and the sun or an explosion spread
+# the tones, so the whole picture's levels say "clear".  So the veil is also
+# measured part by part on the middle rows of the coarse grid (the top row is
+# mostly sky, the bottom one the HUD and the ground at the player's feet):
+# a part is veiled when its own darkest few percent are well above black and
+# its tones are squeezed together, and the view counts as hazy when at least
+# HAZE_PART_SHARE of those parts are (one sun, one dark figure don't matter).
+# Only each part's brightness levels: nothing is looked for in it.
+HAZE_PART_LOW = (0.25, 0.35)    # a part's 5th percentile this bright: veiled from / fully
+HAZE_PART_TOP = (0.64, 0.80)    # ...but this bright and more: open sky or a white wall: less, none
+HAZE_PART_SPREAD = (0.30, 0.22) # a part's 5th-95th percentile spread: not veiled / fully...
+HAZE_PART_FLAT = (0.02, 0.05)   # ...but under the first, a flat part (a loading screen, a
+                                #  menu panel): none, full from the second
+HAZE_PART_SHARE = 0.5           # this share of the middle parts veiled: a hazy view...
+HAZE_PART_DEPTH = (0.04, 0.08)  # ...when their black levels differ this much (none / full):
+                                #  haze thickens with distance, so a veiled view's parts are
+                                #  veiled unevenly; a wall up close is alike all over
+HAZE_PART_KEY_TOP = (0.50, 0.60)  # a view this bright (key) is all bright (open sky, a snow
+                                #  field, a white menu with a HUD): less, then none
+HAZE_SHARE = 0.6                # take this share of the veil off (the rest stays: it's air)
+HAZE_FRAMES = 5                 # the middle of the last this many pictures counts (one smoke
+                                #  puff or muzzle flash moves nothing)
+HAZE_RISE_S = 0.5               # eases in over about 1.5 s...
+HAZE_FALL_S = 0.7               # ...and out over about 2 s
+HAZE_STEP = 0.5                 # the fader passes it on when it moved this much (points)...
+HAZE_SNAP = 0.5                 # ...and this close it goes straight there
+HAZE_DEADBAND = 5.0             # a still view's small changes leave the goal where it is
+HAZE_LIFT_OFF = 15.0            # auto levels' lift (points of offset) that turns it fully
+                                #  off: the dark room's lift comes first
+
 DEFAULT_STRENGTH = 30.0         # how far (slider points) it may move Shadow boost / Exposure
 DEFAULT_TARGET = 0.12           # the scene brightness it aims for (log-average, 0-1)
 STRENGTH_LIMITS = (0.0, 60.0)
@@ -223,6 +302,16 @@ class Measurement:
     # window, a lamp, the sky): how much output range they get.  With the
     # grid, only bright pixels in parts they partly fill (see _dense_highs).
     highs: float = 0.0
+    # For "Cut through haze": how bright the darkest few percent are (the
+    # weighted HAZE_LOW_SHARE percentile, 0-1: well above black under fog or
+    # smoke) and the spread of the tones (weighted 5th to 95th percentile,
+    # 0-1: narrow when a veil squeezes them together).  Only brightness.
+    lows: float = 0.0
+    spread: float = 0.0
+    # ...and how veiled the middle of the grid is (0-1: how veiled at least
+    # HAZE_PART_SHARE of the middle rows' parts are, see _veiled).  0 if the
+    # grid isn't known.
+    veiled: float = 0.0
 
 
 _weights_cache: dict[tuple[int, int], list[float]] = {}
@@ -256,6 +345,35 @@ def _regions(lum: list[int], width: int, height: int) -> tuple:
             sums[first + c] += sum(logs[a:b])
             counts[first + c] += b - a
     return tuple(s / n / _LN2 for s, n in zip(sums, counts))
+
+
+def _veiled(lum: list[int], width: int, height: int) -> float:
+    """How veiled the middle rows of the grid are (see Measurement.veiled):
+    each part's 5th and 95th percentile brightness, scored by HAZE_PART_LOW,
+    HAZE_PART_TOP, HAZE_PART_SPREAD and HAZE_PART_FLAT; the score at least
+    HAZE_PART_SHARE of the parts reach, as far as those parts' black levels
+    differ (HAZE_PART_DEPTH)."""
+    cols = [c * width // REGION_COLS for c in range(REGION_COLS + 1)]
+    parts = []
+    for r in range(1, REGION_ROWS - 1):
+        rows = range(r * height // REGION_ROWS, (r + 1) * height // REGION_ROWS)
+        for c in range(REGION_COLS):
+            part = sorted(v for y in rows for v in lum[y * width + cols[c]:y * width + cols[c + 1]])
+            if not part:
+                continue
+            n = len(part)
+            lo, hi = part[n * 5 // 100] / 255, part[min(n - 1, n * 95 // 100)] / 255
+            parts.append((_ramp(lo, *HAZE_PART_LOW) * (1.0 - _ramp(lo, *HAZE_PART_TOP))
+                          * _ramp(hi - lo, *HAZE_PART_SPREAD) * _ramp(hi - lo, *HAZE_PART_FLAT),
+                          lo))
+    if not parts:
+        return 0.0
+    parts.sort(reverse=True)
+    score = parts[max(0, math.ceil(len(parts) * HAZE_PART_SHARE) - 1)][0]
+    if score <= 0:
+        return 0.0
+    lows = [lo for s, lo in parts if s >= score]
+    return score * _ramp(max(lows) - min(lows), *HAZE_PART_DEPTH)
 
 
 _part_areas: dict[tuple[int, int], list[float]] = {}
@@ -381,10 +499,12 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     lum = [(54 * r + 183 * g + 19 * b) >> 8
            for b, g, r in zip(bgra[0::4], bgra[1::4], bgra[2::4])]
     regions: tuple = ()
+    veiled = 0.0
     if width and n % width == 0:
         weights = _center_weights(width, n // width)
         if width >= REGION_COLS and n // width >= REGION_ROWS:
             regions = _regions(lum, width, n // width)
+            veiled = _veiled(lum, width, n // width)
     else:
         weights = [1.0] * n
     total = sum(weights)
@@ -396,29 +516,62 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     if highs and regions:
         highs = _dense_highs(lum, weights, width, n // width)
     highs /= total
-    seen, shadow_level = 0.0, 0
-    for level, w in enumerate(hist):          # weighted 25th percentile
-        seen += w
-        if seen >= total * 0.25:
-            shadow_level = level
-            break
+    # Weighted percentiles: the darkest few percent, the 5th, the 25th
+    # (the shadows) and the 95th.
+    low_level, p5, shadow_level, p95 = _levels(hist, total, (HAZE_LOW_SHARE, 0.05, 0.25, 0.95))
     shadows = max(shadow_level, 1) / 255
     key = math.exp((1 - SHADOW_SHARE) * math.log(average) + SHADOW_SHARE * math.log(shadows))
     dark = sum(1 for v in lum if v < 26) / n
     bright = sum(1 for v in lum if v > 230) / n
     signature = (hash(bgra) or 1) if width else 0
     return Measurement(key, average, shadows, dark, bright, max(lum) == 0, signature, regions,
-                       highs=highs)
+                       highs=highs, lows=low_level / 255, spread=(p95 - p5) / 255,
+                       veiled=veiled)
 
 
-def capture_interval(prev: Measurement | None, m: Measurement | None) -> float:
+def _levels(hist: list[float], total: float, shares: tuple) -> list[int]:
+    """The levels below which these shares (rising) of the weighted
+    histogram lie: one walk up the histogram."""
+    out, seen, i = [], 0.0, 0
+    for level, w in enumerate(hist):
+        seen += w
+        while i < len(shares) and seen >= total * shares[i]:
+            out.append(level)
+            i += 1
+        if i == len(shares):
+            break
+    return out + [255] * (len(shares) - len(out))
+
+
+def _changed(a: Measurement | None, b: Measurement | None) -> bool:
+    return (a is not None and b is not None and not a.black and not b.black
+            and max(a.key, b.key) > min(a.key, b.key) * STEADY_RATIO)
+
+
+def quick_pace(cost_ms: float, quick: bool) -> bool:
+    """Whether a capture (and its measuring) taking ``cost_ms`` measures at
+    the quick pace (see QUICK_CAPTURE_MS), given whether the last one did:
+    once quick, it stays quick up to QUICK_LEAVE_MS."""
+    return cost_ms <= (QUICK_LEAVE_MS if quick else QUICK_CAPTURE_MS)
+
+
+def capture_interval(prev: Measurement | None, m: Measurement | None,
+                     cost_ms: float | None = None, older: Measurement | None = None) -> float:
     """Seconds until the next measurement: BURST_S right after the
     brightness changed a lot (so a new view is confirmed, and followed, a
-    tenth of a second sooner), else INTERVAL_S."""
-    if (prev is not None and m is not None and not prev.black and not m.black
-            and max(prev.key, m.key) > min(prev.key, m.key) * STEADY_RATIO):
-        return BURST_S
-    return INTERVAL_S
+    tenth of a second sooner), else INTERVAL_S.  ``cost_ms``: what the last
+    capture (and its measuring) took; when that was at most
+    QUICK_CAPTURE_MS, the quick pace (INTERVAL_QUICK_S, BURST_QUICK_S),
+    which keeps bursting one picture longer (``older``: the picture before
+    prev), so a new view is still seen VIEW_STEADY_S after it first was a
+    tenth of a second later, not at the next picture at rest.  Right after
+    a brightening, the quick pace looks again FLASH_AGAIN_S later instead
+    (a flash then counts only if it is still there: see FLASH_CONFIRM_S)."""
+    if cost_ms is not None and cost_ms <= QUICK_CAPTURE_MS:
+        if _changed(prev, m) and m.key > prev.key:
+            return FLASH_AGAIN_S
+        return BURST_QUICK_S if _changed(prev, m) or _changed(older, prev) else INTERVAL_QUICK_S
+    return BURST_S if _changed(prev, m) else INTERVAL_S
 
 
 def target_offset(key: float, strength: float, target: float, dim: bool = True) -> float:
@@ -439,6 +592,13 @@ def _slider_range(name: str, base: dict[str, float]) -> tuple[float, float]:
             return start, start   # stays off: switching it on would jump
         lo = min(start, EXPOSURE_FLOOR)
     return lo, hi
+
+
+def main_setting(s: curves.Settings) -> str:
+    """The slider auto levels (and Peek) moves first: whichever of Shadow
+    boost / Exposure the preset leans on more (Exposure for night vision,
+    Shadow boost otherwise)."""
+    return "exposure" if s.exposure > s.shadow_boost else "shadow_boost"
 
 
 def split_offset(key: str, offset: float, base: dict[str, float]) -> dict[str, float]:
@@ -474,6 +634,32 @@ def room_for_highs(highs: float, strength: float = DEFAULT_STRENGTH) -> float:
     return ROOM_EXTRA * scale * min(1.0, math.sqrt((share - ROOM_MIN_SHARE) / ROOM_FULL))
 
 
+def _ramp(x: float, lo: float, hi: float) -> float:
+    """0 at lo, 1 at hi (either way round), straight between."""
+    return min(1.0, max(0.0, (x - lo) / (hi - lo)))
+
+
+def haze_for_view(m: Measurement) -> float:
+    """How much to cut through haze (curves.haze_cut points, 0-100) for one
+    picture: a lifted black level (the darkest few percent well above black)
+    and a squeezed tone range, over the whole view or in most of the middle
+    of it (Measurement.veiled), in a view that is neither dark (night fog:
+    the shadow lift's) nor flat or all bright (a white menu, the open sky).
+    Enough to take HAZE_SHARE of the veil off, as far as curves.HAZE_FLOOR_MAX
+    allows, and never more than HAZE_SHARE of the whole view's darkest few
+    percent: what stays dark under the haze (the HUD, a figure close by)
+    is never cut to black."""
+    if m.black or not m.spread:
+        return 0.0
+    veil = max(_ramp(m.lows, *HAZE_LOW) * _ramp(m.spread, *HAZE_SPREAD),
+               m.veiled * (1.0 - _ramp(m.key, *HAZE_PART_KEY_TOP)))
+    score = (veil * (1.0 - _ramp(m.lows, *HAZE_LOW_TOP)) * _ramp(m.spread, *HAZE_FLAT)
+             * _ramp(m.key, *HAZE_DARK))
+    if score <= 0:
+        return 0.0
+    return 100.0 * score * min(1.0, HAZE_SHARE * m.lows / curves.HAZE_FLOOR_MAX)
+
+
 def fader_amounts(key: str, offset: float, base: dict[str, float],
                   controller: "Controller | None" = None) -> dict[str, float]:
     """What one display gets on top of the preset: the offset shared out by
@@ -486,6 +672,11 @@ def fader_amounts(key: str, offset: float, base: dict[str, float],
         extra = min(controller.room, _room_left(base, out))
         if extra > 0:
             out["highlight_room"] = extra
+    if controller is not None and controller.haze > 0:
+        # (After the room: it never changes the room's tones' lift.)
+        haze = controller.haze * (1.0 - _ramp(offset, 0.0, HAZE_LIFT_OFF))
+        if haze > 0:
+            out["haze_cut"] = haze
     return out
 
 
@@ -564,7 +755,8 @@ class Controller:
     """Decides where one display should go and glides it there.
 
     observe() takes each new measurement (five a second, ten while the
-    brightness changes a lot) and sets the goal; advance() moves toward it
+    brightness changes a lot, twice that when capturing is cheap: see
+    QUICK_CAPTURE_MS) and sets the goal; advance() moves toward it
     in tiny steps (60-120 a second, on the fader thread).  The motion eases
     in and out like a spring and has a speed limit, so there is never a
     visible jump."""
@@ -587,6 +779,7 @@ class Controller:
     _settings: tuple = ()                          # (strength, target, dim) last seen
     _stretch: list = field(default_factory=list)  # (time, Measurement) since the last big change
     _settled: tuple | None = None                  # (since, until, newest) of the last settled stretch
+    _settled_before: Measurement | None = None     # (and the picture before its newest)
     _away: Measurement | None = None               # the brightest view looked at since (2+ pictures)
     _quick_at: float = -ALTERNATE_S                # when the last view followed early began
     _alternate_until: float = 0.0                  # turning back and forth: no early start till then
@@ -603,6 +796,12 @@ class Controller:
     room_want: float = 0.0                         # ...and where it is heading
     _room_back: bool = False                       # released: hand it back at the quick pace
     _highs: float = 0.0                            # the last picture's bright share
+    haze_on: bool = True                           # "Cut through haze (beta)" is ticked
+    haze: float = 0.0                              # haze cut now (curves.haze_cut points)...
+    haze_want: float = 0.0                         # ...and where it is heading
+    _hazes: list = field(default_factory=list)    # haze_for_view of the last HAZE_FRAMES pictures
+    _seen: list = field(default_factory=list)     # (time, Measurement): every picture of the last SETTLE_S
+    _unconfirmed: tuple | None = None              # (time, Measurement): a brighter picture not yet counted
 
     def observe(self, m: Measurement | None, strength: float, target: float,
                 dim: bool = True, now: float | None = None) -> None:
@@ -610,14 +809,16 @@ class Controller:
         the clock as of the fader's last step."""
         self.strength = strength
         clock = self.clock if now is None else max(now, self.clock)
+        # A lower How much or an unticked "tone down" brings the goal inside
+        # its new limits at once, even while a black or lost picture holds.
+        self.want = min(strength, max(-strength if dim else 0.0, self.want))
+        if m is not None and not m.black and self._not_yet(clock, m):
+            return      # a flash at the quick pace: see FLASH_CONFIRM_S
         if m is not None:
             # (A lost picture keeps it; a black one has no bright areas.)
             self._highs = m.highs
             self._aim_room(strength)
             self._room_back = False
-        # A lower How much or an unticked "tone down" brings the goal inside
-        # its new limits at once, even while a black or lost picture holds.
-        self.want = min(strength, max(-strength if dim else 0.0, self.want))
         if m is not None and m.black:
             # Loading screen, or capture blocked: hold the look.  A black
             # screen is pixel-identical every time, so it must not count as
@@ -626,6 +827,7 @@ class Controller:
             self._signature, self._same_since = m.signature, clock
             self.frozen = False
             self._stretch = []
+            self._aim_haze(m)            # (none for a black picture)
             if self._black_since is None:
                 self._black_since = clock
             elif clock - self._black_since >= BLACK_HOLD_S:
@@ -648,9 +850,46 @@ class Controller:
                 self._missing_since = clock
             elif clock - self._missing_since >= LOST_S:
                 self.want = 0.0
+                self.haze_want, self._hazes = 0.0, []   # (a frozen picture's haze is no guide)
             return
         self._missing_since = None
-        now = clock
+        self._aim_haze(m)              # (a held-back flash never gets here)
+        held, self._unconfirmed = self._unconfirmed, None
+        if held is not None:
+            # Seen again (see FLASH_CONFIRM_S): the first picture counts too,
+            # when it came, then this one.
+            self._count(held[0], held[1], strength, target, dim)
+        self._count(clock, m, strength, target, dim)
+
+    def _not_yet(self, now: float, m: Measurement) -> bool:
+        """At the quick capture pace, m is much brighter than the last
+        picture counted and not yet seen again FLASH_CONFIRM_S later (a
+        lightning stroke, a muzzle flash): hold it back, as if not seen.
+        The first one is kept to count once it is seen again; one gone by
+        the next picture is dropped."""
+        # (How far apart by when they were captured: see _apart.)
+        entry = (now, m)
+        seen = self._seen = [e for e in self._seen if now - e[0] < SETTLE_S]
+        quick = len(seen) >= 2 and all(_apart(a, b) < QUICK_GAP_S
+                                       for a, b in zip(seen, seen[1:] + [entry]))
+        seen.append(entry)
+        if not self._last_key or m.key <= self._last_key * STEADY_RATIO:
+            self._unconfirmed = None
+            return False
+        if self._unconfirmed is None:
+            if quick:
+                self._unconfirmed = entry
+            return quick
+        if m.key * STEADY_RATIO < self._unconfirmed[1].key:
+            # Already much dimmer than the flash (a lightning stroke's
+            # afterglow): it starts again from this one.
+            self._unconfirmed = entry
+            return True
+        return _apart(self._unconfirmed, entry) < FLASH_CONFIRM_S
+
+    def _count(self, now: float, m: Measurement, strength: float, target: float,
+               dim: bool) -> None:
+        """observe() for a picture that counts (seen, not black, not lost)."""
         self._recent = [(t, k) for t, k in self._recent if now - t < SETTLE_S]
         self._recent.append((now, m.key))
         if self._last_key and m.key > self._last_key * STEADY_RATIO:
@@ -672,7 +911,7 @@ class Controller:
         calm = now - self._jump_at >= CALM_S and now >= self._alternate_until
         lately = [(t, k) for t, k in self._recent if now - t < SETTLE_FAST_S]
         steady = [k for _t, k in lately]
-        newest = [k for _t, k in self._recent[-DARKENING_COUNT:]]
+        newest = self._darkening()
         early, halfway = None, False
         if (calm and now - lately[0][0] >= STEADY_S
                 and max(steady) <= min(steady) * STEADY_RATIO):
@@ -762,6 +1001,20 @@ class Controller:
             self.rush = rush
             self._estimate = halfway
 
+    def _darkening(self) -> list:
+        """The newest DARKENING_COUNT brightnesses (oldest first), at the
+        usual pace: at the quick capture pace (see QUICK_CAPTURE_MS) only
+        every other picture counts, so a light fading off over a fifth of a
+        second is no more "darker and darker" than it was."""
+        keys, last = [], None
+        for t, k in reversed(self._recent):
+            if last is None or last - t >= BURST_S - BURST_QUICK_S / 2:
+                keys.append(k)
+                last = t
+                if len(keys) == DARKENING_COUNT:
+                    break
+        return keys[::-1]
+
     def _track_stretch(self, now: float, m: Measurement) -> None:
         """Keep track of how long the brightness has held: pictures in a row
         within STEADY_RATIO of each other (the camera may move) are one
@@ -770,7 +1023,10 @@ class Controller:
         prev = stretch[-1][1] if stretch else None
         if prev is not None and max(prev.key, m.key) <= min(prev.key, m.key) * STEADY_RATIO:
             stretch.append((now, m))
-            del stretch[1:-2]       # only its start and newest two matter
+            # Only its start and newest few matter (the newest picture at
+            # least VIEW_STEADY_S before this one, at the quickest capture
+            # pace too: see _steady_before).
+            del stretch[1:-STRETCH_KEEP]
         else:
             # A view seen for two pictures in a row (not a single flash) since
             # the settled stretch ended is remembered if it is the brightest
@@ -783,6 +1039,7 @@ class Controller:
             self._stretch = stretch = [(now, m)]
         if now - stretch[0][0] >= VIEW_SETTLED_S:
             self._settled, self._away = (stretch[0][0], now, m), None
+            self._settled_before = stretch[-2][1]
 
     @staticmethod
     def _new_brighter_view(last: Measurement | None, m: Measurement) -> bool:
@@ -819,16 +1076,33 @@ class Controller:
         if ref is None or len(stretch) < 2 or now < self._alternate_until:
             return None
         since, until, seen = ref
-        if (since >= stretch[0][0] or _apart(stretch[-2], (now, m)) < VIEW_STEADY_S
+        earlier = self._steady_before(now, m)
+        if (since >= stretch[0][0] or earlier is None
                 or stretch[0][0] - until > VIEW_TURN_S or self._jump_at > until):
             return None
-        prev = stretch[-2][1]
+        prev = earlier[1]
         key = max(prev.key, m.key)
         alike = view_spread(prev, m)
-        if (alike is None or alike >= VIEW_SPREAD or seen.key <= key * STEADY_RATIO
-                or not _other_view(seen, m)):
+        if alike is None or alike >= VIEW_SPREAD:
             return None
-        return key
+        # The settled view's newest picture, or the one before it: at the
+        # quick capture pace (see QUICK_CAPTURE_MS) the newest may already
+        # be the first moment of a quick fade into the dark (still within
+        # STEADY_RATIO, so part of the stretch), half the new view already.
+        for seen in (seen, self._settled_before):
+            if seen is not None and seen.key > key * STEADY_RATIO and _other_view(seen, m):
+                return key
+        return None
+
+    def _steady_before(self, now: float, m: Measurement) -> tuple | None:
+        """The newest earlier picture of the current stretch (m is its
+        newest) at least VIEW_STEADY_S before m: two measurements apart at
+        the usual pace, three at the quick one (see QUICK_CAPTURE_MS), so a
+        new view is seen for as long either way.  None if there is none."""
+        for entry in reversed(self._stretch[:-1]):
+            if _apart(entry, (now, m)) >= VIEW_STEADY_S:
+                return entry
+        return None
 
     def _left_settled_view(self, m: Measurement) -> bool:
         """m is a much darker, different view than the settled stretch (laid
@@ -959,9 +1233,11 @@ class Controller:
         """Head back to the preset (no game in front)."""
         self.want = 0.0
         self.room_want, self._room_back, self._highs = 0.0, True, 0.0
+        self.haze_want, self._hazes = 0.0, []
         self.rush = self._rush_view = False
         self._recent.clear()
         self._last_key = 0.0
+        self._seen, self._unconfirmed = [], None
         self._black_since = None
         self._jump_at = self.clock - CALM_S
         self._stretch, self._settled, self._estimate = [], None, False
@@ -974,6 +1250,7 @@ class Controller:
         less often than every step (see Fader.set_rates)."""
         self.clock += max(dt, 0.0)
         self._ease_room(dt)
+        self._ease_haze(dt)
         return self.follow(self.want, self.strength, dt, speed, frame)
 
     def _aim_room(self, strength: float) -> None:
@@ -994,6 +1271,41 @@ class Controller:
         # (Back to the preset, as auto levels stops, at the quick pace.)
         pace = ROOM_RISE_S if gap > 0 or self._room_back else ROOM_FALL_S
         self.room += gap * (1.0 - math.exp(-max(dt, 0.0) / pace))
+
+    def set_haze(self, on: bool) -> None:
+        """Tick or untick "Cut through haze": unticked, it heads back off at
+        once (not at the next picture) and forgets the pictures it saw, so
+        ticking it again starts from a clear view."""
+        if not on:
+            self.haze_want, self._hazes = 0.0, []
+        self.haze_on = on
+
+    def _aim_haze(self, m: Measurement) -> None:
+        """Where the haze cut heads: the middle of the last HAZE_FRAMES
+        pictures' haze_for_view (none while unticked; pictures not seen yet
+        count as clear, so it takes more than half of them), moved only when
+        that is HAZE_DEADBAND away (or none), so a still view never keeps
+        rewriting the brightness table."""
+        hazes = self._hazes
+        hazes.append(haze_for_view(m) if self.haze_on else 0.0)
+        del hazes[:-HAZE_FRAMES]
+        haze = (sorted([0.0] * (HAZE_FRAMES - len(hazes)) + hazes)[HAZE_FRAMES // 2]
+                if self.haze_on else 0.0)
+        if not haze or abs(haze - self.haze_want) >= HAZE_DEADBAND:
+            self.haze_want = haze
+
+    def _ease_haze(self, dt: float) -> None:
+        """Glide the haze cut toward haze_want (an even exponential approach,
+        a little slower out than in)."""
+        want = self.haze_want      # (once: the window's thread may change it meanwhile)
+        gap = want - self.haze
+        if not gap:
+            return
+        if abs(gap) < HAZE_SNAP:
+            self.haze = want
+            return
+        pace = HAZE_RISE_S if gap > 0 else HAZE_FALL_S
+        self.haze += gap * (1.0 - math.exp(-max(dt, 0.0) / pace))
 
     def step(self, m: Measurement | None, strength: float, target: float, dt: float,
              speed: float = 1.0, dim: bool = True) -> float:
@@ -1127,6 +1439,7 @@ class Fader:
         self.last_error = ""
         self._applied: dict[str, float] = {}
         self._rooms: dict[str, float] = {}     # each display's Outside detail when last applied
+        self._hazes: dict[str, float] = {}     # ...and its haze cut
 
     @property
     def running(self) -> bool:
@@ -1183,7 +1496,7 @@ class Fader:
     def settled(self) -> bool:
         """Every display is where it wants to be and has stopped moving."""
         return all(abs(c.want - c.offset) <= 0.001 and abs(c.velocity) < 1e-3
-                   and c.room == c.room_want
+                   and c.room == c.room_want and c.haze == c.haze_want
                    for c in list(self.controllers.values()))
 
     def tick(self, dt: float, motion_dt: float | None = None, force: bool = False,
@@ -1209,7 +1522,11 @@ class Fader:
             # updates (see CEILING_STEP), so its steps stay as small as on
             # its own.
             pace = 1.0 / rates[did] if did in rates else step
-            pos = ctrl.advance(motion, self.speed, pace if pace > step else None)
+            # (Passed on every one or two steps when its pace isn't a whole
+            # number of them, 75 Hz next to 120: the cap counts the longer
+            # gap, so no update it shows moves more than CEILING_STEP.)
+            frame = math.ceil(pace / step - 1e-6) * step if pace > step else None
+            pos = ctrl.advance(motion, self.speed, frame)
             prev = last.get(did)
             since = self._since.get(did, 0.0) + dt
             if force or prev is None:
@@ -1237,23 +1554,32 @@ class Fader:
         changed = force or shown != last
         # The Outside detail moves on its own (see Controller.room).
         rooms = {did: (ctrl.room, ctrl.room_want) for did, ctrl in items}
+        # So does the haze cut.
+        hazes = {did: (ctrl.haze, ctrl.haze_want) for did, ctrl in items}
         if not changed:
             for did, (room, room_want) in rooms.items():
                 gap = abs(room - self._rooms.get(did, 0.0))
                 if gap >= ROOM_STEP or (gap > 0 and room == room_want):
                     changed = True
                     break
+        if not changed:
+            for did, (haze, haze_want) in hazes.items():
+                gap = abs(haze - self._hazes.get(did, 0.0))
+                if gap >= HAZE_STEP or (gap > 0 and haze == haze_want):
+                    changed = True
+                    break
         if changed:
             (apply or self.apply)(shown)
             self._applied = shown
             self._rooms = {did: room for did, (room, _want) in rooms.items()}
+            self._hazes = {did: haze for did, (haze, _want) in hazes.items()}
         return changed
 
     def _run(self, stop: threading.Event,
              apply: Callable[[dict[str, float]], None] | None = None) -> None:
         last = due = time.perf_counter()
         idle = False
-        self._applied, self._since, self._rooms = {}, {}, {}
+        self._applied, self._since, self._rooms, self._hazes = {}, {}, {}, {}
         while not stop.is_set():
             now = time.perf_counter()
             dt, last = min(now - last, 0.25), now
@@ -1496,10 +1822,19 @@ class Watcher:
     """Measures the chosen displays on a background thread.  The window reads
     the latest results with latest() and does the adjusting itself."""
 
-    def __init__(self, capture: Callable[[Rect], bytes | None] | None = None):
+    def __init__(self, capture: Callable[[Rect], bytes | None] | None = None,
+                 fast: bool = True):
         self.available = capture is not None or IS_WINDOWS
         self.reason = "" if self.available else "Auto levels needs Windows."
         self._capture = capture or gdi_capture
+        # Faster screen capture (DXGI Desktop Duplication, see dxgicapture):
+        # only with the real GDI capture, never with a stand-in one (tests).
+        # The window sets fast_capture from the option; the thread reads it.
+        self.fast_capture = fast
+        self._use_fast = capture is None
+        self._local = threading.local()     # each thread's own FastCapture (DXGI is per thread)
+        self.routes: dict[str, str] = {}    # display id -> "dxgi" / "gdi" (last capture)
+        self.route_reasons: dict[str, str] = {}   # display id -> why DXGI isn't used
         self._lock = threading.Lock()
         self._rects: dict[str, Rect] = {}
         self._latest: dict[str, Measurement | None] = {}
@@ -1521,7 +1856,7 @@ class Watcher:
         if self.available and not self.running:
             # A fresh stop signal per run (see Fader.start).
             stop = self._stop = threading.Event()
-            self._thread = threading.Thread(target=self._run, args=(stop,),
+            self._thread = threading.Thread(target=self._run_then_release, args=(stop,),
                                             name="catvision-auto-levels", daemon=True)
             self._thread.start()
 
@@ -1537,24 +1872,56 @@ class Watcher:
         with self._lock:
             return self._seq, dict(self._latest)
 
+    def _fast(self) -> dxgicapture.FastCapture | None:
+        """This thread's DXGI-or-GDI chooser (None with a stand-in capture)."""
+        if not self._use_fast:
+            return None
+        fast = getattr(self._local, "fast", None)
+        if fast is None:
+            fast = self._local.fast = dxgicapture.FastCapture(self._capture)
+        fast.enabled = self.fast_capture
+        return fast
+
+    def release_capture(self) -> None:
+        """Let go of this thread's DXGI objects (they belong to the thread
+        that made them, so the capture thread calls this as it ends)."""
+        fast = getattr(self._local, "fast", None)
+        self._local.fast = None
+        if fast is not None:
+            fast.close()
+
     def measure_once(self) -> dict[str, Measurement | None]:
         with self._lock:
             rects = dict(self._rects)
         out: dict[str, Measurement | None] = {}
+        fast = self._fast()
+        if fast is not None:
+            fast.keep_only(rects)
         start = time.perf_counter()
         for did, rect in rects.items():
             taken = time.perf_counter()
             try:
-                pixels = self._capture(rect)
+                pixels = fast.capture(did, rect) if fast is not None else self._capture(rect)
             except Exception:
                 pixels = None
             out[did] = replace(measure(pixels, THUMB_W), at=taken) if pixels else None
         self.capture_ms = (time.perf_counter() - start) * 1000
+        if fast is not None:
+            self.routes = {did: fast.routes.get(did, "gdi") for did in rects}
+            self.route_reasons = {did: fast.reasons[did] for did in rects if did in fast.reasons}
         return out
+
+    def _run_then_release(self, stop: threading.Event) -> None:
+        try:
+            self._run(stop)
+        finally:
+            self.release_capture()
 
     def _run(self, stop: threading.Event) -> None:
         due = time.perf_counter()
         before: dict[str, Measurement | None] = {}
+        older: dict[str, Measurement | None] = {}
+        last_cost, quick = math.inf, False
         while not stop.is_set():
             results = self.measure_once()
             with self._lock:
@@ -1563,10 +1930,18 @@ class Watcher:
                     self._latest = {k: v for k, v in results.items() if k in self._rects}
                     self._seq += 1
             # The next measurement on a steady beat (the capture's own time
-            # doesn't add to the gap), sooner while the brightness changes.
-            gap = min([capture_interval(before.get(did), m) for did, m in results.items()],
-                      default=INTERVAL_S)
-            before = results
+            # doesn't add to the gap), sooner while the brightness changes,
+            # and twice as often when capturing is cheap.  (The slower of
+            # the last two captures counts, so one quick capture among slow
+            # ones doesn't change the pace; once quick, it stays quick up to
+            # QUICK_LEAVE_MS, so captures taking about QUICK_CAPTURE_MS, two
+            # displays say, don't flap between the two paces.)
+            cost, last_cost = max(self.capture_ms, last_cost), self.capture_ms
+            quick = quick_pace(cost, quick)
+            pace = min(cost, QUICK_CAPTURE_MS) if quick else cost
+            gap = min([capture_interval(before.get(did), m, pace, older.get(did))
+                       for did, m in results.items()], default=INTERVAL_S)
+            older, before = before, results
             due += gap
             now = time.perf_counter()
             if due <= now:      # a slow capture: start the beat again, never back to back

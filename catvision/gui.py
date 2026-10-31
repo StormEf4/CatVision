@@ -12,7 +12,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
-from . import __version__, autolevels, curves, dialogs, filters, winutil
+from . import __version__, autolevels, curves, dialogs, filters, peek, winutil
 from . import config as config_mod
 from .curves import LIMITS, Settings
 from .engine import Engine, emergency_reset
@@ -116,14 +116,17 @@ def auto_tick_plan(now: float, fresh: bool, last_front: float,
 
 def _auto_moved(ctrl) -> bool:
     """A display auto levels still holds away from the preset (its boost,
-    or Outside detail for a window in view): glide it back, don't jump."""
-    return abs(ctrl.offset) > 0.05 or ctrl.room > 0.05
+    Outside detail for a window in view, or a haze cut): glide it back,
+    don't jump."""
+    return abs(ctrl.offset) > 0.05 or ctrl.room > 0.05 or ctrl.haze > 0.05
 
 
 SETTING_NAMES = {"shadow_boost": "Shadow boost", "exposure": "Exposure"}
 # The readout says "keeping the outside visible" while auto levels adds at
 # least this much Outside detail for bright areas in view.
 AUTO_ROOM_SHOWN = 5.0
+# ...and "cutting through haze" while it cuts at least this much haze.
+AUTO_HAZE_SHOWN = 5.0
 AUTO_TICK_MS = 20       # auto levels (beta) checks for new measurements this often, so a
                         # new picture is acted on within about 20-30 ms (Windows rounds
                         # timers up to its clock tick)
@@ -261,8 +264,11 @@ class CatVisionApp:
         self.engine.color_all_displays = cfg.options.color_everywhere
 
         self.hotkeys = HotkeyListener(self._actions.put)
+        # Peek: a short lift while its hotkey is held (its own tiny thread).
+        self.peeker = peek.Peeker()
         # Auto levels (beta): measures the ticked displays on its own thread.
         self.auto_watch = autolevels.Watcher()
+        self.auto_watch.fast_capture = cfg.options.auto_fast_capture is not False
         self._auto_ctrl: dict[str, autolevels.Controller] = {}
         self._auto_key = ""
         self._auto_seq = -1
@@ -514,6 +520,8 @@ class CatVisionApp:
         self.auto_flag_vars = {
             "auto_game_only": tk.BooleanVar(value=o.auto_game_only),
             "auto_dim": tk.BooleanVar(value=o.auto_dim),
+            "auto_fast_capture": tk.BooleanVar(value=o.auto_fast_capture),
+            "auto_haze": tk.BooleanVar(value=o.auto_haze),
         }
         flags = (
             ("auto_game_only", "Only while a game fills the screen",
@@ -524,6 +532,19 @@ class CatVisionApp:
             ("auto_dim", "Also tone down bright scenes",
              "Beta. Lowers the boost in bright scenes and flashes so you're never blinded. "
              "Untick it to only ever brighten."),
+            ("auto_fast_capture", "Faster screen capture (beta)",
+             "Beta. Copies the screen the way recording apps like OBS do (Windows' "
+             "Desktop Duplication), shrunk on the graphics card, so auto levels reacts "
+             "sooner and uses less of your PC. It never touches the game. Where it doesn't "
+             "work (HDR or rotated displays, remote desktop, some older PCs) it uses the normal "
+             "copy. Like recording apps, it can add a little input lag to some games in "
+             "borderless mode: untick it if you notice that, to always use the normal copy."),
+            ("auto_haze", "Cut through haze (beta)",
+             "Beta. When fog, smoke, dust or rain wash out most of the view (little near "
+             "black, everything squeezed together), it adds contrast by moving the black point "
+             "down, and takes it back off when the air clears. Only brightness levels are used "
+             "(of the whole picture and of a coarse grid). Never in dark scenes or night fog: "
+             "the shadow lift handles those."),
         )
         for i, (key, text, tip) in enumerate(flags):
             cb = ttk.Checkbutton(box, text=text, variable=self.auto_flag_vars[key],
@@ -533,7 +554,7 @@ class CatVisionApp:
             controls.append(cb)
         self.auto_info = ttk.Label(box, text="", style="Muted.TLabel", justify="left",
                                    wraplength=wrap)
-        self.auto_info.grid(row=6, column=0, sticky="ew", pady=(2, 0))
+        self.auto_info.grid(row=4 + len(flags), column=0, sticky="ew", pady=(2, 0))
         box.bind("<Configure>", lambda e: self.auto_info.configure(
             wraplength=max(100, e.width - 4)))
         if not self.auto_watch.available:
@@ -547,6 +568,10 @@ class CatVisionApp:
         o.auto_speed = self.auto_speed_var.get()
         for key, var in self.auto_flag_vars.items():
             setattr(o, key, var.get())
+        self.auto_watch.fast_capture = o.auto_fast_capture
+        for ctrl in self._auto_ctrl.values():
+            ctrl.set_haze(o.auto_haze)   # unticked: take it off now, not at the next picture
+        self._auto_fader.wake()
         self._schedule_save()
         self._render_auto_info(self._auto_shown)
 
@@ -573,6 +598,9 @@ class CatVisionApp:
         o.auto_target = auto_number(o.auto_target, *autolevels.TARGET_LIMITS, d.auto_target)
         if o.auto_speed not in autolevels.SPEEDS:
             o.auto_speed = d.auto_speed
+        if not isinstance(o.auto_fast_capture, bool):
+            o.auto_fast_capture = d.auto_fast_capture
+        self.auto_watch.fast_capture = o.auto_fast_capture
         looks = {}
         if isinstance(o.auto_game_looks, dict):
             for title, aim in o.auto_game_looks.items():
@@ -743,10 +771,11 @@ class CatVisionApp:
                                       else set(rects) & in_front)
                 self.auto_watch.watch({d: rects[d] for d in self._auto_watched})
         shown: dict[str, tuple[str, object]] = {}
-        goals = {did: (c.want, c.room_want) for did, c in self._auto_ctrl.items()}
+        goals = {did: (c.want, c.room_want, c.haze_want) for did, c in self._auto_ctrl.items()}
         strength, aim = self._auto_strength(), self._auto_aim()
         for did in rects:
             ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
+            ctrl.set_haze(o.auto_haze)
             if did not in self._auto_watched:
                 ctrl.release()
                 shown[did] = ("waiting", None)
@@ -777,7 +806,8 @@ class CatVisionApp:
         for did in list(self._auto_ctrl):
             if did not in rects:
                 del self._auto_ctrl[did]
-        if any((c.want, c.room_want) != goals.get(did) for did, c in self._auto_ctrl.items()):
+        if any((c.want, c.room_want, c.haze_want) != goals.get(did)
+               for did, c in self._auto_ctrl.items()):
             self._auto_fader.wake()   # a new goal (a flash, say): start moving now
         # Fades change whether Windows is holding the strength back: keep the
         # warning icon in step with what the displays really show.
@@ -927,8 +957,7 @@ class CatVisionApp:
     def _auto_setting(self) -> str:
         """Auto levels moves whichever of Shadow boost / Exposure the preset
         leans on more (Exposure for night vision, Shadow boost otherwise)."""
-        s = self.engine.settings
-        return "exposure" if s.exposure > s.shadow_boost else "shadow_boost"
+        return autolevels.main_setting(self.engine.settings)
 
     def _render_auto_info(self, shown: dict) -> None:
         if not hasattr(self, "auto_info"):
@@ -957,12 +986,13 @@ class CatVisionApp:
             for did, (state, m) in shown.items():
                 name = names.get(did, did)
                 base = getattr(self.engine.settings, key)
-                now = getattr(self.engine.settings_for(did), key)
+                # (Without a Peek in progress: this is auto levels' own change.)
+                now = getattr(self.engine.settings_for(did, peek=False), key)
                 change = f"{SETTING_NAMES[key]} {base:.0f} \u2192 {now:.0f}"
                 spilled = [k for k, v in self.engine.auto_offsets.get(did, {}).items()
                            if k != key and k in SETTING_NAMES and v]
                 if spilled:  # the main slider is at its limit: say where the rest went
-                    eff = self.engine.settings_for(did)
+                    eff = self.engine.settings_for(did, peek=False)
                     change = ", ".join(f"{SETTING_NAMES[k]} {getattr(eff, k):.0f}"
                                        for k in [key] + spilled)
                 back = "" if abs(now - base) < 0.5 else f"  \u00b7  easing back to {base:.0f}"
@@ -986,9 +1016,11 @@ class CatVisionApp:
                         held = ("  (black for a while: back to your preset)"
                                 if ctrl is not None and ctrl.black_too_long
                                 else "  (black screen: holding)")
-                    room = self.engine.auto_offsets.get(did, {}).get("highlight_room", 0.0)
+                    applied = self.engine.auto_offsets.get(did, {})
                     outside = ("  \u00b7  keeping the outside visible"
-                               if room >= AUTO_ROOM_SHOWN else "")
+                               if applied.get("highlight_room", 0.0) >= AUTO_ROOM_SHOWN else "")
+                    if applied.get("haze_cut", 0.0) >= AUTO_HAZE_SHOWN:
+                        outside += "  \u00b7  cutting through haze"
                     lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  {change}"
                                  f"{outside}{held}")
             text = "\n".join(lines)
@@ -1219,8 +1251,10 @@ class CatVisionApp:
                                           self.fonts, self._on_change, tip=TIPS.get(key, "")))
             row += 1
 
+        self._build_peek_strength(f, row=3)
+
         bottom = ttk.Frame(f)
-        bottom.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        bottom.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         self.graph_size = self.px_(150)
         self.graph = tk.Canvas(bottom, width=self.graph_size, height=self.graph_size, bg=PANEL,
                                highlightthickness=0)
@@ -1234,6 +1268,51 @@ class CatVisionApp:
                             command=lambda: self.notebook.select(self.presets_tab.frame))
         manage.pack(fill="x", pady=(3, 0))
         Tooltip(manage, "Create, copy, rename and delete presets in the Presets tab.")
+
+    def _build_peek_strength(self, f: ttk.Frame, row: int) -> None:
+        """Peek strength: an app option (saved at once), not part of the look,
+        so it sits apart from the preset's sliders."""
+        box = ttk.Frame(f)
+        box.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Separator(box).grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        self.cfg.options._clean_peek()
+        self.peek_var = tk.DoubleVar(value=self.cfg.options.peek_strength)
+        self.peek_row = SliderRow(
+            box, 1, self.peek_var, "Peek strength", *peek.STRENGTH_LIMITS, "int", self.fonts,
+            self._on_peek_strength,
+            tip="How much the Peek hotkey brightens while you hold it, to check a dark "
+                "corner. Let go and it glides back. Pick the key in the Hotkeys tab. "
+                "Saved straight away (not part of the preset).")
+
+    def _on_peek_strength(self) -> None:
+        self.peek_row.refresh()
+        lo, hi = peek.STRENGTH_LIMITS
+        self.cfg.options.peek_strength = round(min(hi, max(lo, self.peek_var.get())), 1)
+        self._schedule_save()
+
+    def _start_peek(self) -> str | None:
+        """The Peek hotkey was pressed: lift the picture until it is let go.
+        The popup text, or None for a press while already peeking."""
+        if not self.engine.enabled:
+            return "Turn CatVision on to peek"
+        o = self.cfg.options
+        o._clean_peek()
+        # This peek's steps carry its generation: once it is cut short
+        # (CatVision off, quit), anything still in flight is dropped.
+        gen = self.engine.peek_generation
+        if self.peeker.peeking and getattr(self, "_peek_gen", gen) != gen:
+            # A peek that was cut short some other way (CatVision turned off
+            # and on again) is still running, but its steps are all dropped:
+            # end it so this press starts one that counts.
+            self.peeker.stop()
+        self._peek_gen = gen
+        engine = self.engine
+
+        def apply(amount: float) -> None:
+            engine.set_peek(amount, generation=gen)
+        if not self.peeker.press(self.hotkeys.key_of("peek"), o.peek_strength, apply):
+            return None   # already peeking: nothing changes, no popup again
+        return "Peek"
 
     def _build_settings(self, f: ttk.Frame) -> None:
         f.columnconfigure(1, weight=1)
@@ -1553,6 +1632,10 @@ class CatVisionApp:
         self.cfg.current = self._read_settings()
         self.engine.settings = self.cfg.current
         self.engine.set_enabled(enabled)
+        if not enabled:
+            # Turning off already dropped the lift (and any late step from
+            # this peek); this just ends its thread.
+            self.peeker.stop()
         self._render_status()
 
     def _render_status(self) -> None:
@@ -1742,6 +1825,8 @@ class CatVisionApp:
             msg = self._keep_auto_look(quiet=True)
         elif action in ("auto_brighter", "auto_darker"):
             msg = self._nudge_auto_aim(action == "auto_brighter")
+        elif action == "peek":
+            msg = self._start_peek()
         elif action.startswith("display:"):
             self._set_displays_from_tray(action)
         elif action == "identify":
@@ -1832,6 +1917,7 @@ class CatVisionApp:
         self.tray.stop()
         self.auto_watch.stop()
         self._auto_fader.stop()
+        self.peeker.stop()
         self.engine.shutdown()
         self._cancel_after_jobs()
         self.root.destroy()

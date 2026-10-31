@@ -400,6 +400,28 @@ class FaderPerDisplayPaceTest(unittest.TestCase):
         self.assertEqual(both["fast"], fast)
         self.assertGreater(max(b - a for a, b in zip(fast, fast[1:])), 1.0)
 
+    def test_quickest_fade_steps_stay_small_at_in_between_rates(self):
+        """A 75 Hz screen next to a 144 Hz one (the fader at 120) is passed
+        on every one or two steps: the cap counts the longer gap, so no
+        update it shows moves more than CEILING_STEP (it was 1.67)."""
+        for rate in (75, 90, 100):
+            with self.subTest(rate=rate):
+                ctrls = {}
+                for did in ("a", "b"):
+                    c = Controller(offset=0.0, want=30.0, strength=30.0)
+                    c._view_rise = True
+                    ctrls[did] = c
+                applied = []
+                fader = Fader(ctrls, applied.append)
+                fader.set_rates({"a": rate, "b": 144})
+                for _ in range(240):
+                    fader.tick(1 / 120)
+                self.assertTrue(fader.settled())
+                shown = [a["a"] for a in applied]
+                steps = [b - a for a, b in zip(shown, shown[1:])]
+                self.assertLessEqual(max(steps), autolevels.CEILING_STEP + 1e-9)
+                self.assertEqual(shown[-1], 30.0)
+
     def test_display_without_a_rate_is_passed_on_every_step(self):
         c = Controller(offset=0.0, want=40.0, strength=30.0)
         applied = []

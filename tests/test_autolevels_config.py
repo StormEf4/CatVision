@@ -68,6 +68,7 @@ class OptionsDefaultsTest(unittest.TestCase):
         self.assertIn(o.auto_speed, autolevels.SPEEDS)
         self.assertTrue(o.auto_game_only)
         self.assertTrue(o.auto_dim)
+        self.assertTrue(o.auto_haze)
         self.assertEqual(o.auto_game_looks, {})
         self.assertTrue(S_LO <= o.auto_strength <= S_HI)
         self.assertTrue(T_LO <= o.auto_target <= T_HI)
@@ -78,7 +79,7 @@ class OptionsDefaultsTest(unittest.TestCase):
 
     def test_wrong_types_fall_back_to_defaults(self):
         bad = {"auto_levels": "yes", "auto_strength": "40", "auto_target": [0.2],
-               "auto_speed": 2, "auto_game_only": None, "auto_dim": {},
+               "auto_speed": 2, "auto_game_only": None, "auto_dim": {}, "auto_haze": "no",
                "auto_game_looks": ["Game", 0.2]}
         o = Options.from_dict(bad)
         d = Options()
@@ -95,6 +96,7 @@ class OptionsDefaultsTest(unittest.TestCase):
         o = c.options
         o.auto_levels, o.auto_strength, o.auto_target = True, 45.0, 0.2
         o.auto_speed, o.auto_game_only, o.auto_dim = "fast", False, False
+        o.auto_haze = False
         o.auto_game_looks = {"ARC Raiders": 0.15, "Hunt: Showdown 1896": 0.25}
         back = Config.from_json(json.loads(json.dumps(c.to_json())))
         self.assertEqual(asdict(back.options), asdict(o))

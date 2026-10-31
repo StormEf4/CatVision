@@ -131,6 +131,7 @@ action and press the keys.
 | Auto levels on / off (beta) | Turns [auto levels](#auto-levels-beta) on or off |
 | Auto levels: keep this look (beta) | Auto levels aims for how the game looks right now |
 | Auto levels: aim brighter / darker (beta) | Nudge Aim for up or down while you play |
+| Peek (hold to see in the dark) | Hold it for a strong, short lift to check a dark corner; let go and it glides back |
 | Show the CatVision window | Brings the window up |
 | Panic: everything off | Everything back to normal |
 
@@ -149,6 +150,16 @@ all** removes them again. Everything is also in the tray menu.
 - A small popup confirms each hotkey at the top of every ticked display. It
   can't be clicked and never takes focus away from your game, and you can
   turn it off in Settings.
+- **Peek** works while you hold its key (suggested: Ctrl+Alt+P). It brightens
+  the dark parts of the picture a lot, on top of your preset and auto levels,
+  and glides back to exactly the look you had when you let go. It raises
+  Shadow boost first, since that lifts the darkest corners the most (also with
+  the Night Vision presets), and Exposure when Shadow boost is nearly full.
+  A quick tap gives a short look. Set how much
+  with **Peek strength** on the Tune tab (10 to 60, normally 35). It only
+  works while CatVision is on, and ends by itself after 10 seconds. To tell
+  when you let go, CatVision asks Windows whether that key is still down
+  (a plain read-only check, not a keyboard hook).
 
 <br clear="right">
 
@@ -176,7 +187,8 @@ display and adjusts it live, the way your eyes adapt:
   at its own refresh rate (a 60 Hz screen next to a 144 Hz one gets 60 a
   second, not 120), which saves CPU, and the quickest fade (into a dark
   view) goes at each screen's own pace, so the slower one never shows
-  bigger steps than it would on its own.
+  bigger steps than it would on its own (also at rates that don't divide
+  evenly, a 75 Hz screen next to a 144 Hz one).
   It ignores tiny changes so the picture doesn't keep
   "breathing", and it catches up faster after a big change (stepping from
   daylight into a dark building), keeping that quicker pace all the way, and
@@ -221,7 +233,13 @@ display and adjusts it live, the way your eyes adapt:
 - **No pumping:** apart from turning into a new, darker view (or back to the
   one you just looked away from, or a flashbang fading), it only brightens
   once a scene has stayed dark for a moment, so flickering lights, muzzle
-  flashes and lightning don't make the picture bounce. Glimpses of
+  flashes and lightning don't make the picture bounce. When it measures
+  twice as often (see How it stays safe), a brighter copy only counts once
+  the next one, about 0.07 seconds later, is still bright, so a flash
+  shorter than that (a lightning stroke, a muzzle flash) doesn't dim the
+  picture more often than at the usual pace and stormy nights aren't left
+  darker; one that lasts (a flashbang, a flare, daylight) still dims about
+  as soon. Glimpses of
   something bright (running past windows) don't count as a new view or as
   looking away, and if you keep turning back and forth between bright and
   dark it waits the usual way until you stop for a few seconds.
@@ -240,6 +258,38 @@ display and adjusts it live, the way your eyes adapt:
   treated differently. A screen that is all bright (a flash, open sky) gets
   nothing extra, and **How much** at 0 turns this off too. The Home tab then
   says *keeping the outside visible*.
+- **Cut through haze (beta)** (on by default): when fog, smoke, dust or rain
+  wash the picture out (even its darkest parts are well above black and
+  every tone is squeezed together), it moves the black point down so the
+  view gets some of its contrast back: in thick haze over the whole view the
+  spread between the darker and brighter parts grows by roughly 15-30%, and
+  the Home tab says *cutting through haze*. Haze rarely covers everything in
+  a game: your own character, the HUD or something close by stay dark, and
+  the sun or an explosion stays bright. So it also checks the middle of the
+  view part by part (a coarse grid, leaving out the top row, mostly sky, and
+  the bottom one, mostly HUD) and counts it as hazy when at least half of
+  those parts are veiled, some more than others the way haze thickens with
+  distance. Then the cut stays small (often around a 5-10% wider spread),
+  because its black point never goes past about 60% of how bright the
+  darkest few percent of the whole picture are. Light haze that leaves most of
+  the view clear isn't caught. It only ever darkens the hazy grey toward
+  black: white stays white, Outside detail is kept, and nothing below the
+  haze is cut to pure black. It needs the haze in most of the last five pictures (about a
+  second), so one puff of smoke or a muzzle flash changes nothing; it glides
+  in over about a second and a half and out over about two when the air
+  clears, and small changes in a view that stays put leave it alone. It
+  leaves dark scenes alone, night fog included (in a dark game the haze is
+  usually close to black anyway, and lifting the shadows is what helps
+  there), and it gives way while auto levels is lifting a dark view, so it
+  never works against the night lift. A flat or all-bright screen (a white
+  menu, open sky, a loading screen, a plain wall up close) doesn't count,
+  and very thick, bright fog that fills the whole screen looks like one too,
+  so it gets nothing. Like the rest of auto levels it only measures
+  brightness (how bright the darkest few percent of the picture, and of each
+  part of the grid, are and how spread out their tones are) and changes the
+  whole screen's brightness levels the same way: it can't tell fog from a
+  misty-looking scene or an unevenly lit grey wall, and it never looks for
+  anything in the picture.
 - **Aim brighter / darker hotkeys:** nudge Aim for while you play, without
   leaving the game (suggested Ctrl+Alt+] and Ctrl+Alt+[). They change the
   game's own kept look if it has one.
@@ -275,17 +325,33 @@ display and adjusts it live, the way your eyes adapt:
   the window in front are checked, nothing inside it.
 - **Also tone down bright scenes** (on by default): untick it if you only
   ever want it to brighten.
+- **Faster screen capture (beta)** (on by default): copies the screen with Windows'
+  Desktop Duplication, the route recording apps like OBS use, and lets the
+  graphics card shrink the copy, so measuring takes less time. Where that
+  doesn't work (HDR or rotated displays, remote desktop, some older PCs) that
+  display uses the normal GDI copy and the fast way is tried again now and
+  then (after 5 seconds, then less often, up to once a minute). Like
+  recording apps, it can add a little input lag to some games in borderless
+  mode; untick it if you notice that, to always use the GDI copy.
+- **Cut through haze (beta)** (on by default): untick it to leave hazy
+  scenes as the game shows them (see above).
 - Each ticked display is adjusted on its own, and the Home tab shows what it
   is doing (for example *Display 1: 3% bright · Shadow boost 66 → 88*).
 
 **How it stays safe:** five times a second (ten while the brightness is
-changing a lot) it takes a tiny, low-resolution copy of what Windows is
-already showing (the same screen-capture route recording and streaming apps
-use) and measures only how bright it is: overall, how much of it is bright,
-and in 32 large blocks of the picture (8 across, 4 down) to tell turning to a
+changing a lot; twice that when taking the copy is cheap, a few
+milliseconds, so it reacts a little sooner for no more CPU than the slower
+route) it takes a tiny, low-resolution copy of what Windows is
+already showing and measures only how bright it is: overall, how much of it
+is bright, and in 32 large blocks of the picture (8 across, 4 down) to tell turning to a
 new view from a light going off. It never touches the game, never saves or
 sends the pictures, and never looks for anything in them. It only changes
-brightness, nothing that would point things out to you.
+brightness, nothing that would point things out to you. The copy comes from
+one of two standard Windows screen-copy routes, both only reading the finished
+desktop picture Windows composed for a display: DXGI Desktop Duplication (the
+route recording and streaming apps such as OBS use; with *Faster screen
+capture*, where it works) or a GDI copy of the screen (StretchBlt, the classic
+screenshot route; otherwise). Neither opens, reads or changes the game.
 
 **Things to know:**
 

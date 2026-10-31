@@ -16,10 +16,12 @@ from dataclasses import replace
 from unittest import mock
 
 from catvision import autolevels
-from catvision.autolevels import (ALTERNATE_HOLD_S, BURST_S, CEILING_RUSH, CEILING_STEP, DEAD_ZONE,
-                                  FADER_HZ, FLASH_RATIO, INTERVAL_S, RETURN_HOLD_S, RUSH_S,
+from catvision.autolevels import (ALTERNATE_HOLD_S, BURST_QUICK_S, BURST_S, CEILING_RUSH,
+                                  CEILING_STEP, DEAD_ZONE, FADER_HZ, FLASH_RATIO, INTERVAL_QUICK_S,
+                                  INTERVAL_S, QUICK_CAPTURE_MS, RETURN_HOLD_S, RUSH_S,
                                   SETTLE_FAST_S, SETTLE_S, STEADY_RATIO, THUMB_H, THUMB_W, VIEW_LAYOUT,
-                                  VIEW_SPREAD, Controller, Measurement, capture_interval, measure,
+                                  VIEW_SPREAD, VIEW_STEADY_S, Controller, Measurement,
+                                  capture_interval, measure,
                                   VIEW_MOVED, target_offset, view_layout, view_moved,
                                   view_spread)
 
@@ -111,21 +113,22 @@ def _settled(name):
     return target_offset(PICS[name].key, STRENGTH, AIM)
 
 
-def _simulate(scene_at, seconds, start, hz=FADER_HZ, phase=0.07, latency=0.03):
+def _simulate(scene_at, seconds, start, hz=FADER_HZ, phase=0.07, latency=0.03, cost_ms=None):
     """[(t, offset, want)] per fader step from t=0 (the switch); before
-    that it has been in `start` for a few seconds."""
+    that it has been in `start` for a few seconds.  ``cost_ms``: what each
+    capture costs (see capture_interval)."""
     c = Controller()
     c.offset = c.want = _settled(start)
     frame = 1.0 / hz
-    t, next_cap, prev, pending, n, out = -3.0, -3.0 + phase, None, [], 0, []
+    t, next_cap, prev, older, pending, n, out = -3.0, -3.0 + phase, None, None, [], 0, []
     while t < seconds:
         while next_cap <= t:
             name = scene_at(next_cap) if next_cap >= 0 else start
             n += 1
             m = replace(PICS[name], signature=n)     # a live picture: never "frozen"
             pending.append((next_cap + latency, m))
-            next_cap += capture_interval(prev, m)
-            prev = m
+            next_cap += capture_interval(prev, m, cost_ms, older)
+            older, prev = prev, m
         while pending and pending[0][0] <= t:
             c.observe(pending.pop(0)[1], STRENGTH, AIM)
         c.advance(frame)
@@ -192,6 +195,55 @@ class CaptureBeatTests(unittest.TestCase):
         self.assertEqual(capture_interval(PICS["room"], PICS["day"]), BURST_S)
         black = Measurement(0.0, 0.0, 0.0, 1.0, 0.0, True)
         self.assertEqual(capture_interval(PICS["day"], black), INTERVAL_S)
+
+    def test_cheap_captures_measure_twice_as_often(self):
+        # A quick capture (a GPU copy) keeps bursting one picture longer, so
+        # a new view is seen again VIEW_STEADY_S after it first was.
+        quick, slow = QUICK_CAPTURE_MS, QUICK_CAPTURE_MS + 0.1
+        day, room = PICS["day"], PICS["room"]
+        self.assertEqual(capture_interval(day, day, quick), INTERVAL_QUICK_S)
+        self.assertEqual(capture_interval(day, room, quick), BURST_QUICK_S)
+        self.assertEqual(capture_interval(room, room, quick, day), BURST_QUICK_S)
+        self.assertEqual(capture_interval(room, room, quick, room), INTERVAL_QUICK_S)
+        self.assertGreaterEqual(2 * BURST_QUICK_S, VIEW_STEADY_S)
+        # A slow one (GDI) keeps the usual pace.
+        self.assertEqual(capture_interval(day, day, slow), INTERVAL_S)
+        self.assertEqual(capture_interval(day, room, slow), BURST_S)
+        self.assertEqual(capture_interval(room, room, slow, day), INTERVAL_S)
+        black = Measurement(0.0, 0.0, 0.0, 1.0, 0.0, True)
+        self.assertEqual(capture_interval(day, black, quick), INTERVAL_QUICK_S)
+
+    def test_the_pace_follows_what_capturing_costs(self):
+        clock = [0.0]
+        starts = []
+        costs = iter([0.003] * 6 + [0.03] * 6)
+        pics = iter(["day", "day", "room", "room", "room", "room"] * 2)
+
+        def capture(_rect):
+            starts.append(clock[0])
+            clock[0] += next(costs)
+            return b"x"
+
+        class Stop:
+            def is_set(self):
+                return len(starts) >= 12
+
+            def wait(self, seconds):
+                clock[0] += seconds
+
+        w = autolevels.Watcher(capture=capture)
+        w._rects = {"d": (0, 0, 10, 10)}
+        with mock.patch.object(autolevels.time, "perf_counter", lambda: clock[0]), \
+                mock.patch.object(autolevels, "measure", lambda *_a: PICS[next(pics)]):
+            w._run(Stop())
+        gaps = [round(b - a, 6) for a, b in zip(starts, starts[1:])]
+        # The first capture's cost isn't known yet: the usual pace.  Then
+        # quick, bursting for two pictures after the change.  Once captures
+        # are slow (the slower of the last two counts), the usual pace
+        # (back to the day and into the room again: one burst each).
+        self.assertEqual(gaps, [INTERVAL_S, INTERVAL_QUICK_S, BURST_QUICK_S, BURST_QUICK_S,
+                                INTERVAL_QUICK_S, INTERVAL_QUICK_S, BURST_S, INTERVAL_S,
+                                BURST_S, INTERVAL_S, INTERVAL_S])
 
     def test_the_capture_time_does_not_add_to_the_gap(self):
         # A fake clock: each capture takes 40 ms, and the waits make up the
@@ -815,6 +867,219 @@ class GameLikePictureTests(unittest.TestCase):
             dimmed = next(t for t, _o, want in frames if want < target - 5.0)
             back = next(t for t, _o, want in frames if t > dimmed and want > target - 1.0)
             self.assertGreater(back, SETTLE_S + 0.2, phase)
+
+
+def _blend(a, b, share):
+    return lambda fx, fy: (1 - share) * a(fx, fy) + share * b(fx, fy)
+
+
+for _share in (25, 50, 75):
+    PICS[f"day>room {_share}"] = measure(_frame(_blend(_day, _room, _share / 100)), THUMB_W)
+    PICS[f"lit>room {_share}"] = measure(_frame(_blend(_lit_room, _room, _share / 100)), THUMB_W)
+
+
+def _cross_fade(a, b, seconds=0.2):
+    """A quick cross-fade from a to b (sprinting into a building)."""
+    def scene_at(t):
+        share = int(4 * t / seconds)
+        if t >= seconds:
+            return b
+        return f"{a}>{b} {25 * share}" if share > 0 else a
+    return scene_at
+
+
+class QuickCaptureTests(unittest.TestCase):
+    """Cheap captures (see QUICK_CAPTURE_MS) measure twice as often: the
+    first moment of a quick fade into the dark is then still part of the
+    settled view, which mustn't hide the new view from the quick catch-up,
+    and nothing that waited before may start to pump."""
+
+    QUICK = 3.0
+
+    def test_a_quick_fade_into_a_darker_view_is_followed_early(self):
+        for cost in (self.QUICK, None):
+            for phase in (0.0, 0.03, 0.07):
+                with self.subTest(cost=cost, phase=phase):
+                    frames = _simulate(_cross_fade("day", "room"), 3.0, "day", hz=120,
+                                       phase=phase, cost_ms=cost)
+                    good = next(t for t, o, _w in frames if o >= _settled("room") - 1.5)
+                    self.assertLess(good, 0.8)
+                    steps = [b[1] - a[1] for a, b in zip(frames, frames[1:])]
+                    self.assertLessEqual(max(steps), CEILING_STEP + 1e-9)
+
+    def test_a_light_fading_off_still_waits(self):
+        # The same fade with the layout kept (a light going off) is no new
+        # view: at the quick pace too it is not followed early, only
+        # estimated halfway (it got darker and darker, see DARKENING_COUNT)
+        # as at the usual pace, and nothing pumps afterwards.
+        for phase in (0.0, 0.03, 0.07):
+            with self.subTest(phase=phase):
+                frames = _simulate(_cross_fade("lit", "room"), 3.0, "lit", hz=120,
+                                   phase=phase, cost_ms=self.QUICK)
+                early = [w for t, _o, w in frames if t < SETTLE_FAST_S - INTERVAL_QUICK_S]
+                self.assertLess(max(early), _settled("room") - 5.0)
+                self.assertEqual(_rises(frames, since=SETTLE_S + 0.5), 0)
+                self.assertLessEqual(max(w for _t, _o, w in frames), _settled("room") + 1e-9)
+
+    def test_no_new_pumping_at_the_quick_pace(self):
+        for a, b, stay_a, stay_b in (("room", "lit", 0.3, 0.3), ("room", "window", 0.35, 0.35),
+                                     ("room", "day", 0.15, 0.6)):
+            with self.subTest(a=a, b=b):
+                frames = _simulate(_alternate(a, b, stay_a, stay_b), 8.0, a, hz=120,
+                                   cost_ms=self.QUICK)
+                slow = _simulate(_alternate(a, b, stay_a, stay_b), 8.0, a, hz=120)
+                self.assertLessEqual(_rises(frames, since=1.0), _rises(slow, since=1.0) + 1)
+
+
+class FlashAtTheQuickPaceTests(unittest.TestCase):
+    """At the quick capture pace a brighter picture counts only once it is
+    seen again FLASH_CONFIRM_S later (see FLASH_CONFIRM_S): lightning and
+    muzzle flashes, caught twice as often, mustn't dim stormy nights more
+    than at the usual pace, while a flash that lasts still dims at once."""
+
+    @staticmethod
+    def _feed(c, pictures, gap, start=0.0, ats=None):
+        """Observe pictures `gap` seconds apart (capture times ``ats``)."""
+        for i, name in enumerate(pictures):
+            m = replace(PICS[name], signature=id(c) + i + int(start * 1000) * 100)
+            if ats is not None:
+                m = replace(m, at=ats[i])
+            c.observe(m, STRENGTH, AIM, now=start + i * gap)
+        return start + len(pictures) * gap
+
+    def test_a_flash_gone_by_the_next_picture_is_not_counted(self):
+        for flash in ("lit", "day", "white", "brighter room"):
+            with self.subTest(flash=flash):
+                quick = Controller()
+                quick.offset = quick.want = _settled("room")
+                t = self._feed(quick, ["room"] * 20, INTERVAL_QUICK_S)
+                t = self._feed(quick, [flash], INTERVAL_QUICK_S, t)
+                self.assertEqual(quick.want, _settled("room"))
+                self._feed(quick, ["room"] * 5, autolevels.FLASH_AGAIN_S, t)
+                self.assertEqual(quick.want, _settled("room"))
+                self.assertFalse(quick.rush)
+                # At the usual pace one picture still counts, as before.
+                slow = Controller()
+                slow.offset = slow.want = _settled("room")
+                t = self._feed(slow, ["room"] * 10, INTERVAL_S)
+                self._feed(slow, [flash], INTERVAL_S, t)
+                self.assertLess(slow.want, _settled("room") - 1.0)
+
+    def test_a_flash_that_lasts_still_dims_at_once(self):
+        c = Controller()
+        c.offset = c.want = _settled("room")
+        t = self._feed(c, ["room"] * 20, INTERVAL_QUICK_S)
+        t = self._feed(c, ["day"], autolevels.FLASH_AGAIN_S, t)
+        self.assertEqual(c.want, _settled("room"))
+        # A burst picture sooner than FLASH_CONFIRM_S doesn't confirm it...
+        t = self._feed(c, ["day"], autolevels.FLASH_AGAIN_S, t - autolevels.FLASH_AGAIN_S
+                       + BURST_QUICK_S)
+        self.assertEqual(c.want, _settled("room"))
+        # ...one FLASH_CONFIRM_S or more after the first does, as a flash.
+        self._feed(c, ["day"], INTERVAL_QUICK_S, t)
+        self.assertAlmostEqual(c.want, _settled("day"), delta=1.0)
+        self.assertTrue(c.rush)
+
+    def test_a_strokes_afterglow_starts_again(self):
+        # A stroke (the day, 9.6x) and then its afterglow (the lit room,
+        # 6.4x but much dimmer than the stroke): the stroke is not counted
+        # for the afterglow; the afterglow, gone by the next picture, isn't
+        # either.  Had it stayed, it would count (not the stroke).
+        for stays in (False, True):
+            with self.subTest(stays=stays):
+                c = Controller()
+                c.offset = c.want = _settled("room")
+                t = self._feed(c, ["room"] * 20, INTERVAL_QUICK_S)
+                after = ["lit", "lit"] if stays else ["lit", "room"]
+                self._feed(c, ["white"] + after, autolevels.FLASH_AGAIN_S, t)
+                if stays:
+                    self.assertAlmostEqual(c.want, _settled("lit"), delta=1.0)
+                else:
+                    self.assertEqual(c.want, _settled("room"))
+
+    def test_capture_times_decide_how_far_apart(self):
+        # The pictures' capture times count, not when the window saw them.
+        for apart, counted in ((BURST_QUICK_S, False), (autolevels.FLASH_AGAIN_S, True)):
+            with self.subTest(apart=apart):
+                c = Controller()
+                c.offset = c.want = _settled("room")
+                ats = [100.0 + i * INTERVAL_QUICK_S for i in range(20)]
+                t = self._feed(c, ["room"] * 20, INTERVAL_QUICK_S, ats=ats)
+                ats = [ats[-1] + INTERVAL_QUICK_S, ats[-1] + INTERVAL_QUICK_S + apart]
+                # (seen 0.1 s apart either way: the window checks now and then)
+                self._feed(c, ["day", "day"], INTERVAL_QUICK_S, t, ats=ats)
+                self.assertEqual(c.want < _settled("room") - 1.0, counted)
+
+    def test_capture_looks_again_soon_after_a_brightening(self):
+        quick = QUICK_CAPTURE_MS
+        room, day = PICS["room"], PICS["day"]
+        self.assertEqual(capture_interval(room, day, quick), autolevels.FLASH_AGAIN_S)
+        self.assertEqual(capture_interval(day, room, quick), BURST_QUICK_S)
+        self.assertEqual(capture_interval(room, day, quick + 5.0), BURST_S)
+        self.assertGreater(autolevels.FLASH_AGAIN_S, autolevels.FLASH_CONFIRM_S)
+        self.assertGreater(autolevels.FLASH_CONFIRM_S, BURST_QUICK_S)
+        self.assertGreater(INTERVAL_S, autolevels.QUICK_GAP_S)
+        self.assertGreater(autolevels.QUICK_GAP_S, INTERVAL_QUICK_S)
+
+    def test_storms_dim_no_more_than_at_the_usual_pace(self):
+        strokes = [0.6, 0.7, 2.3, 4.1, 4.25, 6.0, 7.2]
+
+        def storm(stroke_s):
+            return lambda t: "lit" if any(0 <= t - s < stroke_s for s in strokes) else "room"
+
+        for stroke_s in (0.05, 0.08):
+            dimmed = {}
+            for cost in (3.0, None):
+                total = 0.0
+                for phase in (0.0, 0.03, 0.07, 0.11, 0.16):
+                    frames = _simulate(storm(stroke_s), 8.0, "room", hz=120, phase=phase,
+                                       cost_ms=cost)
+                    total += sum(1 / 120 for _t, o, _w in frames if o < _settled("room") - 1.5)
+                dimmed[cost] = total
+            with self.subTest(stroke_s=stroke_s):
+                self.assertLessEqual(dimmed[3.0], dimmed[None] * 0.75)
+
+    def test_a_lasting_flash_dims_about_as_soon_as_at_the_usual_pace(self):
+        firsts = {}
+        for cost in (3.0, None):
+            firsts[cost] = []
+            for phase in (0.0, 0.03, 0.07, 0.11, 0.16):
+                frames = _simulate(lambda t: "day", 2.0, "room", hz=120, phase=phase,
+                                   latency=0.003 if cost else 0.03, cost_ms=cost)
+                firsts[cost].append(next(t for t, o, _w in frames if o < _settled("room") - 1.0))
+        self.assertLessEqual(max(firsts[3.0]), max(firsts[None]))
+        self.assertLessEqual(sum(firsts[3.0]), sum(firsts[None]) + 0.01 * len(firsts[None]))
+
+    def test_the_quick_pace_does_not_flap(self):
+        self.assertTrue(autolevels.quick_pace(QUICK_CAPTURE_MS, False))
+        self.assertFalse(autolevels.quick_pace(QUICK_CAPTURE_MS + 1.0, False))
+        self.assertTrue(autolevels.quick_pace(QUICK_CAPTURE_MS + 1.0, True))
+        self.assertFalse(autolevels.quick_pace(autolevels.QUICK_LEAVE_MS + 0.1, True))
+        # Two displays costing about QUICK_CAPTURE_MS between them: once
+        # quick, it stays quick instead of switching pace every picture.
+        clock = [0.0]
+        starts = []
+        costs = iter([0.007] * 3 + [0.009, 0.007] * 4 + [0.012] * 3)
+
+        def capture(_rect):
+            starts.append(clock[0])
+            clock[0] += next(costs)
+            return b"x"
+
+        class Stop:
+            def is_set(self):
+                return len(starts) >= 14
+
+            def wait(self, seconds):
+                clock[0] += seconds
+
+        w = autolevels.Watcher(capture=capture)
+        w._rects = {"d": (0, 0, 10, 10)}
+        with mock.patch.object(autolevels.time, "perf_counter", lambda: clock[0]), \
+                mock.patch.object(autolevels, "measure", lambda *_a: PICS["room"]):
+            w._run(Stop())
+        gaps = [round(b - a, 6) for a, b in zip(starts, starts[1:])]
+        self.assertEqual(gaps, [INTERVAL_S] + [INTERVAL_QUICK_S] * 10 + [INTERVAL_S] * 2)
 
 
 class TurnRoundTests(unittest.TestCase):

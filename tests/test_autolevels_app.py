@@ -61,6 +61,8 @@ class FakeScreen:
             base = bytes([200, 200, 200, 255]) * 400
         elif mode == "window":   # a dark room with a bright window filling half the view
             base = bytes([6, 6, 6, 255]) * 200 + bytes([200, 200, 200, 255]) * 200
+        elif mode == "haze":     # fog: nothing near black, the tones squeezed together
+            base = (bytes([90, 90, 90, 255]) + bytes([150, 150, 150, 255])) * 200
         elif mode == "black":
             base = bytes([0, 0, 0, 255]) * 400
             return base   # black stays black
@@ -786,6 +788,24 @@ class AutoLevelsAppStress(unittest.TestCase):
         self.app.auto_flag_vars["auto_dim"].set(False)
         self.app._on_auto_option()
         self.assertTrue(self.pump_until(lambda: ctrl.offset >= -0.5, 4), self.info())
+        self.assert_clean()
+
+    def test_cut_through_haze_and_untick_it(self):
+        self.screen.mode = "haze"
+        self.app.activate_preset_by_name("Pitch Black")
+        self.app.handle_action("auto_levels")
+        self.assertTrue(self.app.cfg.options.auto_haze)
+        self.assertTrue(self.pump_until(
+            lambda: self.engine.auto_offsets.get(D1, {}).get("haze_cut", 0) > 20, 8), self.info())
+        self.assertTrue(self.pump_until(lambda: "cutting through haze" in self.info(), 4),
+                        self.info())
+        self.assertNotIn("haze_cut", self.engine.auto_offsets.get(D2, {}))
+        self.app.auto_flag_vars["auto_haze"].set(False)
+        self.app._on_auto_option()
+        self.assertFalse(self.app.cfg.options.auto_haze)
+        self.assertTrue(self.pump_until(
+            lambda: not self.engine.auto_offsets.get(D1, {}).get("haze_cut"), 8), self.info())
+        self.assertNotIn("cutting through haze", self.info())
         self.assert_clean()
 
     def test_keep_at_full_boost_leaves_aim_for(self):

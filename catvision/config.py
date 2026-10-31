@@ -13,6 +13,7 @@ from .autolevels import SPEEDS, STRENGTH_LIMITS, TARGET_LIMITS, clean_title
 from .curves import Settings
 from .filters import CustomFilter, clean_name
 from .hotkeys import LEGACY_DEFAULT_HOTKEYS, default_hotkeys, normalize_combo
+from .peek import DEFAULT_STRENGTH as PEEK_DEFAULT, STRENGTH_LIMITS as PEEK_LIMITS
 
 
 def app_dir() -> Path:
@@ -47,8 +48,13 @@ class Options:
     auto_speed: str = "normal"      # slow / normal / fast
     auto_game_only: bool = True     # only while a game fills the screen
     auto_dim: bool = True           # also tone down bright scenes (not only brighten)
+    # Faster screen capture: DXGI Desktop Duplication (like recording apps)
+    # instead of a GDI copy, falling back to GDI where it doesn't work.
+    auto_fast_capture: bool = True
+    auto_haze: bool = True          # cut through haze (fog, smoke) with a black point
     auto_game_looks: dict = field(default_factory=dict)  # game window title -> Aim for
     unlock_requested_at: float = 0.0  # when the user unlocked full strength
+    peek_strength: float = PEEK_DEFAULT  # Peek hotkey: points added while held (see engine.peek_lift)
 
     @classmethod
     def from_dict(cls, data) -> "Options":
@@ -64,6 +70,7 @@ class Options:
                     setattr(o, key, value)
             o.displays = [d for d in o.displays if isinstance(d, str)][:16]
             o._clean_auto()
+            o._clean_peek()
             # version 1-2 stored a single "monitor" ("all" or an id)
             old = data.get("monitor")
             if "displays" not in data and isinstance(old, str) and old != "all":
@@ -78,6 +85,8 @@ class Options:
         self.auto_target = _clamp(self.auto_target, TARGET_LIMITS, defaults.auto_target)
         if self.auto_speed not in SPEEDS:
             self.auto_speed = defaults.auto_speed
+        if not isinstance(self.auto_fast_capture, bool):
+            self.auto_fast_capture = defaults.auto_fast_capture
         looks: dict[str, float] = {}
         for title, aim in self.auto_game_looks.items():
             # Same title as window_in_front() reports; "" means no game.
@@ -90,6 +99,12 @@ class Options:
         # A damaged timestamp (NaN, infinity, negative) means "never unlocked".
         if not math.isfinite(self.unlock_requested_at) or self.unlock_requested_at < 0:
             self.unlock_requested_at = 0.0
+
+
+    def _clean_peek(self) -> None:
+        """Peek strength from a hand-edited or old config goes straight to the
+        brightness tables, so bring it back into range here."""
+        self.peek_strength = _clamp(self.peek_strength, PEEK_LIMITS, PEEK_DEFAULT)
 
 
 MAX_GAME_LOOKS = 200
