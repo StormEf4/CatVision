@@ -188,8 +188,10 @@ class AutoLevelsAppStress(unittest.TestCase):
     def assert_at_preset(self, timeout=8.0):
         """Every display ends at the exact preset (or untouched if CatVision
         is off / the display is not ticked) with no auto offsets left."""
+        # (Auto mode on or off glides for gui.MODE_FADE_S: wait for that too.)
         ok = self.pump_until(lambda: not self.engine.auto_offsets
-                             and not self.app._auto_winding_down, timeout)
+                             and not self.app._auto_winding_down
+                             and not self.engine.switch_amount, timeout)
         self.assertTrue(ok, f"auto offsets never cleared: {self.engine.auto_offsets}")
         self.pump(0.3)   # nothing may move them again afterwards
         self.assertEqual(self.engine.auto_offsets, {})

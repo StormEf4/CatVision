@@ -182,4 +182,7 @@ class SliderRow:
         self.value.configure(text=fmt(self.kind, self.var.get()))
 
     def set_enabled(self, enabled: bool) -> None:
+        """Greyed out (label and value too) when not ``enabled``."""
         self.scale.state(["!disabled"] if enabled else ["disabled"])
+        self.label.configure(foreground="" if enabled else MUTED)
+        self.value.configure(fg=ACCENT if enabled else MUTED)

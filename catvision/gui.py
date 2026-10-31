@@ -93,6 +93,9 @@ MENU_TICK_MS = 50   # (pictures come every 0.1-0.2 s; a menu must last MENU_ON_S
 MENU_FADE_TICK_MS = 8
 MENU_STEP_MAX_S = 0.034   # one fade step covers at most this much time
 MENU_FRONT_S = 0.25   # re-check which displays a full-screen game fills this often
+# Auto mode on or off: the displays glide from the old look to the new one in
+# this long (eased in and out like a menu's fade, stepped as often).
+MODE_FADE_S = 0.4
 
 
 def auto_number(value, lo: float, hi: float, default):
@@ -316,6 +319,11 @@ class CatVisionApp:
         self._menu_seq_at = 0.0       # when the last new picture came (time.perf_counter())
         self._menu_game: set[str] = set()   # displays a full-screen game fills
         self._menu_back = False       # glided back from a menu (a refused step is retried)
+        # Auto mode on or off: the glide from the old look to the new one.
+        self._mode_job = None
+        self._mode_progress = 0.0     # how far it has got (0 = the old look, 1 = the new)
+        self._mode_generation = -1    # the engine's switch generation its steps carry
+        self._mode_tick_at = 0.0
         # Force quit runs on the tray thread and only needs to put the screen back.
         self.tray = Tray(self._actions.put, on_force_quit=self.engine.restore_now)
         self._build()
@@ -697,9 +705,39 @@ class CatVisionApp:
         if was != on:
             # The other look takes over at once: auto's adjustment belongs
             # to the neutral look and must not glide on top of a preset.
+            # What the displays show glides over to it (see _mode_fade).
+            self._begin_mode_fade()
             self._auto_finish()
         self._show_mode()
         self._schedule_save()
+
+    def _begin_mode_fade(self) -> None:
+        """Auto mode is going on or off: keep what the displays show now and
+        glide it over to the other look in MODE_FADE_S, instead of jumping."""
+        if not self.engine.enabled or self._closed:
+            return
+        self._mode_generation = self.engine.begin_switch()
+        self._mode_progress, self._mode_tick_at = 0.0, time.perf_counter()
+        if self._mode_job is None:
+            self._mode_job = self.root.after(MENU_FADE_TICK_MS, self._mode_fade)
+
+    def _mode_fade(self) -> None:
+        """One step of the glide between the old look and the new one."""
+        self._mode_job = None
+        if self._closed or self._mode_generation != self.engine.switch_generation:
+            return   # CatVision went off (or quit) since: nothing left to glide
+        now = time.perf_counter()
+        # (At most MENU_STEP_MAX_S a step: a late timer slows the glide a
+        # little instead of jumping.)
+        dt = min(max(now - self._mode_tick_at, 0.0), MENU_STEP_MAX_S)
+        self._mode_tick_at = now
+        self._mode_progress = min(1.0, self._mode_progress + dt / MODE_FADE_S)
+        self.engine.set_switch_amount(1.0 - menu_ease(self._mode_progress),
+                                      self._mode_generation)
+        if self._mode_progress < 1.0:
+            self._mode_job = self.root.after(MENU_FADE_TICK_MS, self._mode_fade)
+        else:
+            self._auto_check_gamma()   # (the glide may change what Windows holds back)
 
     def _look(self) -> Settings:
         """What the displays get underneath any auto adjustment: the neutral
@@ -1907,7 +1945,14 @@ class CatVisionApp:
         self._update_strength_ui()
         self.refresh_notices()
         self._update_title()
+        self._show_slider_state()
         self._sync_tray()
+
+    def _show_slider_state(self) -> None:
+        """Auto mode sets the look itself: the preset's sliders (kept for when
+        it is off) are greyed out meanwhile."""
+        for row in self.sliders:
+            row.set_enabled(not self.cfg.options.auto_levels)
 
     def set_status(self, text: str, warn: bool = False) -> None:
         self.status.configure(text=text, fg=WARN if warn else FG)
@@ -1919,7 +1964,7 @@ class CatVisionApp:
         # In Auto mode the sliders still belong to the preset (used again
         # once Auto mode is off): say so.
         self.tune_title.configure(text=f"Adjusting: {name}{changed}" + (
-            f"  \u00b7  {autolevels.AUTO_NAME} is on: these are for when it is off"
+            f"  \u00b7  {autolevels.AUTO_NAME} sets the look itself: pick a preset to use these"
             if auto else ""))
         shown = autolevels.AUTO_NAME if auto else name
         self.root.title(f"{APP_TITLE} - {shown}")
@@ -2203,6 +2248,7 @@ class CatVisionApp:
         """Drop every pending Tk timer (auto levels tick, save, polling...)
         so nothing runs against the destroyed window."""
         self._auto_job = self._save_job = self._apply_job = self._menu_job = None
+        self._mode_job = None
         try:
             jobs = self.root.tk.splitlist(self.root.tk.call("after", "info"))
         except tk.TclError:

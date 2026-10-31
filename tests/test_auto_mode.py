@@ -365,6 +365,97 @@ class ControllerModeTest(unittest.TestCase):
         self.assertAlmostEqual(c.want, al.target_offset(c.key, 30.0, 0.12), delta=30 * al.DEAD_ZONE)
 
 
+class SwitchGlideTest(unittest.TestCase):
+    """Auto mode on or off: the engine shows the look from before the switch
+    and glides it over to the new one (Engine.begin_switch)."""
+
+    def setUp(self):
+        from catvision.engine import Engine
+        from tests.test_catvision import FakeColor, FakeGamma
+        self.gamma = FakeGamma(start=curves.identity_ramp())
+        self.color = FakeColor()
+        self.applied, self.resets = [], []
+        self.color.apply = lambda effect: self.applied.append(list(effect)) or True
+        self.color.reset = lambda: self.resets.append(1)
+        self.engine = Engine(self.gamma, self.color)
+        self.engine.settings = curves.Settings(shadow_boost=60, saturation=0.4)
+        self.engine.set_enabled(True)
+        self.d = self.engine.target_monitors()[0].id
+        self.before = self.gamma.get_ramp(self.d)
+
+    def switch_to(self, settings):
+        gen = self.engine.begin_switch()
+        self.engine.set_settings(settings)
+        return gen
+
+    def test_glides_from_the_old_look_to_the_new(self):
+        e, d = self.engine, self.d
+        gen = self.switch_to(al.AUTO_BASE)
+        self.assertEqual(self.gamma.get_ramp(d), self.before)   # nothing jumps
+        lows = []
+        for i in range(11, -1, -1):
+            e.set_switch_amount(i / 12, gen)
+            ramp = self.gamma.get_ramp(d)
+            for ch in ramp:   # every step a proper (rising) table
+                self.assertTrue(all(a <= b for a, b in zip(ch, ch[1:])))
+            lows.append(ramp[1][20])
+        self.assertTrue(all(a >= b for a, b in zip(lows, lows[1:])))   # steadily down
+        self.assertEqual(self.gamma.get_ramp(d), curves.identity_ramp())
+        self.assertEqual((e.switch_amount, e.switch_from, e.switch_matrix), (0.0, {}, None))
+
+    def test_color_filter_glides_off_and_on(self):
+        e = self.engine
+        self.assertTrue(e.status.color_used)
+        first = self.applied[-1]
+        gen = self.switch_to(al.AUTO_BASE)          # Auto uses no filter...
+        self.assertEqual(self.applied[-1], first)   # ...but it doesn't vanish at once
+        e.set_switch_amount(0.5, gen)
+        self.assertNotEqual(self.applied[-1], first)
+        n = len(self.resets)
+        e.set_switch_amount(0.0, gen)
+        self.assertGreater(len(self.resets), n)
+        gen = self.switch_to(curves.Settings(shadow_boost=60, saturation=0.4))
+        e.set_switch_amount(0.5, gen)               # back on: it glides in too
+        self.assertNotEqual(self.applied[-1], first)
+        e.set_switch_amount(0.0, gen)
+        self.assertEqual(self.applied[-1], first)
+
+    def test_switch_back_mid_glide_starts_where_it_is(self):
+        e, d = self.engine, self.d
+        gen = self.switch_to(al.AUTO_BASE)
+        e.set_switch_amount(0.5, gen)
+        half = self.gamma.get_ramp(d)
+        gen2 = self.switch_to(curves.Settings(shadow_boost=60, saturation=0.4))
+        self.assertEqual(self.gamma.get_ramp(d), half)   # no jump either way
+        e.set_switch_amount(0.3, gen)                    # the old glide's late step: ignored
+        self.assertEqual(self.gamma.get_ramp(d), half)
+        e.set_switch_amount(0.0, gen2)
+        self.assertEqual(self.gamma.get_ramp(d), self.before)
+
+    def test_off_or_quit_mid_glide_ends_it(self):
+        e, d = self.engine, self.d
+        gen = self.switch_to(al.AUTO_BASE)
+        e.set_switch_amount(0.6, gen)
+        e.set_enabled(False)
+        self.assertEqual((e.switch_amount, e.switch_from), (0.0, {}))
+        e.set_switch_amount(0.3, gen)                    # late step: ignored
+        e.set_enabled(True)
+        self.assertEqual(self.gamma.get_ramp(d), curves.identity_ramp())   # the new look
+        gen = self.switch_to(curves.Settings(shadow_boost=60))
+        e.restore_now()
+        self.assertEqual(e.switch_amount, 0.0)
+        self.assertEqual(self.gamma.ramps[d], curves.identity_ramp())
+
+    def test_auto_offsets_and_peek_show_through_the_glide(self):
+        e, d = self.engine, self.d
+        gen = self.switch_to(al.AUTO_BASE)
+        e.set_auto_offsets({d: {"shadow_boost": 40.0}})
+        self.assertEqual(self.gamma.get_ramp(d), self.before)   # still the old look
+        e.set_switch_amount(0.0, gen)
+        want = curves.build_ramp(curves.Settings(shadow_boost=40))
+        self.assertEqual(self.gamma.get_ramp(d), want)
+
+
 class ConfigMigrationTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -495,6 +586,36 @@ class AutoModeAppTest(unittest.TestCase):
         self.app.handle_action("prev")
         self.assertEqual(self.app.cfg.active_preset, last)
         self.assertFalse(self.app.cfg.options.auto_levels)
+
+    def test_auto_on_and_off_glide(self):
+        from catvision import gui as gui_mod
+        self.app.activate_preset_by_name("Dark Areas")
+        self.app._set_enabled(True)
+        self.pump(0.2)
+        preset = self.preset_ramp()
+        self.assertEqual(self.gamma.ramps[D1], preset)
+        self.app.set_auto_levels(True)
+        self.assertEqual(self.gamma.ramps[D1], preset)   # no jump: it glides
+        self.pump(gui_mod.MODE_FADE_S / 2)
+        middle = self.gamma.ramps[D1]
+        self.assertNotEqual(middle, preset)
+        self.assertNotEqual(middle, curves.identity_ramp())
+        self.assertTrue(self.pump_until(lambda: not self.engine.switch_amount, 2))
+        self.app.set_auto_levels(False)
+        shown = self.gamma.ramps[D1]
+        self.assertNotEqual(shown, preset)                # Auto's look still shows...
+        self.assertTrue(self.pump_until(lambda: not self.engine.switch_amount, 2))
+        self.assert_at_preset()                           # ...then exactly the preset
+
+    def test_preset_sliders_greyed_out_in_auto(self):
+        self.app.activate_preset_by_name("Dark Areas")
+        enabled = lambda: [not r.scale.instate(["disabled"]) for r in self.app.sliders]
+        self.assertTrue(all(enabled()))
+        self.app.set_auto_levels(True)
+        self.assertFalse(any(enabled()))
+        self.assertTrue(self.app.peek_row.scale.instate(["!disabled"]))   # an app option
+        self.app.activate_preset_by_name("Gentle Boost")
+        self.assertTrue(all(enabled()))
 
     def test_hotkeys_follow_the_mode(self):
         self.app.activate_preset_by_name("Dark Areas")

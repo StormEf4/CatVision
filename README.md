@@ -202,9 +202,11 @@ With CatVision on, that is all: everything is automatic.
   in.
 - **Picking a preset turns Auto mode off** (from the list, a preset hotkey,
   the arrows or the tray), and that preset works as a plain, fixed look.
-  Turning Auto mode off goes back to the preset you used last. Your
-  presets' sliders on the Tune tab are kept for that; while Auto mode is on
-  the Tune tab says they are for when it is off.
+  Turning Auto mode off goes back to the preset you used last. Either way
+  the screen glides from one look to the other in under half a second
+  instead of jumping. Your presets' sliders (on the Home and Tune tabs) are
+  kept for when Auto mode is off, and are greyed out while it is on, since
+  Auto mode sets the look itself.
 - **Dark scene:** it lifts Shadow boost (and Exposure too, only when it is
   pitch dark) until the scene is **shown** at about three times *Aim for*
   (a night raid at about a third of full brightness, at least as visible as
