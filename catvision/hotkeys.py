@@ -228,7 +228,7 @@ ACTION_LABELS: dict[str, str] = {
     "boost_up": "More boost (+10)",
     "boost_down": "Less boost (-10)",
     "filter_next": "Next color filter",
-    "auto_levels": "Auto levels on / off (beta)",
+    "auto_levels": "Auto mode on / off (beta)",
     "auto_keep": "Auto levels: keep this look (beta)",
     "auto_brighter": "Auto levels: aim brighter (beta)",
     "auto_darker": "Auto levels: aim darker (beta)",

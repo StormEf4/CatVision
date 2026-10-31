@@ -72,6 +72,26 @@ class Status:
         return " ".join(parts)
 
 
+def menu_ramp(ramp: list, original: list, amount: float) -> list:
+    """Normal display in menus: ``ramp`` glided ``amount`` (0-1) of the way
+    to the display's own brightness table (1 = exactly that table)."""
+    if amount >= 1.0:
+        return [list(ch) for ch in original]
+    keep = 1.0 - amount
+    return [[int(round(o + (v - o) * keep)) for v, o in zip(ch, och)]
+            for ch, och in zip(ramp, original)]
+
+
+def menu_matrix(matrix: list, amount: float) -> list:
+    """The color filter glided ``amount`` (0-1) of the way to none."""
+    if amount <= 0.0:
+        return matrix
+    if amount >= 1.0:
+        return [row[:] for row in curves.IDENTITY3]
+    return [[v + (i - v) * amount for v, i in zip(row, irow)]
+            for row, irow in zip(matrix, curves.IDENTITY3)]
+
+
 class Engine:
     def __init__(self, gamma_backend, color_backend, state_dir: Path | None = None):
         self.gamma = gamma_backend
@@ -97,6 +117,14 @@ class Engine:
         # Bumped when a peek is cut short (CatVision off, quit), so a late
         # step from that peek can't put the lift back.
         self.peek_generation = 0
+        # "Normal display in menus" (beta): how far every chosen display has
+        # glided back to normal (0 = the full look, 1 = exactly as if
+        # CatVision were off: the displays' own brightness tables and no
+        # color filter) while the game shows one of its menus.
+        self.menu_amount = 0.0
+        # Bumped when CatVision goes off or quits, so a late step from a
+        # menu fade can't leave a display half-normal afterwards.
+        self.menu_generation = 0
         self._lock = threading.RLock()  # force-quit restores from the tray thread
         self._flag = (state_dir / "display_modified.flag") if state_dir else None
         self._applied: dict[str, list[list[int]]] = {}
@@ -190,6 +218,7 @@ class Engine:
     def _apply(self) -> Status:
         if not self.enabled:
             self._end_peek()   # a peek never outlives CatVision being on
+            self._end_menu()   # ...nor does a menu's normal display
             self._restore_gamma()
             self.color.reset()
             self.status = Status(enabled=False)
@@ -203,6 +232,7 @@ class Engine:
         self._gamma_state.clear()
         self._apply_gamma(self._targets(), tint, status)
 
+        matrix = menu_matrix(matrix, self.menu_amount)
         if curves.is_identity_matrix(matrix):
             self.color.reset()
         elif per_display and not self.color_all_displays:
@@ -267,6 +297,50 @@ class Engine:
             if not self.enabled:
                 return
             self._redo_fading(self._targets() if changed else [])
+
+    def set_menu_amount(self, amount: float, generation: int | None = None) -> None:
+        """Normal display in menus (beta): glide every chosen display toward
+        normal (1 = as if CatVision were off) or back (0 = exactly what
+        showed before).  Takes the same quick path as auto levels updates,
+        and moves the color filter along with it."""
+        with self._lock:
+            if generation is not None and generation != self.menu_generation:
+                return   # from a menu fade that was cut short
+            try:
+                amount = min(1.0, max(0.0, float(amount)))
+            except (TypeError, ValueError):
+                amount = 0.0
+            if not math.isfinite(amount):
+                amount = 0.0
+            changed = amount != self.menu_amount
+            self.menu_amount = amount
+            if not self.enabled:
+                return
+            self._redo_fading(self._targets() if changed else [])
+            if changed:
+                self._menu_color(amount)
+
+    def _menu_color(self, amount: float) -> None:
+        """Move the color filter (if the look has one that shows) along with
+        a menu fade, as _apply would show it."""
+        per_display = not self.all_displays_selected()
+        _tint, matrix = curves.plan_color(self.settings, self.custom_filters, self.custom_tints,
+                                          all_displays=not per_display)
+        if (curves.is_identity_matrix(matrix) or not self.color.available
+                or per_display and not self.color_all_displays):
+            return
+        matrix = menu_matrix(matrix, amount)
+        if curves.is_identity_matrix(matrix):
+            self.color.reset()
+            self.status.color_used = False
+        else:
+            # (The status as _apply would give it: the notices follow it.)
+            self.status.color_ok = self.color.apply(curves.to_mag_color_effect(matrix))
+            self.status.color_used, self.status.color_all_displays = True, per_display
+
+    def _end_menu(self) -> None:
+        self.menu_generation += 1
+        self.menu_amount = 0.0
 
     def end_peek(self) -> None:
         """Stop any peek at once and ignore its late steps."""
@@ -336,6 +410,9 @@ class Engine:
                 # the Peek's lift as to its own (autolevels.HAZE_LIFT_OFF),
                 # or it would swallow the dark corners a Peek is for.
                 amounts["haze_cut"] *= max(0.0, 1.0 - lift / autolevels.HAZE_LIFT_OFF)
+            if amounts.get("haze_band"):
+                # (So does the haze band, though it never darkens.)
+                amounts["haze_band"] *= max(0.0, 1.0 - lift / autolevels.HAZE_LIFT_OFF)
         if not amounts:
             return s
         return s.clamped({k: getattr(s, k) + v for k, v in amounts.items()})
@@ -353,13 +430,21 @@ class Engine:
         if not fading:
             self._fallback.clear()   # a full apply starts from the full ramp again
         ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
+        menu = self.menu_amount
         for m in monitors:
-            lifted = bool(any(self.auto_offsets.get(m.id, {}).values()) or self.peek_amount)
+            lifted = bool(any(self.auto_offsets.get(m.id, {}).values()) or self.peek_amount
+                          or menu)
             adjusted = fading and lifted
-            which = (tuple(sorted(self.auto_offsets.get(m.id, {}).items())), self.peek_amount)
+            which = (tuple(sorted(self.auto_offsets.get(m.id, {}).items())), self.peek_amount,
+                     menu, m.id if menu else None)   # (toward each display's own table)
             ramp = ramps.get(which)
             if ramp is None:
-                ramp = ramps[which] = curves.build_ramp(self.settings_for(m.id), tint)
+                # (A Peek held as a menu opens fades out with the rest, so
+                # nothing jumps; in the menu itself the display is normal.)
+                ramp = curves.build_ramp(self.settings_for(m.id), tint)
+                if menu:
+                    ramp = menu_ramp(ramp, m.original or curves.identity_ramp(), menu)
+                ramps[which] = ramp
             if adjusted:
                 result: GammaResult = apply_ramp_with_fallback(
                     self.gamma, m.id, ramp, self._fallback, search=m.id in search)
@@ -492,6 +577,7 @@ class Engine:
         with self._lock:
             self.enabled = False
             self._end_peek()
+            self._end_menu()
             self._restore_gamma()
             self.color.close()
             self.gamma.close()
@@ -512,6 +598,7 @@ class Engine:
                 self.enabled = False
                 self.auto_generation += 1
                 self._end_peek()
+                self._end_menu()
                 self._restore_gamma()
             finally:
                 self._lock.release()
@@ -519,6 +606,7 @@ class Engine:
             self.enabled = False
             self.auto_generation += 1
             self._end_peek()
+            self._end_menu()
             refused = [m for m in self._monitors
                        if not self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())]
             self._mark_dirty(bool(refused))

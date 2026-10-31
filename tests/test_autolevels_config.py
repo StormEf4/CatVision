@@ -222,7 +222,7 @@ class AutoHotkeysTest(unittest.TestCase):
                 label = hotkeys.ACTION_LABELS.get(action)
                 self.assertTrue(label, f"{action} has no label")
                 self.assertIn("(beta)", label)
-                self.assertIn("Auto levels", label)
+                self.assertIn("Auto ", label)   # Auto mode / Auto levels
                 self.assertEqual(hotkeys.action_label(action), label)
 
     def test_no_other_action_mentions_auto_levels(self):
@@ -331,7 +331,7 @@ class AutoTrayTest(unittest.TestCase):
                       if isinstance(i, _Item) and isinstance(i.text, str)}
 
     def _auto_items(self):
-        return [i for t, i in self.items.items() if "auto levels" in t.lower()]
+        return [i for t, i in self.items.items() if t.lower().startswith("auto")]
 
     def test_auto_items_present_and_wired(self):
         wanted = {"auto_levels", "auto_keep"}
@@ -347,7 +347,7 @@ class AutoTrayTest(unittest.TestCase):
                 self.assertIn("(beta)", item.text)
 
     def test_auto_toggle_check_follows_state(self):
-        item = next(i for i in self._auto_items() if i.text.startswith("Auto levels (beta)"))
+        item = next(i for i in self._auto_items() if i.text.startswith("Auto mode (beta)"))
         self.assertFalse(item.checked(item))
         self.tray.state.auto_levels = True
         self.assertTrue(item.checked(item))
@@ -459,9 +459,10 @@ class AutoTextTest(unittest.TestCase):
         m = re.search(r"Shadow boost (\d+) → (\d+)", self.sec)
         self.assertIsNotNone(m)
         base, now = int(m.group(1)), int(m.group(2))
-        from catvision.config import DEFAULT_PRESET
-        self.assertEqual(builtin_by_name(DEFAULT_PRESET).settings.shadow_boost, base)
-        self.assertLessEqual(now - base, autolevels.DEFAULT_STRENGTH)
+        # Auto mode starts from the neutral look, and How much (default)
+        # caps its lift.
+        self.assertEqual(autolevels.AUTO_BASE.shadow_boost, base)
+        self.assertLessEqual(now - base, autolevels.auto_cap(autolevels.DEFAULT_STRENGTH))
 
     def test_exposure_for_night_vision(self):
         from catvision.presets import builtin_by_name
@@ -599,9 +600,11 @@ class AutoGuiBadConfigTest(unittest.TestCase):
         self.assertTrue(app._auto_ctrl)
         for did, ctrl in app._auto_ctrl.items():
             # seen: strength 1000, want 1000, offset 90+ while the slider says 60
-            self.assertLessEqual(ctrl.strength, S_HI, did)
-            self.assertLessEqual(abs(ctrl.want), S_HI + 1e-6, did)
-            self.assertLessEqual(abs(ctrl.offset), S_HI + 1e-6, did)
+            # (Auto mode: How much caps auto_cap points.)
+            cap = autolevels.auto_cap(S_HI)
+            self.assertLessEqual(ctrl.strength, cap, did)
+            self.assertLessEqual(abs(ctrl.want), cap + 1e-6, did)
+            self.assertLessEqual(abs(ctrl.offset), cap + 1e-6, did)
         self.assertTrue(S_LO <= app.cfg.options.auto_strength <= S_HI,
                         app.cfg.options.auto_strength)
         self.assertTrue(T_LO <= app._auto_aim() <= T_HI, app._auto_aim())

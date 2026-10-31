@@ -1151,6 +1151,20 @@ def run(report_path: str) -> int:
             return out
         before = measure(pixels, THUMB_W)
         out["key_before"] = round(before.key, 4)
+        try:
+            # Normal display in menus (beta), information only: how much the
+            # desktop looks like a game menu (no menu expected here).
+            from .autolevels import MENU_SCORE, menu_parts
+            lum = [(54 * r + 183 * g + 19 * b) >> 8
+                   for b, g, r in zip(pixels[0::4], pixels[1::4], pixels[2::4])]
+            line, quiet, bar, flat, _avg, tint = menu_parts(lum, THUMB_W, len(lum) // THUMB_W,
+                                                            pixels)
+            out["menu"] = {"score": round(before.menu, 1), "needs": MENU_SCORE,
+                           "looks_like_menu": before.menu >= MENU_SCORE,
+                           "bottom_line": line, "quiet": quiet, "top_bar": bar,
+                           "flat": round(flat, 2), "tint": round(tint, 1)}
+        except Exception as exc:
+            out["menu"] = repr(exc)
         original = gamma.get_ramp(m.id)
         if original is not None:
             # How long one brightness change takes (the fader makes up to 120 a second).

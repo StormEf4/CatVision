@@ -4,4 +4,4 @@ Changes only what your monitor displays (GPU gamma ramp + Windows
 accessibility color filters). Never touches, reads or injects into games.
 """
 
-__version__ = "1.19.0"
+__version__ = "1.20.0"

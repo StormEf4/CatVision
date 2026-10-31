@@ -289,7 +289,8 @@ class BuildRampExactTest(unittest.TestCase):
         rng = random.Random(SEED + 5)
         for _ in range(400):
             s = replace(random_settings(rng), highlight_room=0.0,
-                        haze_cut=rng.choice([0.0, -0.0, 0])).clamped()
+                        haze_cut=rng.choice([0.0, -0.0, 0]),
+                        haze_band=rng.choice([0.0, -0.0, 0])).clamped()
             want = [reference_tone_curve_1_16(i / 255, s) for i in range(256)]
             self.assertEqual([x.hex() for x in curves._tone_table(s)],
                              [x.hex() for x in want])

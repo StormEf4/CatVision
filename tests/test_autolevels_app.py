@@ -260,21 +260,24 @@ class AutoLevelsAppStress(unittest.TestCase):
         if not self.engine.enabled:
             self.app.handle_action("toggle")
         self.assert_at_preset()
-        self.assertEqual(self.info(), "Off.")
+        self.assertTrue(self.info().startswith("Off"), self.info())
         self.assert_clean()
 
     def test_off_and_back_on_during_wind_down(self):
+        # Auto mode off switches to the preset at once (no glide of the
+        # neutral look's lift on top of the preset).
         self.start_fade()
-        self.app.handle_action("auto_levels")        # off: glides back
+        self.app.handle_action("auto_levels")        # off: the preset alone
         self.pump(0.15)
-        self.assertTrue(self.app._auto_winding_down)
-        self.app.handle_action("auto_levels")        # on again mid wind-down
+        self.assertFalse(self.app._auto_winding_down)
+        self.assertEqual(self.engine.auto_offsets, {})
+        self.app.handle_action("auto_levels")        # on again
         self.pump(0.3)
         self.assertFalse(self.app._auto_winding_down)
         self.assertTrue(self.app._auto_fader.running)
         self.app.handle_action("auto_levels")        # off again
         self.pump(0.1)
-        self.app.handle_action("toggle")             # CatVision off mid wind-down
+        self.app.handle_action("toggle")             # CatVision off
         self.pump(0.3)
         self.assertFalse(self.engine.enabled)
         self.assert_at_preset()
@@ -297,18 +300,22 @@ class AutoLevelsAppStress(unittest.TestCase):
         self.assert_clean()
 
     def test_preset_switch_mid_fade(self):
+        # Picking a preset mid fade leaves Auto mode: the preset alone, at
+        # once; Auto mode again lifts Shadow boost from the neutral look.
         self.start_fade("Dark Areas")
-        for i in range(10):
+        for i in range(6):
             name = "Night Vision" if i % 2 == 0 else "Dark Areas"
             self.app.activate_preset_by_name(name)
+            self.assertFalse(self.app.cfg.options.auto_levels)
+            self.assert_at_preset()
+            self.app.handle_action("auto_levels")
             self.pump(0.15)
             self.assert_offsets_sane()
-            key = self.app._auto_setting()
-            self.assertEqual(key, "exposure" if name == "Night Vision" else "shadow_boost")
-        self.app.activate_preset_by_name("Night Vision")
+            self.assertEqual(self.app._auto_setting(), "shadow_boost")
+            self.assertEqual(self.engine.settings, autolevels.AUTO_BASE)
         self.pump(1.0)
         self.assert_offsets_sane()
-        self.assertIn("Exposure", self.info())
+        self.assertIn("Shadow boost", self.info())
         self.app.handle_action("auto_levels")
         self.assert_at_preset()
         self.assert_clean()
@@ -449,7 +456,7 @@ class AutoLevelsAppStress(unittest.TestCase):
         msg = self.app._keep_auto_look(quiet=True)
         self.assertIn("turn it on", msg)
         msg = self.app._nudge_auto_aim(True)
-        self.assertIn("auto levels is off", msg)
+        self.assertIn("Auto mode is off", msg)
         self.assertNotEqual(self.app.cfg.options.auto_target, before)
         self.assert_clean()
 
@@ -555,7 +562,8 @@ class AutoLevelsAppStress(unittest.TestCase):
             for did, amounts in self.engine.auto_offsets.items():
                 for k, v in amounts.items():
                     self.assertEqual(v, v, f"NaN offset for {t}")   # NaN != NaN
-                    self.assertLessEqual(abs(v), autolevels.STRENGTH_LIMITS[1] + 0.01,
+                    self.assertLessEqual(abs(v),
+                                         autolevels.auto_cap(autolevels.STRENGTH_LIMITS[1]) + 0.01,
                                          f"{t}: offset {v} beyond How much")
         self.app.handle_action("auto_levels")
         self.assert_at_preset()
@@ -585,7 +593,7 @@ class AutoLevelsAppStress(unittest.TestCase):
             self.assert_offsets_sane()
             for did, amounts in self.engine.auto_offsets.items():
                 for k, v in amounts.items():
-                    self.assertLessEqual(abs(v), shi + 0.01,
+                    self.assertLessEqual(abs(v), autolevels.auto_cap(shi) + 0.01,
                                          f"{t}: offset {v} beyond the How much limit")
         self.app.handle_action("auto_levels")
         self.assert_at_preset()
@@ -766,14 +774,15 @@ class AutoLevelsAppStress(unittest.TestCase):
         ctrl = self._settled()
         self.front["title"], self.front["displays"] = autolevels.OWN_WINDOW, set()
         self.pump(0.6)
+        before = ctrl.want
         self.app.auto_vars["auto_target"].set(0.06)
         self.app._on_auto_slider()
-        self.assertTrue(self.pump_until(lambda: ctrl.want < 15, 2), self.info())
+        self.assertTrue(self.pump_until(lambda: ctrl.want < before - 5, 2), self.info())
         self.app.auto_vars["auto_strength"].set(0)
         self.app._on_auto_slider()
         self.assertTrue(self.pump_until(lambda: abs(ctrl.offset) < 0.5
                                         and not self.engine.auto_offsets.get(D1), 4), self.info())
-        self.assertIn("Shadow boost 85 \u2192 85", self.info())
+        self.assertIn("Shadow boost 0 \u2192 0", self.info())   # Auto mode: the neutral look
         self.assert_clean()
 
     def test_untick_tone_down_while_the_look_is_held(self):
@@ -853,9 +862,13 @@ class AutoLevelsAppStress(unittest.TestCase):
         c2 = self._settled(D2)
         msg = self.app._keep_auto_look(quiet=True)
         lo, hi = autolevels.TARGET_LIMITS
-        want = autolevels.aim_for_current_look(c2.key, c2.offset, o.auto_strength)
-        self.assertAlmostEqual(o.auto_game_looks.get("Game A"), min(hi, max(lo, want)),
-                               delta=0.01, msg=msg)
+        cap = autolevels.auto_cap(o.auto_strength)
+        want = autolevels.aim_for_auto_look(c2.key, c2.offset, cap)
+        kept = o.auto_game_looks.get("Game A")
+        # (Several Aim fors can give the same look, the daylight lift's
+        # plateau: the one in use is kept then.)
+        if abs(autolevels.auto_offset(c2.key, cap, kept) - c2.offset) >= 0.5:
+            self.assertAlmostEqual(kept, min(hi, max(lo, want)), delta=0.01, msg=msg)
         self.assert_clean()
 
     def test_keep_never_takes_another_display_for_the_game(self):

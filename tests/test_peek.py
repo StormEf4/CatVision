@@ -666,9 +666,12 @@ class PeekAppTest(unittest.TestCase):
 
     def test_auto_levels_and_peek_pick_the_same_main_slider(self):
         from catvision import autolevels
+        # Auto mode always lifts Shadow boost first, as a Peek on its
+        # neutral look does (peek_lift); main_setting is for presets.
         for s in (Settings(shadow_boost=0, exposure=40), Settings(shadow_boost=40, exposure=6)):
             self.engine.settings = s
-            self.assertEqual(self.app._auto_setting(), autolevels.main_setting(s))
+            self.assertEqual(self.app._auto_setting(), "shadow_boost")
+        self.assertEqual(autolevels.main_setting(autolevels.AUTO_BASE), "shadow_boost")
 
     def test_peek_strength_slider_is_saved(self):
         self.app.peek_var.set(50)

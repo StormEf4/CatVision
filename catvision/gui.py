@@ -86,6 +86,13 @@ AUTO_OWN_HOLD_S = 30.0
 AUTO_KEEP_RECENT_S = 15.0
 AUTO_LAYOUT_S = 2.0   # re-read where the displays are (and their refresh rates) this often
 AUTO_REDRAW_S = 0.1   # while easing back or stalled, redraw the readout at most this often
+# Normal display in menus (beta): look for the game's menus this often, and
+# step a fade to or from normal this often (the fade takes
+# autolevels.MENU_FADE_S, eased in and out, so it never steps visibly).
+MENU_TICK_MS = 50   # (pictures come every 0.1-0.2 s; a menu must last MENU_ON_S anyway)
+MENU_FADE_TICK_MS = 8
+MENU_STEP_MAX_S = 0.034   # one fade step covers at most this much time
+MENU_FRONT_S = 0.25   # re-check which displays a full-screen game fills this often
 
 
 def auto_number(value, lo: float, hi: float, default):
@@ -114,14 +121,23 @@ def auto_tick_plan(now: float, fresh: bool, last_front: float,
     return recheck, stale
 
 
+def menu_ease(t: float) -> float:
+    """Normal display in menus: how far a fade that has got ``t`` (0-1) of
+    the way shows (eased in and out, so it starts and stops gently)."""
+    t = min(1.0, max(0.0, t))
+    return t * t * (3.0 - 2.0 * t)
+
+
 def _auto_moved(ctrl) -> bool:
     """A display auto levels still holds away from the preset (its boost,
     Outside detail for a window in view, or a haze cut): glide it back,
     don't jump."""
-    return abs(ctrl.offset) > 0.05 or ctrl.room > 0.05 or ctrl.haze > 0.05
+    return (abs(ctrl.offset) > 0.05 or ctrl.room > 0.05 or ctrl.haze > 0.05
+            or ctrl.band > 0.05)
 
 
 SETTING_NAMES = {"shadow_boost": "Shadow boost", "exposure": "Exposure"}
+BAND_EDGES = ("haze_band_lo", "haze_band_hi")   # auto levels' haze band edges (levels 0-1)
 # The readout says "keeping the outside visible" while auto levels adds at
 # least this much Outside detail for bright areas in view.
 AUTO_ROOM_SHOWN = 5.0
@@ -287,6 +303,19 @@ class CatVisionApp:
         self._auto_own_since: float | None = None   # CatVision's own window came to the front
         self._auto_holding = False   # ...so the game's look is held (see AUTO_OWN_HOLD_S)
         self._auto_last_look = None   # (time, key, offset, game) of the last live game picture
+        # Normal display in menus (beta): per display, whether the game shows
+        # one of its menus (see autolevels.MenuWatch), and the fade to normal.
+        self._menu_watches: dict[str, autolevels.MenuWatch] = {}
+        self._menu_on = False         # a menu is showing: the display glides to normal
+        self._menu_progress = 0.0     # how far the fade has got (0 = full look, 1 = normal)
+        self._menu_generation = -1    # the engine's menu generation this run's steps carry
+        self._menu_seq = -1
+        self._menu_job = None
+        self._menu_tick_at = 0.0
+        self._menu_front_at = -1.0
+        self._menu_seq_at = 0.0       # when the last new picture came (time.perf_counter())
+        self._menu_game: set[str] = set()   # displays a full-screen game fills
+        self._menu_back = False       # glided back from a menu (a refused step is retried)
         # Force quit runs on the tray thread and only needs to put the screen back.
         self.tray = Tray(self._actions.put, on_force_quit=self.engine.restore_now)
         self._build()
@@ -399,8 +428,8 @@ class CatVisionApp:
         Tooltip(prev, "Previous preset")
         self.preset_combo = ttk.Combobox(prow, state="readonly", font=self.fonts.normal, height=20)
         self.preset_combo.grid(row=0, column=1, sticky="ew")
-        self.preset_combo.bind("<<ComboboxSelected>>",
-                               lambda e: self._activate_preset(self.preset_combo.current()))
+        # The list starts with Auto (beta), then the presets.
+        self.preset_combo.bind("<<ComboboxSelected>>", lambda e: self._on_preset_combo())
         nxt = ttk.Button(prow, text="\u25b6", width=3, command=lambda: self._step_preset(1))
         nxt.grid(row=0, column=2, padx=(4, 0))
         Tooltip(nxt, "Next preset")
@@ -478,14 +507,19 @@ class CatVisionApp:
                 "darker scenes are then adjusted from there. Each game remembers its own "
                 "look (by its window title) and gets it back next time.")
         self.auto_var = tk.BooleanVar(value=o.auto_levels)
-        chk = ttk.Checkbutton(box, text="Adjust to the game automatically", variable=self.auto_var,
+        chk = ttk.Checkbutton(box, text="Auto mode: CatVision balances everything itself",
+                              variable=self.auto_var,
                               command=lambda: self.set_auto_levels(self.auto_var.get()))
         chk.grid(row=1, column=0, sticky="w")
-        Tooltip(chk, "Beta. Watches how dark the picture on your ticked displays is and raises "
-                     "Shadow boost (or Exposure) in dark scenes and lowers it in bright ones. "
-                     "It only measures brightness from a tiny copy of the screen, like "
-                     "recording apps do: it never touches the game, and nothing is saved or "
-                     "sent. Works best with games in borderless windowed mode.")
+        Tooltip(chk, "Beta. A mode of its own, instead of a preset: no preset or color filter "
+                     "is used underneath. It watches how dark the picture on your ticked "
+                     "displays is and lifts dark scenes (Shadow boost, and Exposure only when "
+                     "it is pitch dark), tones bright ones down if you tick that, and keeps "
+                     "the outside visible. Picking a preset turns it off; turning it off "
+                     "goes back to your last preset. It only measures brightness from a tiny "
+                     "copy of the screen, like recording apps do: it never touches the game, "
+                     "and nothing is saved or sent. Works best with games in borderless "
+                     "windowed mode.")
         sl = ttk.Frame(box)
         sl.grid(row=2, column=0, sticky="ew", pady=(2, 0))
         self._clean_auto_options()
@@ -496,8 +530,9 @@ class CatVisionApp:
         self.auto_rows = [
             SliderRow(sl, 0, self.auto_vars["auto_strength"], "How much",
                       *autolevels.STRENGTH_LIMITS, "int", self.fonts, self._on_auto_slider,
-                      tip="Beta. How far auto levels may move Shadow boost (or Exposure) up "
-                          "or down from your preset."),
+                      tip="Beta. How far Auto mode may lift dark scenes (and tone bright "
+                          "ones down): 30 lifts up to Shadow boost 100 (a little Exposure "
+                          "too when it is pitch dark), 60 allows the most Exposure."),
             SliderRow(sl, 1, self.auto_vars["auto_target"], "Aim for",
                       *autolevels.TARGET_LIMITS, "pct", self.fonts, self._on_auto_slider,
                       tip="Beta. How bright it tries to make scenes. Higher brightens dark "
@@ -522,6 +557,7 @@ class CatVisionApp:
             "auto_dim": tk.BooleanVar(value=o.auto_dim),
             "auto_fast_capture": tk.BooleanVar(value=o.auto_fast_capture),
             "auto_haze": tk.BooleanVar(value=o.auto_haze),
+            "menu_normal": tk.BooleanVar(value=o.menu_normal),
         }
         flags = (
             ("auto_game_only", "Only while a game fills the screen",
@@ -539,12 +575,21 @@ class CatVisionApp:
              "work (HDR or rotated displays, remote desktop, some older PCs) it uses the normal "
              "copy. Like recording apps, it can add a little input lag to some games in "
              "borderless mode: untick it if you notice that, to always use the normal copy."),
+            ("menu_normal", "Normal display in menus (beta)",
+             "Beta. When the game shows one of its own menus or the inventory, the display "
+             "glides back to normal (as if CatVision were off) and returns to your look when "
+             "you go back to playing. It recognises the whole screen as a menu from coarse "
+             "brightness only (a full-width line of hints along the bottom, a menu bar, a "
+             "plain background), never anything inside the game. Works with auto levels on "
+             "or off."),
             ("auto_haze", "Cut through haze (beta)",
-             "Beta. When fog, smoke, dust or rain wash out most of the view (little near "
-             "black, everything squeezed together), it adds contrast by moving the black point "
-             "down, and takes it back off when the air clears. Only brightness levels are used "
-             "(of the whole picture and of a coarse grid). Never in dark scenes or night fog: "
-             "the shadow lift handles those."),
+             "Beta. When fog, smoke, dust, snow or rain wash out most of the view, it adds "
+             "contrast: light haze gets more contrast in the band of washed-out tones (taken "
+             "from the brightest tones, never darkening the shadows), thick haze also a lower "
+             "black point. It takes it back off when the air clears. Only brightness levels "
+             "(of the whole picture and of a coarse grid) and how colourful the middle of the "
+             "view is are used. Never in dark scenes or night fog: the shadow lift handles "
+             "those."),
         )
         for i, (key, text, tip) in enumerate(flags):
             cb = ttk.Checkbutton(box, text=text, variable=self.auto_flag_vars[key],
@@ -573,6 +618,7 @@ class CatVisionApp:
             ctrl.set_haze(o.auto_haze)   # unticked: take it off now, not at the next picture
         self._auto_fader.wake()
         self._schedule_save()
+        self._menu_sync()
         self._render_auto_info(self._auto_shown)
 
     def _on_auto_slider(self) -> None:
@@ -636,10 +682,61 @@ class CatVisionApp:
             r.refresh()
 
     def set_auto_levels(self, on: bool) -> None:
+        """Auto mode (beta) on or off.  On: the neutral look (no preset, no
+        filter) and auto levels moves everything; off: back to the last
+        preset (cfg.active_preset is kept for that)."""
+        self._set_auto_mode(on)
+        self._apply_now()
+
+    def _set_auto_mode(self, on: bool) -> None:
+        """Switch the mode flag only (the caller applies the look)."""
+        on = bool(on)
+        was = self.cfg.options.auto_levels
         self.cfg.options.auto_levels = on
         self.auto_var.set(on)
+        if was != on:
+            # The other look takes over at once: auto's adjustment belongs
+            # to the neutral look and must not glide on top of a preset.
+            self._auto_finish()
+        self._show_mode()
         self._schedule_save()
-        self._render_status()
+
+    def _look(self) -> Settings:
+        """What the displays get underneath any auto adjustment: the neutral
+        look in Auto mode, otherwise the preset (the sliders)."""
+        if self.cfg.options.auto_levels:
+            return autolevels.AUTO_BASE
+        return self._read_settings()
+
+    def _preset_only_note(self) -> str:
+        """Filters belong to presets: Auto mode never tints."""
+        return (f" (for your preset: {autolevels.AUTO_NAME} uses no filter)"
+                if self.cfg.options.auto_levels else "")
+
+    def _mode_name(self) -> str:
+        return autolevels.AUTO_NAME if self.cfg.options.auto_levels else self.cfg.active_preset
+
+    def _show_mode(self) -> None:
+        """The preset box shows "Auto (beta)" while Auto mode is on."""
+        if not hasattr(self, "preset_combo"):
+            return
+        if self.cfg.options.auto_levels:
+            self.preset_combo.current(0)
+        else:
+            idx = self._preset_index(self.cfg.active_preset)
+            if idx is not None:
+                self.preset_combo.current(idx + 1)
+            else:
+                self.preset_combo.set(self.cfg.active_preset)
+
+    def _on_preset_combo(self) -> None:
+        """Picked from the list: Auto (beta) first, then the presets."""
+        idx = self.preset_combo.current()
+        if idx == 0:
+            if not self.cfg.options.auto_levels:
+                self.set_auto_levels(True)
+        elif idx > 0:
+            self._activate_preset(idx - 1)
 
     def _auto_active(self) -> bool:
         return (self.cfg.options.auto_levels and self.engine.enabled
@@ -665,7 +762,8 @@ class CatVisionApp:
             if self._auto_job is None and not self._closed:
                 self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
         else:
-            self.auto_watch.stop()
+            if not self._menu_active():   # (else it is still looking for menus)
+                self.auto_watch.stop()
             if self._auto_job is not None:
                 self.root.after_cancel(self._auto_job)
                 self._auto_job = None
@@ -688,6 +786,137 @@ class CatVisionApp:
             else:
                 self._auto_finish()
         self._render_auto_info(self._auto_shown)
+
+    # ------------------------------------------------ normal display in menus
+
+    def _menu_active(self) -> bool:
+        return (self.cfg.options.menu_normal is True and self.engine.enabled
+                and self.auto_watch.available and not self._closed)
+
+    def _menu_holds(self, did: str, m) -> bool:
+        """Auto levels mustn't learn from this display's picture ``m``: the
+        game shows a menu, or the picture looks like one (it may be on the
+        way into one)."""
+        if not self._menu_active() or did not in self._menu_game:
+            return False
+        w = self._menu_watches.get(did)
+        return (w is not None and w.active
+                or m is not None and not m.black and m.menu >= autolevels.MENU_SCORE)
+
+    def _menu_sync(self) -> None:
+        """Start or stop looking for menus to match the option and on/off."""
+        if self._menu_active():
+            if self._menu_job is None:
+                self._menu_tick_at = self._menu_seq_at = time.perf_counter()
+                self._menu_front_at = -1.0   # (which displays a game fills: at once)
+                self._menu_job = self.root.after(MENU_TICK_MS, self._menu_tick)
+            return
+        if self._menu_job is not None:
+            self.root.after_cancel(self._menu_job)
+            self._menu_job = None
+        was_on = self._menu_on
+        self._menu_watches.clear()
+        self._menu_on, self._menu_seq = False, -1
+        if self.engine.menu_amount and self.engine.enabled and not self._closed:
+            # The option was unticked in a menu: glide back to the full look.
+            self._menu_tick_at = time.perf_counter()
+            self._menu_job = self.root.after(MENU_FADE_TICK_MS, self._menu_fade_out)
+        else:
+            self._menu_progress = 0.0
+        if not self._auto_active() and self.auto_watch.running and not self._closed:
+            self.auto_watch.stop()   # it was only looking for menus
+        if was_on:
+            self._render_status()
+
+    def _menu_fade_out(self) -> None:
+        """The option was unticked mid-menu: finish gliding back."""
+        self._menu_job = None
+        if self._closed or not self.engine.enabled:
+            self._menu_progress = 0.0
+            return
+        if self._menu_active():
+            self._menu_sync()   # ticked again: the normal tick takes over
+            return
+        if self._menu_step(time.perf_counter(), want=0.0):
+            self._menu_job = self.root.after(MENU_FADE_TICK_MS, self._menu_fade_out)
+
+    def _menu_step(self, now: float, want: float) -> bool:
+        """Move the fade toward ``want`` (0 or 1); True while still moving."""
+        if self._menu_generation != self.engine.menu_generation:
+            # CatVision went off (or quit) since: the engine is back at the
+            # full look and ignores this run's old steps.
+            self._menu_generation = self.engine.menu_generation
+            self._menu_progress = 0.0
+        # (At most about two Windows timer steps at a time: the first step
+        # after a MENU_TICK_MS wait, or a late timer, slows the glide a
+        # little instead of jumping.)
+        dt = min(max(now - self._menu_tick_at, 0.0), MENU_STEP_MAX_S)
+        self._menu_tick_at = now
+        if self._menu_progress == want and self.engine.menu_amount == menu_ease(want):
+            return False
+        step = dt / autolevels.MENU_FADE_S
+        if want > self._menu_progress:
+            self._menu_progress = min(want, self._menu_progress + step)
+        else:
+            self._menu_progress = max(want, self._menu_progress - step)
+        self.engine.set_menu_amount(menu_ease(self._menu_progress), self._menu_generation)
+        return self._menu_progress != want
+
+    def _menu_tick(self) -> None:
+        """Look at the newest pictures for the game's menus and glide the
+        displays to normal and back."""
+        self._menu_job = None
+        if not self._menu_active():
+            self._menu_sync()
+            return
+        now = time.perf_counter()   # (fine-grained on Windows, unlike monotonic)
+        if now - self._menu_front_at >= MENU_FRONT_S or self._menu_front_at > now:
+            # Only a display a full-screen game fills counts (never the
+            # desktop, a video or another program on a second display, even
+            # when auto levels watches those too).
+            self._menu_front_at = now
+            rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
+            in_front, title = autolevels.window_in_front(rects)
+            self._menu_game = (set() if title == autolevels.OWN_WINDOW else
+                               set(rects) if in_front is None else set(rects) & in_front)
+            if not self._auto_active():
+                # Auto levels is off: capture only those displays, for menus alone.
+                self.auto_watch.watch({d: rects[d] for d in self._menu_game})
+        elif not self._auto_active() and not self.auto_watch.running:
+            self._menu_front_at = -1.0   # (re-checked on the next tick)
+        seq, latest = self.auto_watch.latest()
+        if seq != self._menu_seq:
+            self._menu_seq, self._menu_seq_at = seq, now
+            for did in list(self._menu_watches):
+                if did not in latest or did not in self._menu_game:
+                    del self._menu_watches[did]
+            for did, m in latest.items():
+                if did in self._menu_game:
+                    at = m.at if m is not None and m.at else now
+                    self._menu_watches.setdefault(did, autolevels.MenuWatch()).update(m, at)
+        elif now - self._menu_seq_at >= autolevels.MENU_LOST_S:
+            # No new picture at all for a while: when in doubt, the full look.
+            self._menu_watches.clear()
+        on = any(w.active for did, w in self._menu_watches.items() if did in self._menu_game)
+        if on != self._menu_on:
+            self._menu_on = on
+            self._render_status()
+            self._render_auto_info(self._auto_shown)
+        moving = self._menu_step(now, 1.0 if on else 0.0)
+        if moving and not on:
+            self._menu_back = True   # gliding back to the full look
+        if not self.engine.retry_pending():
+            self._menu_back = False
+        elif not moving and (self.engine.menu_amount
+                             or self._menu_back and not self._auto_active()):
+            # Windows refused a step and the glide has stopped (in the menu,
+            # or on the way back with auto levels off, which would otherwise
+            # leave the display part way): the engine offers the look again
+            # when due (see engine._RETRY_S).
+            self.engine.set_menu_amount(self.engine.menu_amount, self._menu_generation)
+        if self._menu_active() and self._menu_job is None:
+            self._menu_job = self.root.after(MENU_FADE_TICK_MS if moving else MENU_TICK_MS,
+                                             self._menu_tick)
 
     def _auto_wind_down(self) -> None:
         if not self._auto_winding_down or self._closed:
@@ -771,14 +1000,23 @@ class CatVisionApp:
                                       else set(rects) & in_front)
                 self.auto_watch.watch({d: rects[d] for d in self._auto_watched})
         shown: dict[str, tuple[str, object]] = {}
-        goals = {did: (c.want, c.room_want, c.haze_want) for did, c in self._auto_ctrl.items()}
-        strength, aim = self._auto_strength(), self._auto_aim()
+        goals = {did: (c.want, c.room_want, c.haze_want, c.band_want, c.band_edges)
+                 for did, c in self._auto_ctrl.items()}
+        strength, aim = autolevels.auto_cap(self._auto_strength()), self._auto_aim()
         for did in rects:
-            ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller())
+            ctrl = self._auto_ctrl.setdefault(did, autolevels.Controller(standalone=True))
             ctrl.set_haze(o.auto_haze)
             if did not in self._auto_watched:
                 ctrl.release()
                 shown[did] = ("waiting", None)
+            elif did in latest and not stale and self._menu_holds(did, latest[did]):
+                # One of the game's menus: shown normally (see _menu_tick).
+                # Like the own-window hold, it mustn't steer anything, so
+                # the game's look comes back as it was when the menu closes.
+                ctrl.hold(strength, aim, o.auto_dim)
+                w = self._menu_watches.get(did)
+                shown[did] = ("menu" if w is not None and w.active else "watching",
+                              latest[did])
             elif self._auto_holding and not (stale and did in latest):
                 # The picture shows CatVision's own window now, not the game:
                 # it mustn't steer anything, but changed settings still show.
@@ -806,7 +1044,7 @@ class CatVisionApp:
         for did in list(self._auto_ctrl):
             if did not in rects:
                 del self._auto_ctrl[did]
-        if any((c.want, c.room_want, c.haze_want) != goals.get(did)
+        if any((c.want, c.room_want, c.haze_want, c.band_want, c.band_edges) != goals.get(did)
                for did, c in self._auto_ctrl.items()):
             self._auto_fader.wake()   # a new goal (a flash, say): start moving now
         # Fades change whether Windows is holding the strength back: keep the
@@ -832,14 +1070,18 @@ class CatVisionApp:
         the last change (the engine offers it again every so often; at rest
         the fader still calls this a few times a second)."""
         key = self._auto_key or self._auto_setting()
-        settings = self.engine.settings
-        # (Anti-glare too: with it on, Exposure must not cross 0.  Every
-        # field: how much Outside detail fits depends on the whole look.)
+        # Auto mode: always the neutral look underneath (every field: how
+        # much Outside detail fits depends on the whole look).
+        settings = autolevels.AUTO_BASE
         base = autolevels.look_values(settings)
         offsets: dict[str, dict[str, float]] = {}
         for did, offset in positions.items():
-            amounts = {k: round(v, 2) for k, v in autolevels.fader_amounts(
-                key, offset, base, self._auto_ctrl.get(did)).items()}
+            # (The haze band's edges are input levels 0-1: finer, or they
+            # would move in steps of 2.5 levels.)
+            amounts = {k: round(v, 4 if k in BAND_EDGES else 2)
+                       for k, v in autolevels.fader_amounts(
+                           key, offset, base, self._auto_ctrl.get(did),
+                           standalone=True).items()}
             amounts = {k: v for k, v in amounts.items() if v}
             if amounts or did in self.engine.auto_offsets:
                 offsets[did] = amounts
@@ -850,7 +1092,7 @@ class CatVisionApp:
         """Make auto levels aim for how the game looks right now."""
         o = self.cfg.options
         if not o.auto_levels:
-            msg = "Auto levels (beta) is off: turn it on first."
+            msg = "Auto mode (beta) is off: turn it on first."
         elif not self.engine.enabled:
             msg = "Auto levels (beta): turn CatVision on first."
         else:
@@ -897,8 +1139,9 @@ class CatVisionApp:
                 key, offset, game = found
                 lo, hi = autolevels.TARGET_LIMITS
                 # (Aim for stays as it is if it already gives this look.)
-                exact = autolevels.aim_for_current_look(key, offset, self._auto_strength(),
-                                                        self._auto_aim(game), o.auto_dim)
+                exact = autolevels.aim_for_auto_look(key, offset,
+                                                     autolevels.auto_cap(self._auto_strength()),
+                                                     self._auto_aim(game), o.auto_dim)
                 aim = round(min(hi, max(lo, exact)), 3)
                 if game:     # remembered for this game only
                     o.auto_game_looks.pop(game, None)   # newest last
@@ -927,7 +1170,7 @@ class CatVisionApp:
         o = self.cfg.options
         before = self._auto_aim()
         aim = autolevels.nudge_aim(before, brighter)
-        note = (" (auto levels is off)" if not o.auto_levels
+        note = (" (Auto mode is off)" if not o.auto_levels
                 else " (CatVision is off)" if not self.engine.enabled else "")
         if aim == before:
             end = "brightest" if brighter else "darkest"
@@ -955,9 +1198,8 @@ class CatVisionApp:
         self._render_auto_info(self._auto_shown)
 
     def _auto_setting(self) -> str:
-        """Auto levels moves whichever of Shadow boost / Exposure the preset
-        leans on more (Exposure for night vision, Shadow boost otherwise)."""
-        return autolevels.main_setting(self.engine.settings)
+        """Auto mode lifts Shadow boost first (spilling into Exposure)."""
+        return "shadow_boost"
 
     def _render_auto_info(self, shown: dict) -> None:
         if not hasattr(self, "auto_info"):
@@ -971,7 +1213,7 @@ class CatVisionApp:
         if not self.auto_watch.available:
             text = self.auto_watch.reason
         elif not o.auto_levels:
-            text = "Off."
+            text = f"Off: using {self.cfg.active_preset}."
         elif not self.engine.enabled:
             text = "Starts when CatVision is on."
         elif not shown:
@@ -990,14 +1232,19 @@ class CatVisionApp:
                 now = getattr(self.engine.settings_for(did, peek=False), key)
                 change = f"{SETTING_NAMES[key]} {base:.0f} \u2192 {now:.0f}"
                 spilled = [k for k, v in self.engine.auto_offsets.get(did, {}).items()
-                           if k != key and k in SETTING_NAMES and v]
+                           if k != key and k in ("exposure",) and v]
                 if spilled:  # the main slider is at its limit: say where the rest went
                     eff = self.engine.settings_for(did, peek=False)
                     change = ", ".join(f"{SETTING_NAMES[k]} {getattr(eff, k):.0f}"
                                        for k in [key] + spilled)
+                if self.engine.auto_offsets.get(did, {}).get("brightness", 0.0) < -0.005:
+                    eff = self.engine.settings_for(did, peek=False)
+                    change = f"toning down (brightness {eff.brightness * 100:.0f}%)"
                 back = "" if abs(now - base) < 0.5 else f"  \u00b7  easing back to {base:.0f}"
                 if state == "waiting":
                     lines.append(f"{name}: waiting for a full-screen game{back}")
+                elif state == "menu":
+                    lines.append(f"{name}: menu: normal display")
                 elif state == "stalled":
                     lines.append(f"{name}: can't see the picture right now{back}")
                 elif state == "starting":
@@ -1005,7 +1252,7 @@ class CatVisionApp:
                 elif m is None:
                     lines.append(f"{name}: can't see the picture. Try borderless windowed mode.")
                 elif self._auto_ctrl.get(did) and self._auto_ctrl[did].frozen:
-                    gone = ("back to your preset" if self._auto_ctrl[did].want == 0.0
+                    gone = ("back to the plain look" if self._auto_ctrl[did].want == 0.0
                             else "holding for now")
                     lines.append(f"{name}: the picture isn't changing (paused, or exclusive "
                                  f"fullscreen?)  \u00b7  {gone}")
@@ -1013,13 +1260,14 @@ class CatVisionApp:
                     held = ""
                     if m.black:
                         ctrl = self._auto_ctrl.get(did)
-                        held = ("  (black for a while: back to your preset)"
+                        held = ("  (black for a while: back to the plain look)"
                                 if ctrl is not None and ctrl.black_too_long
                                 else "  (black screen: holding)")
                     applied = self.engine.auto_offsets.get(did, {})
                     outside = ("  \u00b7  keeping the outside visible"
                                if applied.get("highlight_room", 0.0) >= AUTO_ROOM_SHOWN else "")
-                    if applied.get("haze_cut", 0.0) >= AUTO_HAZE_SHOWN:
+                    if max(applied.get("haze_cut", 0.0),
+                           applied.get("haze_band", 0.0)) >= AUTO_HAZE_SHOWN:
                         outside += "  \u00b7  cutting through haze"
                     lines.append(f"{name}: {m.key * 100:.0f}% bright  \u00b7  {change}"
                                  f"{outside}{held}")
@@ -1391,12 +1639,8 @@ class CatVisionApp:
         self._rows = all_presets(self.cfg.custom_presets)
         names = [r.name + ("  (mine)" if not r.builtin else "  (edited)" if r.changed else "")
                  for r in self._rows]
-        self.preset_combo.configure(values=names)
-        idx = self._preset_index(self.cfg.active_preset)
-        if idx is not None:
-            self.preset_combo.current(idx)
-        else:
-            self.preset_combo.set(self.cfg.active_preset)
+        self.preset_combo.configure(values=[autolevels.AUTO_NAME] + names)
+        self._show_mode()
         self._update_title()
         self.hotkeys_tab.refresh()
         self.presets_tab.refresh()
@@ -1415,8 +1659,9 @@ class CatVisionApp:
         if idx is None or not 0 <= idx < len(self._rows):
             return
         row = self._rows[idx]
+        self._set_auto_mode(False)   # a preset is a plain static look
         self.cfg.active_preset = row.name
-        self.preset_combo.current(idx)
+        self.preset_combo.current(idx + 1)   # (Auto (beta) is first in the list)
         self._load_settings(row.settings)
         self._modified = False
         self._update_title()
@@ -1620,7 +1865,7 @@ class CatVisionApp:
     def _apply_now(self) -> None:
         self._apply_job = None
         self.cfg.current = self._read_settings()
-        self.engine.set_settings(self.cfg.current)
+        self.engine.set_settings(self._look())
         self._render_status()
         self._schedule_save()
 
@@ -1631,7 +1876,7 @@ class CatVisionApp:
 
     def _set_enabled(self, enabled: bool) -> None:
         self.cfg.current = self._read_settings()
-        self.engine.settings = self.cfg.current
+        self.engine.settings = self._look()
         self.engine.set_enabled(enabled)
         if not enabled:
             # Turning off already dropped the lift (and any late step from
@@ -1647,15 +1892,18 @@ class CatVisionApp:
         if not on:
             text = "Off - your display is back to normal."
         elif self.engine.all_displays_selected():
-            text = f"On - {self.cfg.active_preset}."
+            text = f"On - {self._mode_name()}."
         else:
             names = ", ".join(m.short for m in self.engine.monitors()
                               if m.id in self.engine.displays)
-            text = f"On for {names} - {self.cfg.active_preset}."
+            text = f"On for {names} - {self._mode_name()}."
         if on and self._auto_active():
-            text += " Auto levels (beta) is adjusting."
+            text += " Adjusting to the game."
+        if on and self._menu_on:
+            text += " In a menu: normal display."
         self.set_status(text)
         self._auto_sync()
+        self._menu_sync()
         self._update_strength_ui()
         self.refresh_notices()
         self._update_title()
@@ -1667,18 +1915,25 @@ class CatVisionApp:
     def _update_title(self) -> None:
         name = self.cfg.active_preset
         changed = "  (unsaved changes)" if self._modified else ""
-        self.tune_title.configure(text=f"Adjusting: {name}{changed}")
-        self.root.title(f"{APP_TITLE} - {name}")
+        auto = self.cfg.options.auto_levels
+        # In Auto mode the sliders still belong to the preset (used again
+        # once Auto mode is off): say so.
+        self.tune_title.configure(text=f"Adjusting: {name}{changed}" + (
+            f"  \u00b7  {autolevels.AUTO_NAME} is on: these are for when it is off"
+            if auto else ""))
+        shown = autolevels.AUTO_NAME if auto else name
+        self.root.title(f"{APP_TITLE} - {shown}")
         state = "on" if self.engine.enabled else "off"
         if self.engine.enabled and self._auto_active():
-            state += "  \u00b7  auto (beta)"
-        self.header_sub.configure(text=f"{name}{' (changed)' if self._modified else ''}  \u00b7  {state}")
+            state += "  \u00b7  adjusting"
+        changed = " (changed)" if self._modified and not auto else ""
+        self.header_sub.configure(text=f"{shown}{changed}  \u00b7  {state}")
 
     def _sync_tray(self) -> None:
         choices = filters.all_filter_choices(self.cfg.custom_filters)
         self.tray.update(TrayState(
             enabled=self.engine.enabled,
-            preset=self.cfg.active_preset,
+            preset=self._mode_name(),
             presets=self.preset_names(),
             filter_key=self.filter_key,
             filters=choices,
@@ -1776,7 +2031,7 @@ class CatVisionApp:
         msg = None
         if action == "toggle":
             self._set_enabled(not self.engine.enabled)
-            msg = f"CatVision ON - {self.cfg.active_preset}" if self.engine.enabled else "CatVision OFF"
+            msg = f"CatVision ON - {self._mode_name()}" if self.engine.enabled else "CatVision OFF"
         elif action == "off":
             self._set_enabled(False)
             msg = "CatVision OFF"
@@ -1784,7 +2039,8 @@ class CatVisionApp:
             # Preset hotkeys toggle: the running preset turns off, any other
             # preset is switched to and turned on.
             name = action[len("preset:"):]
-            if self.engine.enabled and self.cfg.active_preset == name:
+            if (self.engine.enabled and self.cfg.active_preset == name
+                    and not self.cfg.options.auto_levels):
                 self._set_enabled(False)
                 msg = f"{name}  OFF"
             elif self.activate_preset_by_name(name):
@@ -1793,7 +2049,12 @@ class CatVisionApp:
         elif action in ("next", "prev"):
             self._step_preset(1 if action == "next" else -1)
             self._set_enabled(True)
-            msg = self.cfg.active_preset
+            msg = self._mode_name()
+        elif action in ("boost_up", "boost_down") and self.cfg.options.auto_levels:
+            # Auto mode has no boost slider of its own: aim brighter / darker.
+            msg = self._nudge_auto_aim(action == "boost_up")
+            if not self.engine.enabled:
+                self._set_enabled(True)
         elif action in ("boost_up", "boost_down"):
             key = self._boost_key()
             var = self.vars[key]
@@ -1809,19 +2070,27 @@ class CatVisionApp:
             self.set_filter(keys[idx])
             if not self.engine.enabled:
                 self._set_enabled(True)
-            msg = "Filter: " + self.filter_combo.get()
+            msg = "Filter: " + self.filter_combo.get() + self._preset_only_note()
         elif action.startswith("filter:"):
             key = action[len("filter:"):]
             if key in self._filter_keys:
                 self.set_filter(key)
                 if key != "none" and not self.engine.enabled:
                     self._set_enabled(True)
-                msg = "Filter: " + self.filter_combo.get()
+                msg = "Filter: " + self.filter_combo.get() + self._preset_only_note()
         elif action == "auto_levels":
             self.set_auto_levels(not self.cfg.options.auto_levels)
             if self.cfg.options.auto_levels and not self.engine.enabled:
                 self._set_enabled(True)
-            msg = f"Auto levels (beta) {'ON' if self.cfg.options.auto_levels else 'OFF'}"
+            msg = (f"{autolevels.AUTO_NAME} ON" if self.cfg.options.auto_levels
+                   else f"{autolevels.AUTO_NAME} OFF - {self.cfg.active_preset}")
+        elif action == "auto_mode":
+            # The tray's "Auto (beta)" in the preset list: Auto mode on.
+            if not self.cfg.options.auto_levels:
+                self.set_auto_levels(True)
+            if not self.engine.enabled:
+                self._set_enabled(True)
+            msg = f"{autolevels.AUTO_NAME} ON"
         elif action == "auto_keep":
             msg = self._keep_auto_look(quiet=True)
         elif action in ("auto_brighter", "auto_darker"):
@@ -1856,7 +2125,14 @@ class CatVisionApp:
         return "exposure" if self.vars["exposure"].get() >= 0.5 else "shadow_boost"
 
     def _step_preset(self, step: int) -> None:
+        """Previous / next look: Auto (beta) comes before the first preset."""
+        if self.cfg.options.auto_levels:
+            self._activate_preset(0 if step > 0 else len(self._rows) - 1)
+            return
         cur = self._preset_index(self.cfg.active_preset)
+        if cur is not None and (cur + step < 0 or cur + step >= len(self._rows)):
+            self.set_auto_levels(True)
+            return
         cur = -1 if cur is None else cur
         self._activate_preset((cur + step) % len(self._rows))
 
@@ -1926,7 +2202,7 @@ class CatVisionApp:
     def _cancel_after_jobs(self) -> None:
         """Drop every pending Tk timer (auto levels tick, save, polling...)
         so nothing runs against the destroyed window."""
-        self._auto_job = self._save_job = self._apply_job = None
+        self._auto_job = self._save_job = self._apply_job = self._menu_job = None
         try:
             jobs = self.root.tk.splitlist(self.root.tk.call("after", "info"))
         except tk.TclError:

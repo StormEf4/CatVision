@@ -52,6 +52,9 @@ class Options:
     # instead of a GDI copy, falling back to GDI where it doesn't work.
     auto_fast_capture: bool = True
     auto_haze: bool = True          # cut through haze (fog, smoke) with a black point
+    # Normal display in menus (beta): the game's own menu and inventory
+    # screens show as if CatVision were off (see autolevels.menu_score).
+    menu_normal: bool = True
     auto_game_looks: dict = field(default_factory=dict)  # game window title -> Aim for
     unlock_requested_at: float = 0.0  # when the user unlocked full strength
     peek_strength: float = PEEK_DEFAULT  # Peek hotkey: points added while held (see engine.peek_lift)
@@ -87,6 +90,8 @@ class Options:
             self.auto_speed = defaults.auto_speed
         if not isinstance(self.auto_fast_capture, bool):
             self.auto_fast_capture = defaults.auto_fast_capture
+        if not isinstance(self.menu_normal, bool):
+            self.menu_normal = defaults.menu_normal
         looks: dict[str, float] = {}
         for title, aim in self.auto_game_looks.items():
             # Same title as window_in_front() reports; "" means no game.

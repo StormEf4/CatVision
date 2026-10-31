@@ -34,7 +34,7 @@ CatVision **never touches your games**:
 - It does **not** inject anything, read or write game memory, hook DirectX or
   OpenGL, or attach to any process.
 - It does **not** draw an overlay on the game. It doesn't look at your screen
-  either, unless you turn on **Auto levels (beta)**, which only measures how
+  either, unless you pick **Auto (beta)** mode, which only measures how
   bright the picture is (see [Auto levels](#auto-levels-beta)).
 - It does **not** use keyboard or mouse hooks, and never sends input.
   Hotkeys with Ctrl, Alt or Win (and F-keys, Pause, Scroll Lock) use the
@@ -134,7 +134,7 @@ combination works, and so do mouse buttons: **Middle mouse**, **Mouse 4**
 | Next / previous preset | Flip through presets |
 | More / less boost | Shadow boost, or Exposure for night vision |
 | Next color filter | Cycle color filters |
-| Auto levels on / off (beta) | Turns [auto levels](#auto-levels-beta) on or off |
+| Auto mode on / off (beta) | Turns [Auto mode](#auto-levels-beta) on or off (off: back to your last preset) |
 | Auto levels: keep this look (beta) | Auto levels aims for how the game looks right now |
 | Auto levels: aim brighter / darker (beta) | Nudge Aim for up or down while you play |
 | Peek (hold to see in the dark) | Hold it for a strong, short lift to check a dark corner; let go and it glides back |
@@ -188,17 +188,47 @@ all** removes them again. Everything is also in the tray menu.
 
 ## Auto levels (beta)
 
-**Beta: new and still being tested.** Tick **Adjust to the game
-automatically** under *Auto levels* on the Home tab (or use its hotkey or the
-tray menu). CatVision then watches how bright the picture is on each ticked
-display and adjusts it live, the way your eyes adapt:
+**Beta: new and still being tested.** Auto levels is now a **mode of its
+own**, **Auto (beta)**, picked instead of a preset. Tick **Auto mode:
+CatVision balances everything itself** under *Auto levels* on the Home tab,
+pick **Auto (beta)** at the top of the preset list (on the Home tab or in
+the tray), use the Auto mode hotkey, or step to it with the preset arrows
+(it sits before the first preset). The preset box then shows *Auto (beta)*.
+With CatVision on, that is all: everything is automatic.
 
-- **Dark scene:** it raises Shadow boost (or Exposure for night vision)
-  gradually, so the picture doesn't jump.
-- **Bright scene, flash or explosion:** it lowers it again quickly, so you're
-  never blinded.
-- Your preset stays as it is. Auto levels moves things up or down from your
-  preset, and goes back to it when you turn auto levels off.
+- **No preset underneath:** Auto mode starts from a plain look (no boost, no
+  color filter or tint, normal contrast and gamma) and balances the settings
+  itself. Gentle Boost, Night Vision and the other presets are not blended
+  in.
+- **Picking a preset turns Auto mode off** (from the list, a preset hotkey,
+  the arrows or the tray), and that preset works as a plain, fixed look.
+  Turning Auto mode off goes back to the preset you used last. Your
+  presets' sliders on the Tune tab are kept for that; while Auto mode is on
+  the Tune tab says they are for when it is off.
+- **Dark scene:** it lifts Shadow boost (and Exposure too, only when it is
+  pitch dark) until the scene is **shown** at about three times *Aim for*
+  (a night raid at about a third of full brightness, at least as visible as
+  Dark Areas with auto levels was), gradually, so the picture doesn't jump.
+  **How much** caps the lift (30 lifts up to Shadow boost 100 and a little
+  Exposure; less holds it back, more allows more Exposure). Scenes around
+  *Aim for* get a smaller lift, and daylight scenes a moderate one
+  (Shadow boost about 30 at How much 30) for doorways, cover and bushes:
+  it lifts the shadows most and barely moves the bright parts, which
+  Outside detail keeps from glaring. It fades out for all-bright,
+  washed-out views (snow, sky, thick haze), and while *Cut through haze*
+  works on a view it makes way for it (both together would push the
+  bright parts to white).
+- **Bright scene, flash or explosion:** it eases off again quickly, so
+  you're never blinded. With **Also tone down bright scenes** ticked, a
+  very bright scene (snow, open sky) is also toned down gently: overall
+  brightness comes down a little (to 75% at most) with just enough shadow
+  lift that the dark parts keep their level, so glare comes down without
+  crushing the shadows.
+- The Home tab shows what it is doing, for example *Shadow boost 0 → 72
+  · keeping the outside visible*. The boost hotkeys aim brighter / darker
+  in Auto mode.
+- Upgrading: if auto levels was on with a preset, CatVision starts in Auto
+  mode and remembers that preset for when you turn Auto mode off.
 - It looks mostly at the **middle of the screen**, where you're looking, so
   the HUD and screen edges don't throw it off. It also pays extra attention
   to **dark patches**, so a dark doorway still gets help when the sky is
@@ -212,6 +242,11 @@ display and adjusts it live, the way your eyes adapt:
   view) goes at each screen's own pace, so the slower one never shows
   bigger steps than it would on its own (also at rates that don't divide
   evenly, a 75 Hz screen next to a 144 Hz one).
+  In Auto mode, for half a second right after the whole view changes
+  (turning into a dark building, stepping out into daylight) the steps may
+  be a little larger, hidden by the change itself, since its day and night
+  looks are further apart than a preset's; lights, flashes and lightning
+  keep the small steps.
   It ignores tiny changes so the picture doesn't keep
   "breathing", and it catches up faster after a big change (stepping from
   daylight into a dark building), keeping that quicker pace all the way, and
@@ -219,7 +254,7 @@ display and adjusts it live, the way your eyes adapt:
   are inside. If the scene brightens a little while it is still
   brightening for the dark (a light coming up), it eases to a stop within
   a frame or two instead of carrying on up past the new level first.
-  Turning auto levels off glides back to your preset too. At the slow end
+  At the slow end
   of a glide, where single steps are too small to see, it updates less
   often to save CPU.
 - **Quick into the dark:** when you turn or run somewhere darker (into a
@@ -274,7 +309,8 @@ display and adjusts it live, the way your eyes adapt:
   dark it waits the usual way until you stop for a few seconds.
 - **See outside from a dark room:** when a window, an open door or a lamp is
   in view, it gives the bright part more **Outside detail** (the more of
-  the view it fills, the more it gets, up to 40 points), so the sky, walls
+  the view it fills, the more it gets, up to 80 points: Auto mode's plain
+  look has no Outside detail of its own underneath), so the sky, walls
   and trees outside stay apart instead of turning one white block. The room
   comes first: the extra never changes the dark room's own levels, so when
   the room is lifted a lot (Pitch Black, Night Vision, a big boost) it adds
@@ -300,8 +336,19 @@ display and adjusts it live, the way your eyes adapt:
   those parts are veiled, some more than others the way haze thickens with
   distance. Then the cut stays small (often around a 5-10% wider spread),
   because its black point never goes past about 60% of how bright the
-  darkest few percent of the whole picture are. Light haze that leaves most of
-  the view clear isn't caught. It only ever darkens the hazy grey toward
+  darkest few percent of the whole picture are. Lighter haze (a snowfall
+  veil, misty or dusty distance) often leaves the black level alone but
+  squeezes most of the middle of the view into a narrow band of washed-out,
+  mostly colourless mid or bright tones. Then it finds that band (the
+  narrowest range of brightness levels that holds half of the middle rows'
+  pixels, the colourful ones counting much less) and makes the brightness
+  curve steeper across it, taking the room from the brightest tones above it
+  (the sky, which Outside detail keeps apart): the band's tones spread out
+  by up to about 60%, smoothly more the narrower and paler the band is. That
+  part never darkens anything: everything up to the bottom of the band (the
+  shadows, a dark figure) stays exactly as bright as without it, and white
+  stays white. Light haze that leaves most of the view clear, or haze over a
+  dark view, isn't caught. The black point only ever darkens the hazy grey toward
   black: white stays white, Outside detail is kept, and nothing below the
   haze is cut to pure black. It needs the haze in most of the last five pictures (about a
   second), so one puff of smoke or a muzzle flash changes nothing; it glides
@@ -315,7 +362,8 @@ display and adjusts it live, the way your eyes adapt:
   and very thick, bright fog that fills the whole screen looks like one too,
   so it gets nothing. Like the rest of auto levels it only measures
   brightness (how bright the darkest few percent of the picture, and of each
-  part of the grid, are and how spread out their tones are) and changes the
+  part of the grid, are and how spread out their tones are, and where most
+  of the middle rows' tones sit, counting colourful pixels less) and changes the
   whole screen's brightness levels the same way: it can't tell fog from a
   misty-looking scene or an unevenly lit grey wall, and it never looks for
   anything in the picture.
@@ -336,18 +384,18 @@ display and adjusts it live, the way your eyes adapt:
   and used again automatically next time. The Home tab shows *Game: ...* and
   **Aim for** shows and changes that game's look; **Forget** goes back to the
   normal Aim for.
-- **Never runs out of room:** if your preset's Shadow boost is already high
-  (Pitch Black is 85), the extra brightening that doesn't fit goes into
-  Exposure instead, and the same when dimming. (With Anti-glare on, it never
-  takes Exposure from 0 up or down to 0: Anti-glare only works while
-  Exposure is above 0, so the picture would jump.)
-- **How much** sets how far it may move the slider. **Aim for** sets how
-  bright it tries to make scenes: higher brightens dark scenes more.
+- **Never runs out of room:** once Shadow boost is at 100 (only in
+  pitch-dark scenes), the extra brightening goes into Exposure instead.
+  (Peek uses the same rule; Pitch Black is 85 for comparison.)
+- **How much** caps how far it may lift (and tone down): at 30 up to
+  Shadow boost 100 plus a little Exposure, at 60 up to Shadow boost 100
+  plus Exposure 100. **Aim for** sets how bright it shows dark scenes
+  (about three times Aim for): higher brightens dark scenes more.
 - **Speed**: Slow, Normal or Fast reaction to darker and brighter scenes.
   Flashes and stepping out into daylight are always toned down much faster
   than other changes.
 - **Only while a game fills the screen** (on by default): on the desktop or in
-  a windowed app it pauses and eases back to your preset. Games in fullscreen
+  a windowed app it pauses and eases back to the plain look. Games in fullscreen
   or borderless windowed mode count, and so do full-screen videos. A normal
   maximized window with a title bar (a browser, say) doesn't count, and
   neither do minimized or hidden ones. Only the position, style and title of
@@ -364,8 +412,11 @@ display and adjusts it live, the way your eyes adapt:
   mode; untick it if you notice that, to always use the GDI copy.
 - **Cut through haze (beta)** (on by default): untick it to leave hazy
   scenes as the game shows them (see above).
+- **Normal display in menus (beta)** (on by default): see *Normal display in
+  menus (beta)* below.
 - Each ticked display is adjusted on its own, and the Home tab shows what it
-  is doing (for example *Display 1: 3% bright · Shadow boost 66 → 88*).
+  is doing (for example *Display 1: 3% bright · Shadow boost 0 → 88*, or
+  *toning down (brightness 90%)* in a very bright scene).
 
 **How it stays safe:** five times a second (ten while the brightness is
 changing a lot; twice that when taking the copy is cheap, a few
@@ -373,7 +424,9 @@ milliseconds, so it reacts a little sooner for no more CPU than the slower
 route) it takes a tiny, low-resolution copy of what Windows is
 already showing and measures only how bright it is: overall, how much of it
 is bright, how bright its darkest few percent are and how spread out its tones
-are (for *Cut through haze*), and the same in 32 large blocks of the picture (8
+are (for *Cut through haze*, which also looks at how colourful each pixel of
+the middle of the picture is, only to tell washed-out grey haze from coloured
+scenery), and the same in 32 large blocks of the picture (8
 across, 4 down) to tell turning to a new view from a light going off and haze
 from a clear view. It never touches the game, never saves or
 sends the pictures, and never looks for anything in them. It only changes
@@ -383,17 +436,25 @@ desktop picture Windows composed for a display: DXGI Desktop Duplication (the
 route recording and streaming apps such as OBS use; with *Faster screen
 capture*, where it works) or a GDI copy of the screen (StretchBlt, the classic
 screenshot route; otherwise). Neither opens, reads or changes the game.
+With *Normal display in menus* ticked, the same tiny copy is also used for
+one more thing, and only this: recognising that the **whole screen** is one
+of the game's own menu or inventory screens, from coarse statistics (how
+many of 8 strips across the picture have a sharp brightness step on its top
+and bottom rows, how flat 48 large blocks are and the picture's average
+colour), only to switch
+CatVision's own adjustment off there. It never looks for, locates,
+marks or points out players, enemies or items.
 
 **Things to know:**
 
 - It works best with games in **borderless windowed** mode. Some games in
   exclusive fullscreen can't be seen; the Home tab then says *can't see the
-  picture* and auto levels leaves your preset alone.
+  picture* and Auto mode leaves the plain look alone.
 - A few games and videos block screen capture and show up black. Auto levels
   holds still on a black screen (a loading screen, say) instead of
-  over-brightening; after about 30 seconds of black it eases back to your
-  preset. If it can't see the picture at all for a couple of seconds it eases
-  back to your preset too.
+  over-brightening; after about 30 seconds of black it eases back to the
+  plain look. If it can't see the picture at all for a couple of seconds it
+  eases back to the plain look too.
 - Some games in exclusive fullscreen leave Windows with a frozen, old
   picture. If the picture doesn't change at all for about three seconds,
   auto levels stops following it, holds for a couple more seconds and then
@@ -408,6 +469,43 @@ screenshot route; otherwise). Neither opens, reads or changes the game.
 - While nothing is changing it rests and uses almost no processor time.
 - It's off by default, and it stops watching whenever CatVision or auto
   levels is turned off.
+
+### Normal display in menus (beta)
+
+In a game's menus and inventory, a strong boost, extra contrast or the Night
+Vision tint makes the menus look wrong. With **Normal display in menus
+(beta)** ticked (on by default, on the Home tab under auto levels), when the
+game shows one of its own menu or inventory screens the display glides back
+to normal in about a fifth of a second, exactly as if CatVision were off (the
+display's own brightness table, and no color filter), and glides back to
+your full look when you go back to playing. The Home tab says *menu: normal
+display* while it is.
+
+- It works whether auto levels is on or off, as long as CatVision is on.
+  Only displays a full-screen game fills count (never the desktop or another
+  program on a second display). With auto levels off it watches only those,
+  with the same tiny copy (a few milliseconds, five to ten times a second).
+- It recognises a menu from coarse brightness only, and needs two separate
+  signs at once: Arc Raiders' menus end in a full-width line of small hints
+  just above the bottom edge with nothing below it and nothing just above
+  it, and also have a menu bar along the top or a dark navy or plain
+  background. Gameplay keeps its HUD in the corners, stacked several rows
+  tall, and a narrow compass at the top. Tuned on about 350 real
+  screenshots: it recognised 53 of 66 menu, inventory and lobby screens and
+  none of 283 gameplay pictures (night raids, lightning storms, fog, snow,
+  day, photo mode). A menu it misses simply keeps your look.
+- If it can't see the picture for about a second while in a menu, your full
+  look comes back: when in doubt, it never stays normal during play.
+- A menu must look like a menu for about a third of a second (several
+  pictures in a row) before the display changes, and gameplay must look like
+  gameplay for about a fifth of a second before your look comes back, so a
+  single odd picture never switches it.
+- Auto levels doesn't learn from menu pictures, so the look it had in the
+  raid comes back as it was. A black loading screen is not a menu: auto
+  levels' black-screen hold applies as before. Peek does nothing in a menu.
+- It's a beta: other games' menus may not be recognised (nothing changes
+  then), and a game scene that looks very much like a menu could briefly
+  show normally. Untick it if that bothers you.
 
 ## Presets
 

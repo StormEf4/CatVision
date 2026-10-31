@@ -278,6 +278,29 @@ HAZE_FALL_S = 0.7               # ...and out over about 2 s
 HAZE_STEP = 0.5                 # the fader passes it on when it moved this much (points)...
 HAZE_SNAP = 0.5                 # ...and this close it goes straight there
 HAZE_DEADBAND = 5.0             # a still view's small changes leave the goal where it is
+# Light haze (a snowfall veil, misty distance) leaves the black level alone
+# but squeezes much of the middle of the view into a narrow band of mid or
+# bright, mostly colourless tones: curves.haze_band steepens the curve
+# across that band and takes the room from above it, never darkening
+# anything (see band_for_view).  Eased, faded and given way like the cut.
+BAND_ROWS = (1, 3)              # the band is looked for in these rows of the grid (not the HUD's)
+BAND_SHARE = 0.5                # the band: the narrowest range of levels holding this share...
+BAND_GREY = 0.25                # ...of the pixels, those with at most this colour (max-min)/max
+BAND_COLOUR_WEIGHT = 0.15       #  counting fully, more colourful ones this much
+BAND_WIDTH = (0.34, 0.18)       # a band this wide: no haze / fully squeezed...
+BAND_FLAT = (0.03, 0.06)        # ...but narrower than this: one flat surface (a wall), not haze
+BAND_LOW = (0.30, 0.45)         # the band's bottom this bright: washed out from / fully
+BAND_TOP = (0.80, 0.90)         # ...but this bright: a white menu, snow or sky up close: less, none
+BAND_KEY = (0.38, 0.46)         # views darker than this (key) are not washed out: none, full
+BAND_KEY_TOP = (0.62, 0.72)     # ...and this bright: all bright (open sky, a white wall): less, 0
+BAND_SPREAD = (0.20, 0.30)      # the whole view's 5th-95th percentile spread: flat (sky, a wall) to
+                                #  full (a game view's HUD and near objects keep it wider)
+BAND_EDGE_SNAP = 0.004          # the band's edges go straight there this close
+BAND_EDGE_DEADBAND = 0.03       # ...and follow the view when it moves them this far (levels 0-1)
+BAND_DEADBAND = 10.0            # the band's HAZE_DEADBAND: its score is twitchier (a still,
+                                #  noisy view swings it by 10 points), each step is small
+BAND_STEP = 0.5 / 255           # the fader passes the band on when it moved about this much
+                                #  (output levels, see band_moved): half a level
 HAZE_LIFT_OFF = 15.0            # auto levels' lift (points of offset) that turns it fully
                                 #  off: the dark room's lift comes first
 
@@ -325,6 +348,44 @@ class Measurement:
     # HAZE_PART_SHARE of the middle rows' parts are, see _veiled).  0 if the
     # grid isn't known.
     veiled: float = 0.0
+    # ...and the band the middle of the view's tones are squeezed into (input
+    # levels 0-1, see BAND_SHARE; 0, 0 if not known).
+    band_lo: float = 0.0
+    band_hi: float = 0.0
+    # "Normal display in menus" (beta): how much the whole picture looks like
+    # one of the game's own menu or inventory screens (see menu_score;
+    # MENU_SCORE and up).  Only coarse brightness: where the picture has
+    # sharp steps row by row and how flat it is; nothing is looked for in it.
+    menu: float = 0.0
+
+
+def _band(bgra: bytes, lum: list[int], width: int, height: int) -> tuple[float, float]:
+    """The narrowest range of levels that holds BAND_SHARE of the middle
+    rows' pixels (BAND_ROWS), mostly colourless ones counting fully (see
+    BAND_GREY): where a veil squeezes the view's tones.  Only brightness and
+    how colourful each pixel is."""
+    hist = [0.0] * 256
+    first, last = (r * height // REGION_ROWS for r in BAND_ROWS)
+    a, b = first * width, last * width
+    for v, bl, g, r in zip(lum[a:b], bgra[4 * a::4], bgra[4 * a + 1::4], bgra[4 * a + 2::4]):
+        top = r if r > g else g
+        top = top if top > bl else bl
+        low = r if r < g else g
+        low = low if low < bl else bl
+        hist[v] += 1.0 if top - low <= BAND_GREY * top + 6 else BAND_COLOUR_WEIGHT
+    total = sum(hist)
+    if total <= 0:
+        return 0.0, 0.0
+    need = total * BAND_SHARE
+    best, lo, seen = (256, 0, 255), 0, 0.0
+    for hi in range(256):            # two pointers: the narrowest window holding `need`
+        seen += hist[hi]
+        while lo < hi and seen - hist[lo] >= need:
+            seen -= hist[lo]
+            lo += 1
+        if seen >= need and hi - lo < best[0]:
+            best = (hi - lo, lo, hi)
+    return best[1] / 255, best[2] / 255
 
 
 _weights_cache: dict[tuple[int, int], list[float]] = {}
@@ -525,12 +586,14 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     lum = [(54 * r + 183 * g + 19 * b) >> 8
            for b, g, r in zip(bgra[0::4], bgra[1::4], bgra[2::4])]
     regions: tuple = ()
-    veiled = 0.0
+    veiled = band_lo = band_hi = menu = 0.0
     if width and n % width == 0:
         weights = _center_weights(width, n // width)
         if width >= REGION_COLS and n // width >= REGION_ROWS:
             regions = _regions(lum, width, n // width)
             veiled = _veiled(lum, width, n // width)
+            band_lo, band_hi = _band(bgra, lum, width, n // width)
+            menu = menu_score(lum, width, n // width, bgra)
     else:
         weights = [1.0] * n
     total = sum(weights)
@@ -552,7 +615,156 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     signature = (hash(bgra) or 1) if width else 0
     return Measurement(key, average, shadows, dark, bright, max(lum) == 0, signature, regions,
                        highs=highs, lows=low_level / 255, spread=(p95 - p5) / 255,
-                       veiled=veiled)
+                       veiled=veiled, band_lo=band_lo, band_hi=band_hi, menu=menu)
+
+
+# "Normal display in menus" (beta).  The game's menu and inventory screens
+# end in a full-width line of small hints just above the bottom edge (keys to
+# press) with nothing below it and, where the hints are, nothing just above
+# it either; many have a full-width menu bar along the top, and the in-raid
+# inventory sits on a dark navy background, often flat.  Gameplay keeps its
+# HUD in the bottom corners (bars and text stacked several rows tall) and a
+# narrow compass at the top centre, and a busy scene reaches right down to
+# the last row.  Only how many of the picture's MENU_SEGMENTS columns have a
+# sharp step on a row, how flat coarse blocks are and the picture's average
+# colour are measured: nothing in the picture is looked for.
+# Tuned on about 350 real menu and gameplay screenshots at the 96x54
+# thumbnail size; a picture needs the hint line AND a second, independent
+# cue (menu bar, dark flat or dark navy background), so a missed menu is
+# preferred to a gameplay picture ever counting.
+MENU_EDGE = 40                  # neighbouring pixels this different (0-255) = a sharp step
+MENU_SEGMENTS = 8               # the rows are split into this many columns
+MENU_LINE = 5                   # a hint line this strong (see menu_score)...
+MENU_QUIET = 3                  # ...with this many of its columns clear above and below...
+MENU_SCORE = 6.0                # ...and a score this high (see menu_score) = a menu
+MENU_BAR = 2                    # a menu bar counts beyond this (see menu_score)
+MENU_DARK_FLAT = 2.0            # what a dark, flat picture adds to the score
+MENU_NAVY = 1.0                 # what a dark navy picture adds (if not flat)
+MENU_NAVY_TINT = 3.0            # (navy: average blue above average red by this, 0-255)
+MENU_FLAT = 0.25                # this share of flat blocks (a menu's plain background)...
+MENU_FLAT_STD = 6.0             # (a block flat: brightness spread under this, 0-255)
+MENU_DARK = 60                  # ...on a dark picture (average under this, 0-255)
+MENU_ON_S = 0.3                 # a menu looks like one this long (MENU_ON_COUNT pictures)...
+MENU_ON_COUNT = 3
+MENU_OFF_S = 0.2                # ...and gameplay like gameplay this long before switching back
+MENU_OFF_COUNT = 2
+MENU_FADE_S = 0.2               # the display glides to normal and back in this long
+MENU_LOST_S = 1.0               # no picture this long in a menu: back to the full look
+
+
+def _row_steps(lum: list[int], width: int, y: int) -> set[int]:
+    """Which of the MENU_SEGMENTS columns have a sharp step on row y."""
+    row = lum[y * width:(y + 1) * width]
+    seg = max(1, width // MENU_SEGMENTS)
+    return {x // seg for x in range(width - 1) if abs(row[x + 1] - row[x]) > MENU_EDGE}
+
+
+def _menu_lines(lum: list[int], width: int, height: int) -> tuple[int, int, int]:
+    """(bottom line, quiet columns, top bar) of a picture, see menu_score."""
+    if width < MENU_SEGMENTS * 2 or height < 8:
+        return 0, 0, 0
+    top0, top1, top2, above1, above2, hint1, hint2, last = (
+        _row_steps(lum, width, y) for y in (0, 1, 2, height - 6, height - 5,
+                                             height - 3, height - 2, height - 1))
+    bottom = len(hint1) + len(hint2) - 2 * len(last)
+    quiet = len((hint1 | hint2) - last - above1 - above2)
+    return bottom, quiet, len(top1) - max(len(top0), len(top2))
+
+
+def _tint(bgra: bytes | None) -> float:
+    """Average blue less average red of a BGRA picture (0 without one)."""
+    n = len(bgra) // 4 if bgra else 0
+    return (sum(bgra[0::4]) - sum(bgra[2::4])) / n if n else 0.0
+
+
+def menu_parts(lum: list[int], width: int, height: int,
+               bgra: bytes | None = None) -> tuple[int, int, int, float, float, float]:
+    """(bottom line, quiet columns, top bar, flat share, average brightness,
+    blue tint) of a picture, see menu_score."""
+    bottom, quiet, top = _menu_lines(lum, width, height)
+    if width < MENU_SEGMENTS * 2 or height < 8:
+        return bottom, quiet, top, 0.0, 0.0, 0.0
+    return (bottom, quiet, top, _flat_share(lum, width, height), sum(lum) / len(lum),
+            _tint(bgra))
+
+
+def _flat_share(lum: list[int], width: int, height: int) -> float:
+    """Share of an 8 x 6 grid of blocks whose brightness hardly varies."""
+    bw, bh = width // 8, height // 6
+    flat = 0
+    for by in range(6):
+        for bx in range(8):
+            vals = [lum[(by * bh + y) * width + bx * bw + x] for y in range(bh) for x in range(bw)]
+            mean = sum(vals) / len(vals)
+            if sum((v - mean) ** 2 for v in vals) / len(vals) < MENU_FLAT_STD ** 2:
+                flat += 1
+    return flat / 48
+
+
+def menu_score(lum: list[int], width: int, height: int, bgra: bytes | None = None) -> float:
+    """How much a picture looks like one of the game's own menu screens.
+
+    The bottom hint line: columns with a sharp step on the third and on the
+    second row from the bottom, less twice those on the last row (small text
+    is two rows tall here, and a busy scene reaches the last row too).  It
+    must be at least MENU_LINE, and at least MENU_QUIET of its columns must
+    have no step on the last row nor on the two rows just above the hints
+    (the HUD's bars and text in gameplay are stacked several rows tall).
+    Then a second, independent cue is needed: how far a thin line along the
+    top beats the rows beside it beyond MENU_BAR (a menu bar), or
+    MENU_DARK_FLAT for a dark, flat picture, or else MENU_NAVY for a dark
+    navy one (the inventory).  Score = hint line + second cue, 0 without
+    both.  MENU_SCORE and up = a menu."""
+    bottom, quiet, top = _menu_lines(lum, width, height)
+    if bottom < MENU_LINE or quiet < MENU_QUIET:
+        return 0.0     # (most pictures: the rest isn't worked out)
+    second = float(max(0, top - MENU_BAR))
+    if sum(lum) / len(lum) < MENU_DARK:
+        if _flat_share(lum, width, height) >= MENU_FLAT:
+            second += MENU_DARK_FLAT
+        elif _tint(bgra) >= MENU_NAVY_TINT:
+            second += MENU_NAVY
+    return float(bottom) + second if second > 0 else 0.0
+
+
+class MenuWatch:
+    """Whether the game is showing one of its menus, from the pictures'
+    menu scores, with a delay each way so a single picture never switches:
+    a menu must look like one for MENU_ON_S (and MENU_ON_COUNT pictures),
+    gameplay like gameplay for MENU_OFF_S (and MENU_OFF_COUNT).  A black
+    picture (loading) counts as gameplay: auto levels' black hold keeps the
+    look there.  A missing picture changes nothing for a moment, but no
+    picture for MENU_LOST_S (the capture failing, say as a raid starts in
+    exclusive full screen) ends menu mode: when in doubt, the full look."""
+
+    def __init__(self):
+        self.active = False
+        self.looks = False      # the newest picture looks like a menu
+        self._since: float | None = None
+        self._count = 0
+        self._seen: float | None = None   # when the last picture came
+
+    def reset(self) -> None:
+        self.active, self.looks, self._since, self._count = False, False, None, 0
+        self._seen: float | None = None
+
+    def update(self, m: Measurement | None, now: float) -> bool:
+        if m is None:
+            if self.active and self._seen is not None and now - self._seen >= MENU_LOST_S:
+                self.reset()   # can't see the game any more: back to the full look
+            return self.active
+        self._seen = now
+        looks = self.looks = not m.black and m.menu >= MENU_SCORE
+        if looks == self.active:
+            self._since, self._count = None, 0
+            return self.active
+        if self._since is None:
+            self._since = now
+        self._count += 1
+        wait, count = (MENU_ON_S, MENU_ON_COUNT) if looks else (MENU_OFF_S, MENU_OFF_COUNT)
+        if self._count >= count and now - self._since >= wait - 1e-9:
+            self.active, self._since, self._count = looks, None, 0
+        return self.active
 
 
 def _levels(hist: list[float], total: float, shares: tuple) -> list[int]:
@@ -688,24 +900,88 @@ def haze_for_view(m: Measurement) -> float:
     return 100.0 * score * min(1.0, HAZE_SHARE * m.lows / curves.HAZE_FLOOR_MAX)
 
 
+def band_moved(a: tuple, b: tuple) -> float:
+    """About how far (output levels 0-1, at most) the haze band's bump
+    moves between two (amount, lo, hi): its height (gain x width / 2, see
+    curves.haze_band_shape) and its edges (its steepest slope is the gain).
+    So a drifting veil rewrites the table when the picture would show it,
+    not 0.5 points of amount at a time (a fraction of a level)."""
+    ga, gb = (curves.HAZE_BAND_GAIN * min(max(v[0], 0.0), 100.0) / 100.0 for v in (a, b))
+    return (abs(ga * (a[2] - a[1]) - gb * (b[2] - b[1])) / 2.0
+            + max(ga, gb) * max(abs(a[1] - b[1]), abs(a[2] - b[2])))
+
+
+def band_for_view(m: Measurement) -> float:
+    """How much more contrast to give the band of hazy tones (curves.haze_band
+    points, 0-100) for one picture: how squeezed the middle of the view's
+    tones are (Measurement.band_lo..band_hi, BAND_WIDTH) and how washed out
+    (BAND_LOW), smoothly from light to heavy haze, in a view that is
+    neither dark (night: the shadow lift's), nor flat or all bright (a white
+    menu, the open sky, a wall, a loading screen)."""
+    if m.black or not m.spread or m.band_hi <= m.band_lo:
+        return 0.0
+    width = m.band_hi - m.band_lo
+    score = (_ramp(width, *BAND_WIDTH) * _ramp(width, *BAND_FLAT) * _ramp(m.band_lo, *BAND_LOW)
+             * (1.0 - _ramp(m.band_lo, *BAND_TOP)) * _ramp(m.key, *BAND_KEY)
+             * (1.0 - _ramp(m.key, *BAND_KEY_TOP)) * _ramp(m.spread, *BAND_SPREAD))
+    return 100.0 * score
+
+
 def fader_amounts(key: str, offset: float, base: dict[str, float],
-                  controller: "Controller | None" = None) -> dict[str, float]:
+                  controller: "Controller | None" = None,
+                  standalone: bool = False) -> dict[str, float]:
     """What one display gets on top of the preset: the offset shared out by
     split_offset, plus the controller's Outside detail for bright areas in
     view (see room_for_highs), as much as leaves the room's tones alone
     (ROOM_KEEP_LEVEL).  ``base``: the look's settings (every field, so the
     room's tones can be worked out; at least the ones split_offset moves)."""
-    out = split_offset(key, offset, base)
+    give = 1.0
+    if controller is not None:
+        # The haze cut and band give way to the lift (a dark room's comes
+        # first); in auto mode only to its lift past the daylight one, over
+        # the same share of its wider range.
+        lo, off = ((auto_day_lift(controller.strength), HAZE_LIFT_OFF * AUTO_LIFT_PER_STRENGTH)
+                   if standalone else (0.0, HAZE_LIFT_OFF))
+        give = 1.0 - _ramp(offset, lo, lo + off)
+    # (Auto mode, ``standalone``: auto_amounts on the neutral look.)
+    if standalone:
+        out = auto_amounts(_daylight_under_haze(offset, controller, give), base)
+    else:
+        out = split_offset(key, offset, base)
     if controller is not None and controller.room > 0:
         extra = min(controller.room, _room_left(base, out))
         if extra > 0:
             out["highlight_room"] = extra
     if controller is not None and controller.haze > 0:
         # (After the room: it never changes the room's tones' lift.)
-        haze = controller.haze * (1.0 - _ramp(offset, 0.0, HAZE_LIFT_OFF))
+        haze = controller.haze * give
         if haze > 0:
             out["haze_cut"] = haze
+    if controller is not None and controller.band > 0:
+        # The band gives way to the lift the same way.
+        band = controller.band * give
+        if band > 0:
+            out["haze_band"] = band
+            out["haze_band_lo"], out["haze_band_hi"] = controller.band_lo, controller.band_hi
     return out
+
+
+def _daylight_under_haze(offset: float, controller: "Controller | None",
+                         give: float) -> float:
+    """Auto mode: the offset with its daylight lift (auto_day_lift) given
+    up while the haze cut or band works (``give``: how much of them is
+    left, see fader_amounts; AUTO_DAY_HAZE): both brighten a bright view,
+    and stacked they push its highlights to white.  So a hazy daylight view
+    is toned down a little instead, as before the daylight lift (with "tone
+    down" ticked).  A dark view's lift stays (the haze gives way to it)."""
+    if controller is None:
+        return offset
+    veil = _ramp(max(controller.haze, controller.band) * give, 0.0, AUTO_DAY_HAZE)
+    if veil <= 0:
+        return offset
+    dim = controller._settings[2] if controller._settings else True
+    return max(offset - auto_day_lift(controller.strength) * veil,
+               min(offset, 0.0) if not dim else -controller.strength)
 
 
 _SETTING_NAMES = tuple(f.name for f in fields(curves.Settings))
@@ -769,6 +1045,212 @@ def aim_for_current_look(key: float, offset: float, strength: float,
     return key * 2 ** stops
 
 
+# Auto mode (beta): auto levels as a mode of its own.  No preset underneath:
+# it starts from a neutral look (AUTO_BASE: no boost, no tint, contrast 1,
+# gamma 1) and moves the settings itself.  The controller still works in
+# "points" (so the anti-pumping and fade machinery is the same), but here
+# they mean: above 0, Shadow boost (spilling into Exposure past 100: only
+# pitch-dark scenes get there); below 0, toning a bright scene down
+# (auto_amounts).  How much caps the lift at AUTO_LIFT_PER_STRENGTH times
+# its value (30 -> 120 points, 60 -> 240), since there is no preset's own
+# boost underneath any more.
+AUTO_BASE = curves.Settings()
+AUTO_NAME = "Auto (beta)"
+AUTO_LIFT_PER_STRENGTH = 4.0
+# A scene as dark as Aim for or darker is lifted until it is SHOWN at about
+# AUTO_SHOWN times Aim for (inverting the tone curve: the lift that shows its
+# measured brightness there, so a night raid is shown at about a third of
+# full brightness, as Dark Areas plus auto levels did).  Brighter scenes get
+# less, none from AUTO_RAMP_STOPS above Aim for, and only scenes brighter
+# than that are toned down.
+AUTO_SHOWN = 3.2
+AUTO_RAMP_STOPS = 1.5
+# Daylight keeps a moderate lift: AUTO_DAY_SHARE of the cap (Shadow boost
+# 30 at How much 30), for the shadows of a bright view (doorways, under
+# cover, bushes): Shadow boost lifts the dark tones most and barely moves
+# the highlights, which Outside detail keeps from glaring.  It fades out
+# over AUTO_DAY_STOPS more (an all-bright or washed-out view: snow, sky,
+# haze), and only views brighter still are toned down.
+AUTO_DAY_SHARE = 0.25
+AUTO_DAY_STOPS = 1.0
+AUTO_DAY_HAZE = 20.0            # haze cut or band points that take the daylight lift off fully
+# Toning a bright scene down: each point takes this much off Brightness
+# (overall gain), down to AUTO_TONE_FLOOR, with just enough Shadow boost to
+# keep the slope at black where it was: the glare (highlights) comes down,
+# the dark tones keep their level, nothing is crushed or clipped.
+AUTO_TONE_PER_POINT = 0.003
+AUTO_TONE_FLOOR = 0.75
+# Auto mode's fades (see follow).  Its points span AUTO_LIFT_PER_STRENGTH
+# times a preset's range, so its speed limits (points a second) are that
+# much higher: a switch across the range takes as long as before.  Each
+# step is still capped at what a preset's fade step showed, in lightness on
+# screen: the ceilings are in the presets' points, worth up to
+# AUTO_PACE_POINT L* each (Dark Areas, the everyday preset: its contrast
+# makes a point count most), and auto_pace turns them into auto mode's
+# points (worth less: about 0.7 L* lifting, under 0.3 toning down).
+AUTO_PACE_POINT = 0.95
+AUTO_PACE_MAX = 4.0             # (at most this many auto points per preset point)
+# Right after the view itself changed all over (turned or ran into a new
+# darker view, or out into a brighter one: see _new_darker_view and
+# _brighter_view), the change on screen hides the fade's steps, so for
+# AUTO_CUT_S they may be AUTO_CUT_STEP times as large (auto mode's day and
+# night looks are further apart than a preset's).  Lights, flashes,
+# lightning, a white-out fading back and coming back from a glance keep
+# the usual steps.
+AUTO_CUT_S = 0.5
+AUTO_CUT_STEP = 1.5
+AUTO_CUT_EASE = 2.0             # (and the glide eases into its goal this much quicker)
+# Auto mode's neutral look has no Outside detail of its own, where a
+# preset's (presets.HIGHLIGHT_ROOM, as much as ROOM_EXTRA) lies under auto
+# levels' extra: so its extra for bright areas is this much larger (still
+# never reaching the room's tones, see _room_left), or a window seen from
+# a dark room at night would show brighter than with Dark Areas.
+AUTO_ROOM = 2.0
+_AUTO_LIFTS: dict[tuple, float] = {}
+_AUTO_PACES: dict[int, float] = {}
+
+
+def auto_cap(strength: float) -> float:
+    """Auto mode: the most points the controller may move for How much."""
+    return max(0.0, strength) * AUTO_LIFT_PER_STRENGTH
+
+
+def _boost_for_slope(slope: float) -> float:
+    """The Shadow boost whose slope at black (a / log1p(a)) is ``slope``."""
+    if slope <= 1.0:
+        return 0.0
+    lo, hi = 0.0, 200.0
+    for _ in range(40):
+        a = (lo + hi) / 2
+        if a / math.log1p(a) < slope:
+            lo = a
+        else:
+            hi = a
+    a = (lo + hi) / 2
+    return 100.0 * math.log1p(a) / math.log(201.0)
+
+
+def auto_amounts(offset: float, base: dict[str, float] | None = None) -> dict[str, float]:
+    """Auto mode: what ``offset`` points add to the neutral look: a lift
+    (Shadow boost, spilling into Exposure) above 0, a gentle tone-down
+    (Brightness down, its dark tones kept by a little Shadow boost) below."""
+    base = look_values(AUTO_BASE) if base is None else base
+    if offset >= 0:
+        return split_offset("shadow_boost", offset, base)
+    gain = max(AUTO_TONE_FLOOR, 1.0 - AUTO_TONE_PER_POINT * -offset)
+    out = {"brightness": gain - 1.0}
+    boost = _boost_for_slope(1.0 / gain)
+    if boost > 0.05:
+        out["shadow_boost"] = boost
+    return out
+
+
+def auto_look(offset: float) -> curves.Settings:
+    """The neutral look with ``offset`` points of auto mode applied."""
+    base = look_values(AUTO_BASE)
+    return AUTO_BASE.clamped({k: base[k] + v for k, v in auto_amounts(offset, base).items()})
+
+
+def _lightness(y: float) -> float:
+    """CIE L* (0-100) of a display output level 0-1 (display gamma 2.2)."""
+    lum = max(y, 0.0) ** 2.2
+    return 116.0 * lum ** (1 / 3) - 16.0 if lum > 0.008856 else 903.3 * lum
+
+
+def auto_pace(offset: float) -> float:
+    """Auto mode: how many of its points change the picture as much as a
+    preset's point (AUTO_PACE_POINT L* at any level), around ``offset``:
+    from the largest change of any of the 256 levels over one point there
+    (worked out once per point, then kept: a fraction of a millisecond on
+    the fader thread, the first time a fade passes there)."""
+    i = int(math.floor(offset + 0.5))
+    pace = _AUTO_PACES.get(i)
+    if pace is None:
+        # (curves._tone_table: tone_curve at the 256 levels, the fast way.)
+        worst = max(abs(_lightness(a) - _lightness(b))
+                    for a, b in zip(curves._tone_table(auto_look(i - 0.5)),
+                                    curves._tone_table(auto_look(i + 0.5))))
+        pace = min(AUTO_PACE_MAX, max(1.0, AUTO_PACE_POINT / max(worst, 1e-6)))
+        _AUTO_PACES[i] = pace
+    return pace
+
+
+def shown_key(key: float, offset: float) -> float:
+    """How bright a scene of brightness ``key`` is shown with ``offset``."""
+    return curves.tone_curve(key, auto_look(offset))
+
+
+def _lift_to_show(key: float, goal: float, cap: float) -> float:
+    """The smallest lift (points, at most ``cap``) that shows ``key`` at
+    ``goal``: the tone curve inverted (it rises with the lift)."""
+    ck = (round(key, 5), round(goal, 4), round(cap, 3))
+    lift = _AUTO_LIFTS.get(ck)
+    if lift is not None:
+        return lift
+    if cap <= 0 or shown_key(key, 0.0) >= goal:
+        lift = 0.0
+    elif shown_key(key, cap) <= goal:
+        lift = cap
+    else:
+        lo, hi = 0.0, cap
+        for _ in range(24):
+            mid = (lo + hi) / 2
+            if shown_key(key, mid) < goal:
+                lo = mid
+            else:
+                hi = mid
+        lift = (lo + hi) / 2
+    if len(_AUTO_LIFTS) >= 4096:
+        _AUTO_LIFTS.clear()
+    _AUTO_LIFTS[ck] = lift
+    return lift
+
+
+def auto_day_lift(strength: float) -> float:
+    """Auto mode: the daylight lift (points) for ``strength`` (auto_cap of
+    How much), see AUTO_DAY_SHARE."""
+    return max(0.0, strength) * AUTO_DAY_SHARE
+
+
+def auto_offset(key: float, strength: float, target: float, dim: bool = True) -> float:
+    """Auto mode's goal (points, like target_offset; ``strength`` is already
+    auto_cap of How much): a scene darker than Aim for is lifted so it is
+    shown at about AUTO_SHOWN x Aim for (in full from AUTO_RAMP_STOPS below
+    it), a brighter one keeps the daylight lift (auto_day_lift, fading out
+    over AUTO_DAY_STOPS), and only one brighter still is toned down (only
+    if dim) like target_offset."""
+    key = max(key, 1 / 255)
+    stops = math.log2(target / key) + AUTO_RAMP_STOPS
+    day = auto_day_lift(strength)
+    if stops > 0:
+        full = _lift_to_show(key, target * AUTO_SHOWN, strength)
+        return max(day, full * min(1.0, stops / AUTO_RAMP_STOPS))
+    stops += AUTO_DAY_STOPS
+    if stops > 0:
+        return day * stops / AUTO_DAY_STOPS
+    if not dim:
+        return 0.0
+    return strength * max(-1.0, stops / STOPS_FOR_FULL)
+
+
+def aim_for_auto_look(key: float, offset: float, strength: float,
+                      current: float | None = None, dim: bool = True) -> float:
+    """aim_for_current_look for auto mode (``strength``: auto_cap of How
+    much): the Aim for (searched: the goal rises with it) giving this look."""
+    if current is not None and abs(auto_offset(key, strength, current, dim) - offset) < 0.5:
+        return current
+    if strength <= 0:
+        return key
+    lo, hi = 1e-3, 1.0
+    for _ in range(40):
+        mid = math.sqrt(lo * hi)
+        if auto_offset(key, strength, mid, dim) < offset:
+            lo = mid
+        else:
+            hi = mid
+    return math.sqrt(lo * hi)
+
+
 def _apart(a: tuple, b: tuple) -> float:
     """Seconds between two (clock time, Measurement) entries: by when the
     pictures were captured if both are known, else by the controller's
@@ -814,6 +1296,7 @@ class Controller:
     _view_rise: bool = False                       # brightening for a new darker view: quickest pace
     _estimate: bool = False                        # the goal is a halfway guess (into a cave)
     _rush_view: bool = False                       # the fast fade-down is for a new, brighter view
+    _cut_at: float = -1e9                          # auto mode: when the view last changed all over
     _fade: float = 0.0                             # newest key of a white-out or its fade back (0 = none)
     _fade_since: float = 0.0                       # when the white-out began
     _fade_at: float = 0.0                          # when its last white picture came
@@ -828,9 +1311,21 @@ class Controller:
     haze: float = 0.0                              # haze cut now (curves.haze_cut points)...
     haze_want: float = 0.0                         # ...and where it is heading
     _hazes: list = field(default_factory=list)    # haze_for_view of the last HAZE_FRAMES places
+    band: float = 0.0                              # the haze band now (curves.haze_band points)...
+    band_want: float = 0.0                         # ...where it is heading
+    band_lo: float = 0.0                           # ...its input levels now...
+    band_hi: float = 0.0
+    band_edges: tuple = (0.0, 0.0)                 # ...and where they are heading
+    standalone: bool = False                       # auto mode: goals from auto_offset
     _seen: list = field(default_factory=list)     # (time, Measurement): every picture of the last SETTLE_S
     _unconfirmed: tuple | None = None              # (time, Measurement): a brighter picture not yet counted
     _unconfirmed_view: bool = False                # (and it is a different view: see VIEW_CONFIRM_S)
+
+    def _goal(self, key: float, strength: float, target: float, dim: bool) -> float:
+        """target_offset, or auto_offset in auto mode (``standalone``)."""
+        if self.standalone:
+            return auto_offset(key, strength, target, dim)
+        return target_offset(key, strength, target, dim)
 
     def observe(self, m: Measurement | None, strength: float, target: float,
                 dim: bool = True, now: float | None = None) -> None:
@@ -879,7 +1374,8 @@ class Controller:
                 self._missing_since = clock
             elif clock - self._missing_since >= LOST_S:
                 self.want = 0.0
-                self.haze_want, self._hazes = 0.0, []   # (a frozen picture's haze is no guide)
+                # (A frozen picture's haze is no guide.)
+                self.haze_want, self.band_want, self._hazes = 0.0, 0.0, []
             return
         self._missing_since = None
         self._aim_haze(m, clock)       # (a held-back flash never gets here)
@@ -964,6 +1460,7 @@ class Controller:
             early = math.sqrt(max(k for _t, k in self._recent) * newest[-1])
             halfway = True
         view_key = self._new_darker_view(now, m)
+        new_dark = view_key
         if view_key is None:
             view_key = self._back_to_settled_view(now, m)
         if view_key is None:
@@ -979,7 +1476,7 @@ class Controller:
             # can't take it back (that would pump), only a brighter new one can.
             self._recent = [(t, min(k, early)) for t, k in self._recent]
         key = self.key = max(k for _t, k in self._recent)
-        want = target_offset(key, strength, target, dim)
+        want = self._goal(key, strength, target, dim)
         flash = bool(self._last_key) and m.key >= self._last_key * FLASH_RATIO
         # Coming out of the dark (a cave mouth, a door swinging open onto
         # daylight) the picture brightens over several measurements, each
@@ -1006,8 +1503,8 @@ class Controller:
         # "breathing"; the glide itself never stops halfway.  Near black a
         # one-level wobble (video compression, dithering) is a big change in
         # stops, so the goal only moves if it is clear of that noise too.
-        near = target_offset(key + NOISE_KEY, strength, target, dim)
-        far = target_offset(max(key - NOISE_KEY, 0.0), strength, target, dim)
+        near = self._goal(key + NOISE_KEY, strength, target, dim)
+        far = self._goal(max(key - NOISE_KEY, 0.0), strength, target, dim)
         # (A changed How much / Aim for / dim always applies at once.)
         settings, before = (strength, target, dim), self._settings
         self._settings = settings
@@ -1030,6 +1527,8 @@ class Controller:
                 # for a second halfway step (the first may be a quick turn
                 # that is about to end, or to come back).
                 self._view_rise = True
+                # (Bigger steps only for a view that changed all over.)
+                self._cut_at = now if new_dark is not None and early == new_dark else -1e9
             self.want = want
             rush = (flash or brighter or leaving) and want < self.offset
             # A new view (or a fade for one that keeps getting brighter)
@@ -1037,8 +1536,16 @@ class Controller:
             # before rush, so the fader thread never pairs a new fast fade
             # with the pace of an old one.
             self._rush_view = rush and (new_view or (brighter and self._rush_view))
+            if rush and new_view and not brighter:
+                self._cut_at = now
             self.rush = rush
             self._estimate = halfway
+
+    def _cut_open(self) -> bool:
+        """Auto mode: a fade for a view that changed all over, within
+        AUTO_CUT_S of the change (see AUTO_CUT_STEP)."""
+        return (self.standalone and self.clock - self._cut_at <= AUTO_CUT_S
+                and (self._view_rise or (self.rush and self._rush_view)))
 
     def _darkening(self) -> list:
         """The newest DARKENING_COUNT brightnesses (oldest first), at the
@@ -1263,7 +1770,7 @@ class Controller:
                 and self._missing_since is None and self._black_since is None):
             # (Not once a lost or black picture has eased back to the preset.)
             self._settings = settings
-            self.want = target_offset(self.key, strength, target, dim)
+            self.want = self._goal(self.key, strength, target, dim)
             self.rush = False
             self._aim_room(strength)
 
@@ -1276,7 +1783,7 @@ class Controller:
         """Head back to the preset (no game in front)."""
         self.want = 0.0
         self.room_want, self._room_back, self._highs = 0.0, True, 0.0
-        self.haze_want, self._hazes = 0.0, []
+        self.haze_want, self.band_want, self._hazes = 0.0, 0.0, []
         self.rush = self._rush_view = False
         self._recent.clear()
         self._last_key = 0.0
@@ -1297,8 +1804,12 @@ class Controller:
         return self.follow(self.want, self.strength, dt, speed, frame)
 
     def _aim_room(self, strength: float) -> None:
-        """Where the Outside detail heads for the last picture's bright share."""
-        room = room_for_highs(self._highs, strength)
+        """Where the Outside detail heads for the last picture's bright share
+        (auto mode: see AUTO_ROOM)."""
+        if self.standalone:
+            room = room_for_highs(self._highs, strength / AUTO_LIFT_PER_STRENGTH) * AUTO_ROOM
+        else:
+            room = room_for_highs(self._highs, strength)
         if not room or abs(room - self.room_want) >= ROOM_DEADBAND:
             self.room_want = room
 
@@ -1321,7 +1832,7 @@ class Controller:
         once (not at the next picture) and forgets the pictures it saw, so
         ticking it again starts from a clear view."""
         if not on:
-            self.haze_want, self._hazes = 0.0, []
+            self.haze_want, self.band_want, self._hazes = 0.0, 0.0, []
         self.haze_on = on
 
     def _aim_haze(self, m: Measurement, now: float) -> None:
@@ -1332,22 +1843,47 @@ class Controller:
         rewriting the brightness table.  Pictures less than HAZE_GAP_S after
         the first of their place (the quick capture pace, see
         QUICK_CAPTURE_MS) take that place over instead of a new one."""
-        hazes = self._hazes      # [((time, Measurement) the place began, haze)]
-        entry, haze = (now, m), (haze_for_view(m) if self.haze_on else 0.0)
+        hazes = self._hazes      # [((time, Measurement) the place began, haze, band)]
+        entry = (now, m)
+        haze = haze_for_view(m) if self.haze_on else 0.0
+        band = (band_for_view(m), m.band_lo, m.band_hi) if self.haze_on else (0.0, 0.0, 0.0)
         if hazes and _apart(hazes[-1][0], entry) < HAZE_GAP_S:
-            hazes[-1] = (hazes[-1][0], haze)
+            hazes[-1] = (hazes[-1][0], haze, band)
         else:
-            hazes.append((entry, haze))
+            hazes.append((entry, haze, band))
         del hazes[:-HAZE_FRAMES]
-        values = [h for _e, h in hazes]
-        haze = (sorted([0.0] * (HAZE_FRAMES - len(values)) + values)[HAZE_FRAMES // 2]
+        missing = [0.0] * (HAZE_FRAMES - len(hazes))
+        haze = (sorted(missing + [h for _e, h, _b in hazes])[HAZE_FRAMES // 2]
                 if self.haze_on else 0.0)
         if not haze or abs(haze - self.haze_want) >= HAZE_DEADBAND:
             self.haze_want = haze
+        # The band the same way.  Its edges: the middle of each edge over the
+        # places that call for it (at least three when the middle one does),
+        # and they follow the view on their own when it turns or the veil
+        # moves (BAND_EDGE_DEADBAND), even while the amount stays (a heavy
+        # veil's is 100 wherever you look), or the contrast would go to
+        # tones the view no longer has.
+        bands = sorted([(0.0, 0.0, 0.0)] * len(missing) + [b for _e, _h, b in hazes])
+        amount = bands[HAZE_FRAMES // 2][0] if self.haze_on else 0.0
+        if amount:
+            lit = [b for b in bands if b[0] > 0]
+            lo = sorted(b[1] for b in lit)[len(lit) // 2]
+            hi = sorted(b[2] for b in lit)[len(lit) // 2]
+        if not amount or abs(amount - self.band_want) >= BAND_DEADBAND:
+            self.band_want = amount
+            if amount:
+                self.band_edges = (lo, hi)
+                if not self.band:
+                    self.band_lo, self.band_hi = lo, hi   # (from off: no glide needed)
+        elif (self.band_want and max(abs(lo - self.band_edges[0]),
+                                     abs(hi - self.band_edges[1])) >= BAND_EDGE_DEADBAND):
+            self.band_edges = (lo, hi)
 
     def _ease_haze(self, dt: float) -> None:
-        """Glide the haze cut toward haze_want (an even exponential approach,
-        a little slower out than in)."""
+        """Glide the haze cut toward haze_want, and the band toward band_want
+        and band_edges (an even exponential approach, a little slower out
+        than in)."""
+        self._ease_band(dt)
         want = self.haze_want      # (once: the window's thread may change it meanwhile)
         gap = want - self.haze
         if not gap:
@@ -1357,6 +1893,29 @@ class Controller:
             return
         pace = HAZE_RISE_S if gap > 0 else HAZE_FALL_S
         self.haze += gap * (1.0 - math.exp(-max(dt, 0.0) / pace))
+
+    def _ease_band(self, dt: float) -> None:
+        want, (lo, hi) = self.band_want, self.band_edges
+        gap = want - self.band
+        if gap:
+            if abs(gap) < HAZE_SNAP:
+                self.band = want
+            else:
+                pace = HAZE_RISE_S if gap > 0 else HAZE_FALL_S
+                self.band += gap * (1.0 - math.exp(-max(dt, 0.0) / pace))
+        if (lo, hi) != (self.band_lo, self.band_hi):
+            if max(abs(lo - self.band_lo), abs(hi - self.band_hi)) < BAND_EDGE_SNAP:
+                self.band_lo, self.band_hi = lo, hi
+            else:
+                k = 1.0 - math.exp(-max(dt, 0.0) / HAZE_RISE_S)
+                self.band_lo += (lo - self.band_lo) * k
+                self.band_hi += (hi - self.band_hi) * k
+
+    @property
+    def band_resting(self) -> bool:
+        """The band is where it is heading (amount and edges)."""
+        return (self.band == self.band_want
+                and (self.band_lo, self.band_hi) == self.band_edges)
 
     def step(self, m: Measurement | None, strength: float, target: float, dt: float,
              speed: float = 1.0, dim: bool = True) -> float:
@@ -1412,7 +1971,11 @@ class Controller:
             # A big change (into a cave) catches up quicker, all the way:
             # dropping to the slow pace for the last stretch would leave the
             # picture too dark for seconds.
-            if strength and gap > strength * 0.5:
+            big = strength * 0.5
+            if self.standalone:
+                # (Auto mode: half How much in a preset's points, on screen.)
+                big *= auto_pace(self.offset) / AUTO_LIFT_PER_STRENGTH
+            if strength and gap > big:
                 self._catch_up = True
             tau, vmax = (RISE_FAST_S, MAX_RISE_FAST) if self._catch_up else (RISE_S, MAX_RISE)
             per_update = self._view_rise
@@ -1425,6 +1988,11 @@ class Controller:
             vmax, per_update = MAX_RUSH, False
         else:
             tau, vmax, per_update = FALL_S, MAX_FALL, False
+        cut = self._cut_open()
+        if cut:
+            # (Auto mode, a view changed all over: see AUTO_CUT_STEP.  The
+            # glide's ease into the goal is quicker too.)
+            tau /= AUTO_CUT_EASE
         w = 2.0 * speed / tau
         c1 = -gap                               # offset - want
         velocity = self.velocity
@@ -1448,7 +2016,16 @@ class Controller:
             ceiling = CEILING_STEP / max(dt, frame or 1.0 / FADER_MAX_HZ)
         else:
             ceiling = CEILING_RUSH if vmax == MAX_RUSH else CEILING
-        limit = min(vmax * speed, ceiling)
+        if self.standalone:
+            # Auto mode: the same share of its (wider) range a second, each
+            # step no more visible than a preset's (see AUTO_PACE_POINT).
+            # (Where the step lands too: from toning down into a lift.)
+            pace = min(auto_pace(self.offset), auto_pace(new))
+            if cut:
+                pace *= AUTO_CUT_STEP
+            limit = min(vmax * speed * AUTO_LIFT_PER_STRENGTH, ceiling * pace)
+        else:
+            limit = min(vmax * speed, ceiling)
         if abs(new - self.offset) > limit * dt:  # speed limit: never a visible jump
             new = self.offset + math.copysign(limit * dt, new - self.offset)
             vel = math.copysign(min(abs(vel), limit), vel)
@@ -1491,6 +2068,7 @@ class Fader:
         self._applied: dict[str, float] = {}
         self._rooms: dict[str, float] = {}     # each display's Outside detail when last applied
         self._hazes: dict[str, float] = {}     # ...and its haze cut
+        self._bands: dict[str, tuple] = {}     # ...and its haze band (amount, edges)
 
     @property
     def running(self) -> bool:
@@ -1547,7 +2125,7 @@ class Fader:
     def settled(self) -> bool:
         """Every display is where it wants to be and has stopped moving."""
         return all(abs(c.want - c.offset) <= 0.001 and abs(c.velocity) < 1e-3
-                   and c.room == c.room_want and c.haze == c.haze_want
+                   and c.room == c.room_want and c.haze == c.haze_want and c.band_resting
                    for c in list(self.controllers.values()))
 
     def tick(self, dt: float, motion_dt: float | None = None, force: bool = False,
@@ -1607,6 +2185,9 @@ class Fader:
         rooms = {did: (ctrl.room, ctrl.room_want) for did, ctrl in items}
         # So does the haze cut.
         hazes = {did: (ctrl.haze, ctrl.haze_want) for did, ctrl in items}
+        # And the haze band (its amount and edges: one table between them).
+        bands = {did: ((ctrl.band, ctrl.band_lo, ctrl.band_hi), ctrl.band_resting)
+                 for did, ctrl in items}
         if not changed:
             for did, (room, room_want) in rooms.items():
                 gap = abs(room - self._rooms.get(did, 0.0))
@@ -1619,11 +2200,18 @@ class Fader:
                 if gap >= HAZE_STEP or (gap > 0 and haze == haze_want):
                     changed = True
                     break
+        if not changed:
+            for did, ((band, lo, hi), resting) in bands.items():
+                gap = band_moved(self._bands.get(did, (0.0, 0.0, 0.0)), (band, lo, hi))
+                if gap >= BAND_STEP or (gap > 0 and resting):
+                    changed = True
+                    break
         if changed:
             (apply or self.apply)(shown)
             self._applied = shown
             self._rooms = {did: room for did, (room, _want) in rooms.items()}
             self._hazes = {did: haze for did, (haze, _want) in hazes.items()}
+            self._bands = {did: shape for did, (shape, _resting) in bands.items()}
         return changed
 
     def _run(self, stop: threading.Event,
@@ -1631,6 +2219,7 @@ class Fader:
         last = due = time.perf_counter()
         idle = False
         self._applied, self._since, self._rooms, self._hazes = {}, {}, {}, {}
+        self._bands = {}
         while not stop.is_set():
             now = time.perf_counter()
             dt, last = min(now - last, 0.25), now

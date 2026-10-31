@@ -38,6 +38,9 @@ LIMITS: dict[str, tuple[float, float]] = {
     "white_cap": (0.5, 1.0),
     "highlight_room": (0.0, 100.0),
     "haze_cut": (0.0, 100.0),
+    "haze_band": (0.0, 100.0),
+    "haze_band_lo": (0.0, 1.0),
+    "haze_band_hi": (0.0, 1.0),
     "red": (0.5, 1.5),
     "green": (0.5, 1.5),
     "blue": (0.5, 1.5),
@@ -86,6 +89,9 @@ class Settings:
     white_cap: float = 1.0         # maximum output, tames flashes/glare
     highlight_room: float = 0.0    # 0..100, keeps bright areas (a window from a dark room) apart
     haze_cut: float = 0.0          # 0..100, takes a hazy veil off (auto levels' "Cut through haze")
+    haze_band: float = 0.0         # 0..100, more contrast in a band of hazy tones (0 = off)...
+    haze_band_lo: float = 0.0      # ...the band's input levels (0..1; off unless hi > lo)
+    haze_band_hi: float = 0.0
     red: float = 1.0               # per-channel gain (tint)
     green: float = 1.0
     blue: float = 1.0
@@ -283,6 +289,53 @@ def _cut_haze(y: float, floor: float) -> float:
     return y * y / (4.0 * floor) / (1.0 - floor)
 
 
+# Cut through haze, the band (haze_band): light haze (a snowfall veil, misty
+# distance) squeezes much of the view into a narrow band of mid or bright
+# tones.  The curve gets steeper across that band (between the input levels
+# haze_band_lo and haze_band_hi, worked out as displayed today) and gives the
+# room back above it, toward white (the sky, which the Outside detail
+# ceiling already keeps apart): a smooth bump added to the tone, zero at and
+# below the band's bottom and at white, never below zero.  So nothing ever
+# gets darker (shadows and anything below the band are exactly as today),
+# white stays white, and the slope never drops below 1 - HAZE_BAND_ROOM.
+HAZE_BAND_GAIN = 1.2         # extra slope in the band's middle at 100 (none at its edges: smooth)
+HAZE_BAND_ROOM = 0.85        # at most this share of the slope above the band is given up
+
+
+def haze_band_shape(s: Settings) -> tuple | None:
+    """(bottom, top, gain) of the band stage in displayed tones (after the
+    clamp), or None when it is off."""
+    amount, lo, hi = s.haze_band, s.haze_band_lo, s.haze_band_hi
+    if amount <= 0 or hi <= lo:
+        return None
+    plain = Settings(**{**{name: getattr(s, name) for name in _SETTINGS_FIELDS},
+                        "haze_band": 0.0, "haze_cut": 0.0, "black_floor": 0.0})
+    bottom, top = tone_curve(lo, plain), tone_curve(hi, plain)
+    width = top - bottom
+    if width <= 1e-3 or top >= 1.0 - 1e-3:
+        return None
+    gain = min(HAZE_BAND_GAIN * min(amount, 100.0) / 100.0,
+               HAZE_BAND_ROOM * (1.0 - top) / width)
+    return (bottom, top, gain) if gain > 0 else None
+
+
+def _band_haze(y: float, bottom: float, top: float, gain: float) -> float:
+    """y (0..1) with the band stage (see haze_band_shape): y itself at and
+    below ``bottom``, never below y, rising, 1 at 1."""
+    if y <= bottom:
+        return y
+    width = top - bottom
+    if y <= top:
+        t = (y - bottom) / width
+        return y + gain * width * (t / 2.0 - math.sin(_TAU * t) / (2.0 * _TAU))
+    u = (y - top) / (1.0 - top)
+    y = y + gain * width / 2.0 * (1.0 - u + math.sin(_TAU * u) / _TAU)
+    return 1.0 if y > 1.0 else y
+
+
+_TAU = 2.0 * math.pi
+
+
 def tone_curve(x: float, s: Settings) -> float:
     """Brightness transfer function shared by all three channels.
 
@@ -295,6 +348,9 @@ def tone_curve(x: float, s: Settings) -> float:
         y = _under_ceiling(y, 1.0 - slope * (1.0 - x),
                            HIGHLIGHT_SOFT * min(1.0, (1.0 - x) / HIGHLIGHT_SOFT_TOP))
     y = _clamp01(y)
+    band = haze_band_shape(s)
+    if band is not None:
+        y = _band_haze(y, *band)
     haze = haze_floor(s.haze_cut)
     if haze > 0:
         y = _cut_haze(y, haze)
@@ -348,6 +404,17 @@ def _tone_table(s: Settings) -> list[float]:
     same order, as tone_curve and exposure_curve, so the results are
     bit-for-bit the same (the tests compare them over thousands of looks).
     """
+    band = haze_band_shape(s)
+    if band is not None:
+        # The haze band (and the black point, if any): the table without
+        # them and without the black floor, then those as tone_curve does.
+        floor, haze = s.black_floor, haze_floor(s.haze_cut)
+        rest, cut, bump = 1.0 - floor, _cut_haze, _band_haze
+        plain = Settings(**{**{name: getattr(s, name) for name in _SETTINGS_FIELDS},
+                            "haze_band": 0.0, "haze_cut": 0.0, "black_floor": 0.0})
+        if haze > 0:
+            return [floor + rest * cut(bump(y, *band), haze) for y in _tone_table(plain)]
+        return [floor + rest * bump(y, *band) for y in _tone_table(plain)]
     haze = haze_floor(s.haze_cut)
     if haze > 0:
         # Cut through haze: the table without it and without the black floor

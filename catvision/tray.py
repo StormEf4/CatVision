@@ -65,6 +65,9 @@ class Tray:
             return lambda _icon, _item: act(action)
 
         def presets():
+            # Auto mode (beta) is picked like a preset (picking a preset leaves it).
+            yield ps.MenuItem("Auto (beta)", do("auto_mode"), radio=True,
+                              checked=lambda _i: st().auto_levels)
             for name in list(st().presets):
                 yield ps.MenuItem(name, do("preset:" + name), radio=True,
                                   checked=lambda _i, n=name: n == st().preset)
@@ -86,7 +89,7 @@ class Tray:
         return ps.Menu(
             ps.MenuItem("Show CatVision", do("show_window"), default=True),
             ps.MenuItem("CatVision on", do("toggle"), checked=lambda _i: st().enabled),
-            ps.MenuItem("Auto levels (beta)", do("auto_levels"),
+            ps.MenuItem("Auto mode (beta)", do("auto_levels"),
                         checked=lambda _i: st().auto_levels),
             ps.MenuItem("Auto levels: keep this look (beta)", do("auto_keep"),
                         enabled=lambda _i: st().auto_levels and st().enabled),
