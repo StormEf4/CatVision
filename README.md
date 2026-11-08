@@ -414,8 +414,6 @@ With CatVision on, that is all: everything is automatic.
   mode; untick it if you notice that, to always use the GDI copy.
 - **Cut through haze (beta)** (on by default): untick it to leave hazy
   scenes as the game shows them (see above).
-- **Normal display in menus (beta)** (on by default): see *Normal display in
-  menus (beta)* below.
 - Each ticked display is adjusted on its own, and the Home tab shows what it
   is doing (for example *Display 1: 3% bright · Shadow boost 0 → 88*, or
   *toning down (brightness 90%)* in a very bright scene).
@@ -438,14 +436,6 @@ desktop picture Windows composed for a display: DXGI Desktop Duplication (the
 route recording and streaming apps such as OBS use; with *Faster screen
 capture*, where it works) or a GDI copy of the screen (StretchBlt, the classic
 screenshot route; otherwise). Neither opens, reads or changes the game.
-With *Normal display in menus* ticked, the same tiny copy is also used for
-one more thing, and only this: recognising that the **whole screen** is one
-of the game's own menu or inventory screens, from coarse statistics (how
-many of 8 strips across the picture have a sharp brightness step on its top
-and bottom rows, how flat 48 large blocks are and the picture's average
-colour), only to switch
-CatVision's own adjustment off there. It never looks for, locates,
-marks or points out players, enemies or items.
 
 **Things to know:**
 
@@ -471,43 +461,6 @@ marks or points out players, enemies or items.
 - While nothing is changing it rests and uses almost no processor time.
 - It's off by default, and it stops watching whenever CatVision or auto
   levels is turned off.
-
-### Normal display in menus (beta)
-
-In a game's menus and inventory, a strong boost, extra contrast or the Night
-Vision tint makes the menus look wrong. With **Normal display in menus
-(beta)** ticked (on by default, on the Home tab under auto levels), when the
-game shows one of its own menu or inventory screens the display glides back
-to normal in about a fifth of a second, exactly as if CatVision were off (the
-display's own brightness table, and no color filter), and glides back to
-your full look when you go back to playing. The Home tab says *menu: normal
-display* while it is.
-
-- It works whether auto levels is on or off, as long as CatVision is on.
-  Only displays a full-screen game fills count (never the desktop or another
-  program on a second display). With auto levels off it watches only those,
-  with the same tiny copy (a few milliseconds, five to ten times a second).
-- It recognises a menu from coarse brightness only, and needs two separate
-  signs at once: Arc Raiders' menus end in a full-width line of small hints
-  just above the bottom edge with nothing below it and nothing just above
-  it, and also have a menu bar along the top or a dark navy or plain
-  background. Gameplay keeps its HUD in the corners, stacked several rows
-  tall, and a narrow compass at the top. Tuned on about 350 real
-  screenshots: it recognised 53 of 66 menu, inventory and lobby screens and
-  none of 283 gameplay pictures (night raids, lightning storms, fog, snow,
-  day, photo mode). A menu it misses simply keeps your look.
-- If it can't see the picture for about a second while in a menu, your full
-  look comes back: when in doubt, it never stays normal during play.
-- A menu must look like a menu for about a third of a second (several
-  pictures in a row) before the display changes, and gameplay must look like
-  gameplay for about a fifth of a second before your look comes back, so a
-  single odd picture never switches it.
-- Auto levels doesn't learn from menu pictures, so the look it had in the
-  raid comes back as it was. A black loading screen is not a menu: auto
-  levels' black-screen hold applies as before. Peek does nothing in a menu.
-- It's a beta: other games' menus may not be recognised (nothing changes
-  then), and a game scene that looks very much like a menu could briefly
-  show normally. Untick it if that bothers you.
 
 ## Presets
 

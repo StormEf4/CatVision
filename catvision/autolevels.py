@@ -352,11 +352,6 @@ class Measurement:
     # levels 0-1, see BAND_SHARE; 0, 0 if not known).
     band_lo: float = 0.0
     band_hi: float = 0.0
-    # "Normal display in menus" (beta): how much the whole picture looks like
-    # one of the game's own menu or inventory screens (see menu_score;
-    # MENU_SCORE and up).  Only coarse brightness: where the picture has
-    # sharp steps row by row and how flat it is; nothing is looked for in it.
-    menu: float = 0.0
 
 
 def _band(bgra: bytes, lum: list[int], width: int, height: int) -> tuple[float, float]:
@@ -586,14 +581,13 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     lum = [(54 * r + 183 * g + 19 * b) >> 8
            for b, g, r in zip(bgra[0::4], bgra[1::4], bgra[2::4])]
     regions: tuple = ()
-    veiled = band_lo = band_hi = menu = 0.0
+    veiled = band_lo = band_hi = 0.0
     if width and n % width == 0:
         weights = _center_weights(width, n // width)
         if width >= REGION_COLS and n // width >= REGION_ROWS:
             regions = _regions(lum, width, n // width)
             veiled = _veiled(lum, width, n // width)
             band_lo, band_hi = _band(bgra, lum, width, n // width)
-            menu = menu_score(lum, width, n // width, bgra)
     else:
         weights = [1.0] * n
     total = sum(weights)
@@ -615,156 +609,7 @@ def measure(bgra: bytes, width: int | None = None) -> Measurement:
     signature = (hash(bgra) or 1) if width else 0
     return Measurement(key, average, shadows, dark, bright, max(lum) == 0, signature, regions,
                        highs=highs, lows=low_level / 255, spread=(p95 - p5) / 255,
-                       veiled=veiled, band_lo=band_lo, band_hi=band_hi, menu=menu)
-
-
-# "Normal display in menus" (beta).  The game's menu and inventory screens
-# end in a full-width line of small hints just above the bottom edge (keys to
-# press) with nothing below it and, where the hints are, nothing just above
-# it either; many have a full-width menu bar along the top, and the in-raid
-# inventory sits on a dark navy background, often flat.  Gameplay keeps its
-# HUD in the bottom corners (bars and text stacked several rows tall) and a
-# narrow compass at the top centre, and a busy scene reaches right down to
-# the last row.  Only how many of the picture's MENU_SEGMENTS columns have a
-# sharp step on a row, how flat coarse blocks are and the picture's average
-# colour are measured: nothing in the picture is looked for.
-# Tuned on about 350 real menu and gameplay screenshots at the 96x54
-# thumbnail size; a picture needs the hint line AND a second, independent
-# cue (menu bar, dark flat or dark navy background), so a missed menu is
-# preferred to a gameplay picture ever counting.
-MENU_EDGE = 40                  # neighbouring pixels this different (0-255) = a sharp step
-MENU_SEGMENTS = 8               # the rows are split into this many columns
-MENU_LINE = 5                   # a hint line this strong (see menu_score)...
-MENU_QUIET = 3                  # ...with this many of its columns clear above and below...
-MENU_SCORE = 6.0                # ...and a score this high (see menu_score) = a menu
-MENU_BAR = 2                    # a menu bar counts beyond this (see menu_score)
-MENU_DARK_FLAT = 2.0            # what a dark, flat picture adds to the score
-MENU_NAVY = 1.0                 # what a dark navy picture adds (if not flat)
-MENU_NAVY_TINT = 3.0            # (navy: average blue above average red by this, 0-255)
-MENU_FLAT = 0.25                # this share of flat blocks (a menu's plain background)...
-MENU_FLAT_STD = 6.0             # (a block flat: brightness spread under this, 0-255)
-MENU_DARK = 60                  # ...on a dark picture (average under this, 0-255)
-MENU_ON_S = 0.3                 # a menu looks like one this long (MENU_ON_COUNT pictures)...
-MENU_ON_COUNT = 3
-MENU_OFF_S = 0.2                # ...and gameplay like gameplay this long before switching back
-MENU_OFF_COUNT = 2
-MENU_FADE_S = 0.2               # the display glides to normal and back in this long
-MENU_LOST_S = 1.0               # no picture this long in a menu: back to the full look
-
-
-def _row_steps(lum: list[int], width: int, y: int) -> set[int]:
-    """Which of the MENU_SEGMENTS columns have a sharp step on row y."""
-    row = lum[y * width:(y + 1) * width]
-    seg = max(1, width // MENU_SEGMENTS)
-    return {x // seg for x in range(width - 1) if abs(row[x + 1] - row[x]) > MENU_EDGE}
-
-
-def _menu_lines(lum: list[int], width: int, height: int) -> tuple[int, int, int]:
-    """(bottom line, quiet columns, top bar) of a picture, see menu_score."""
-    if width < MENU_SEGMENTS * 2 or height < 8:
-        return 0, 0, 0
-    top0, top1, top2, above1, above2, hint1, hint2, last = (
-        _row_steps(lum, width, y) for y in (0, 1, 2, height - 6, height - 5,
-                                             height - 3, height - 2, height - 1))
-    bottom = len(hint1) + len(hint2) - 2 * len(last)
-    quiet = len((hint1 | hint2) - last - above1 - above2)
-    return bottom, quiet, len(top1) - max(len(top0), len(top2))
-
-
-def _tint(bgra: bytes | None) -> float:
-    """Average blue less average red of a BGRA picture (0 without one)."""
-    n = len(bgra) // 4 if bgra else 0
-    return (sum(bgra[0::4]) - sum(bgra[2::4])) / n if n else 0.0
-
-
-def menu_parts(lum: list[int], width: int, height: int,
-               bgra: bytes | None = None) -> tuple[int, int, int, float, float, float]:
-    """(bottom line, quiet columns, top bar, flat share, average brightness,
-    blue tint) of a picture, see menu_score."""
-    bottom, quiet, top = _menu_lines(lum, width, height)
-    if width < MENU_SEGMENTS * 2 or height < 8:
-        return bottom, quiet, top, 0.0, 0.0, 0.0
-    return (bottom, quiet, top, _flat_share(lum, width, height), sum(lum) / len(lum),
-            _tint(bgra))
-
-
-def _flat_share(lum: list[int], width: int, height: int) -> float:
-    """Share of an 8 x 6 grid of blocks whose brightness hardly varies."""
-    bw, bh = width // 8, height // 6
-    flat = 0
-    for by in range(6):
-        for bx in range(8):
-            vals = [lum[(by * bh + y) * width + bx * bw + x] for y in range(bh) for x in range(bw)]
-            mean = sum(vals) / len(vals)
-            if sum((v - mean) ** 2 for v in vals) / len(vals) < MENU_FLAT_STD ** 2:
-                flat += 1
-    return flat / 48
-
-
-def menu_score(lum: list[int], width: int, height: int, bgra: bytes | None = None) -> float:
-    """How much a picture looks like one of the game's own menu screens.
-
-    The bottom hint line: columns with a sharp step on the third and on the
-    second row from the bottom, less twice those on the last row (small text
-    is two rows tall here, and a busy scene reaches the last row too).  It
-    must be at least MENU_LINE, and at least MENU_QUIET of its columns must
-    have no step on the last row nor on the two rows just above the hints
-    (the HUD's bars and text in gameplay are stacked several rows tall).
-    Then a second, independent cue is needed: how far a thin line along the
-    top beats the rows beside it beyond MENU_BAR (a menu bar), or
-    MENU_DARK_FLAT for a dark, flat picture, or else MENU_NAVY for a dark
-    navy one (the inventory).  Score = hint line + second cue, 0 without
-    both.  MENU_SCORE and up = a menu."""
-    bottom, quiet, top = _menu_lines(lum, width, height)
-    if bottom < MENU_LINE or quiet < MENU_QUIET:
-        return 0.0     # (most pictures: the rest isn't worked out)
-    second = float(max(0, top - MENU_BAR))
-    if sum(lum) / len(lum) < MENU_DARK:
-        if _flat_share(lum, width, height) >= MENU_FLAT:
-            second += MENU_DARK_FLAT
-        elif _tint(bgra) >= MENU_NAVY_TINT:
-            second += MENU_NAVY
-    return float(bottom) + second if second > 0 else 0.0
-
-
-class MenuWatch:
-    """Whether the game is showing one of its menus, from the pictures'
-    menu scores, with a delay each way so a single picture never switches:
-    a menu must look like one for MENU_ON_S (and MENU_ON_COUNT pictures),
-    gameplay like gameplay for MENU_OFF_S (and MENU_OFF_COUNT).  A black
-    picture (loading) counts as gameplay: auto levels' black hold keeps the
-    look there.  A missing picture changes nothing for a moment, but no
-    picture for MENU_LOST_S (the capture failing, say as a raid starts in
-    exclusive full screen) ends menu mode: when in doubt, the full look."""
-
-    def __init__(self):
-        self.active = False
-        self.looks = False      # the newest picture looks like a menu
-        self._since: float | None = None
-        self._count = 0
-        self._seen: float | None = None   # when the last picture came
-
-    def reset(self) -> None:
-        self.active, self.looks, self._since, self._count = False, False, None, 0
-        self._seen: float | None = None
-
-    def update(self, m: Measurement | None, now: float) -> bool:
-        if m is None:
-            if self.active and self._seen is not None and now - self._seen >= MENU_LOST_S:
-                self.reset()   # can't see the game any more: back to the full look
-            return self.active
-        self._seen = now
-        looks = self.looks = not m.black and m.menu >= MENU_SCORE
-        if looks == self.active:
-            self._since, self._count = None, 0
-            return self.active
-        if self._since is None:
-            self._since = now
-        self._count += 1
-        wait, count = (MENU_ON_S, MENU_ON_COUNT) if looks else (MENU_OFF_S, MENU_OFF_COUNT)
-        if self._count >= count and now - self._since >= wait - 1e-9:
-            self.active, self._since, self._count = looks, None, 0
-        return self.active
+                       veiled=veiled, band_lo=band_lo, band_hi=band_hi)
 
 
 def _levels(hist: list[float], total: float, shares: tuple) -> list[int]:

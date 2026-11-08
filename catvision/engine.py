@@ -72,19 +72,16 @@ class Status:
         return " ".join(parts)
 
 
-def menu_ramp(ramp: list, original: list, amount: float) -> list:
-    """Normal display in menus: ``ramp`` glided ``amount`` (0-1) of the way
-    to the display's own brightness table (1 = exactly that table)."""
+def glide_ramp(ramp: list, other: list, amount: float) -> list:
+    """A brightness table glided ``amount`` (0-1) of the way to ``other``
+    (1 = exactly that table).  Still rising: both tables rise."""
+    if amount <= 0.0:
+        return ramp
     if amount >= 1.0:
-        return [list(ch) for ch in original]
+        return [list(ch) for ch in other]
     keep = 1.0 - amount
     return [[int(round(o + (v - o) * keep)) for v, o in zip(ch, och)]
-            for ch, och in zip(ramp, original)]
-
-
-def menu_matrix(matrix: list, amount: float) -> list:
-    """The color filter glided ``amount`` (0-1) of the way to none."""
-    return glide_matrix(matrix, curves.IDENTITY3, amount)
+            for ch, och in zip(ramp, other)]
 
 
 def glide_matrix(matrix: list, other: list, amount: float) -> list:
@@ -122,14 +119,6 @@ class Engine:
         # Bumped when a peek is cut short (CatVision off, quit), so a late
         # step from that peek can't put the lift back.
         self.peek_generation = 0
-        # "Normal display in menus" (beta): how far every chosen display has
-        # glided back to normal (0 = the full look, 1 = exactly as if
-        # CatVision were off: the displays' own brightness tables and no
-        # color filter) while the game shows one of its menus.
-        self.menu_amount = 0.0
-        # Bumped when CatVision goes off or quits, so a late step from a
-        # menu fade can't leave a display half-normal afterwards.
-        self.menu_generation = 0
         # Auto mode on or off: what every chosen display showed just before
         # (its brightness table, and the color filter), and how much of that
         # still shows (1 = exactly that, 0 = only the new look), so the
@@ -233,7 +222,6 @@ class Engine:
     def _apply(self) -> Status:
         if not self.enabled:
             self._end_peek()   # a peek never outlives CatVision being on
-            self._end_menu()   # ...nor does a menu's normal display
             self._end_switch()   # ...nor a switch's glide
             self._restore_gamma()
             self.color.reset()
@@ -248,7 +236,7 @@ class Engine:
         self._gamma_state.clear()
         self._apply_gamma(self._targets(), tint, status)
 
-        matrix = menu_matrix(self._switch_glide(matrix), self.menu_amount)
+        matrix = self._switch_glide(matrix)
         if curves.is_identity_matrix(matrix):
             self.color.reset()
         elif per_display and not self.color_all_displays:
@@ -314,31 +302,9 @@ class Engine:
                 return
             self._redo_fading(self._targets() if changed else [])
 
-    def set_menu_amount(self, amount: float, generation: int | None = None) -> None:
-        """Normal display in menus (beta): glide every chosen display toward
-        normal (1 = as if CatVision were off) or back (0 = exactly what
-        showed before).  Takes the same quick path as auto levels updates,
-        and moves the color filter along with it."""
-        with self._lock:
-            if generation is not None and generation != self.menu_generation:
-                return   # from a menu fade that was cut short
-            try:
-                amount = min(1.0, max(0.0, float(amount)))
-            except (TypeError, ValueError):
-                amount = 0.0
-            if not math.isfinite(amount):
-                amount = 0.0
-            changed = amount != self.menu_amount
-            self.menu_amount = amount
-            if not self.enabled:
-                return
-            self._redo_fading(self._targets() if changed else [])
-            if changed:
-                self._fade_color()
-
     def begin_switch(self) -> int:
         """Auto mode is about to go on or off: keep what every chosen display
-        shows now (the look, before any menu fade), shown in full until
+        shows now, shown in full until
         set_switch_amount glides it over to the new look.  Returns this
         switch's generation (for set_switch_amount)."""
         with self._lock:
@@ -392,18 +358,17 @@ class Engine:
 
     def _look_ramp(self, m, tint) -> list:
         """A display's brightness table for the look (with what showed
-        before a switch still showing), before any menu fade."""
+        before a switch still showing)."""
         ramp = curves.build_ramp(self.settings_for(m.id), tint)
         before = self.switch_from.get(m.id) if self.switch_amount else None
         if before is not None:
-            # (The same glide as a menu's: toward the old table.)
-            ramp = menu_ramp(ramp, before, self.switch_amount)
+            ramp = glide_ramp(ramp, before, self.switch_amount)
         return ramp
 
     def _fade_color(self) -> None:
-        """Move the color filter (if the look, or the one before a switch,
-        has one that shows) along with a menu or switch fade, as _apply
-        would show it."""
+        """Move the color filter (if the look, or the one before the switch,
+        has one that shows) along with a switch's glide, as _apply would
+        show it."""
         per_display = not self.all_displays_selected()
         _tint, matrix = curves.plan_color(self.settings, self.custom_filters, self.custom_tints,
                                           all_displays=not per_display)
@@ -414,7 +379,7 @@ class Engine:
                 and (before is None or curves.is_identity_matrix(before))
                 or not self.color.available or per_display and not self.color_all_displays):
             return
-        matrix = menu_matrix(self._switch_glide(matrix), self.menu_amount)
+        matrix = self._switch_glide(matrix)
         if curves.is_identity_matrix(matrix):
             self.color.reset()
             self.status.color_used = False
@@ -422,10 +387,6 @@ class Engine:
             # (The status as _apply would give it: the notices follow it.)
             self.status.color_ok = self.color.apply(curves.to_mag_color_effect(matrix))
             self.status.color_used, self.status.color_all_displays = True, per_display
-
-    def _end_menu(self) -> None:
-        self.menu_generation += 1
-        self.menu_amount = 0.0
 
     def end_peek(self) -> None:
         """Stop any peek at once and ignore its late steps."""
@@ -515,23 +476,17 @@ class Engine:
         if not fading:
             self._fallback.clear()   # a full apply starts from the full ramp again
         ramps: dict[tuple, list] = {}  # displays with the same adjustment share a ramp
-        menu = self.menu_amount
         for m in monitors:
             switching = bool(self.switch_amount and m.id in self.switch_from)
             lifted = bool(any(self.auto_offsets.get(m.id, {}).values()) or self.peek_amount
-                          or menu or switching)
+                          or switching)
             adjusted = fading and lifted
             which = (tuple(sorted(self.auto_offsets.get(m.id, {}).items())), self.peek_amount,
-                     menu, self.switch_amount if switching else 0.0,
-                     m.id if menu or switching else None)   # (toward each display's own table)
+                     self.switch_amount if switching else 0.0,
+                     m.id if switching else None)   # (toward each display's own old table)
             ramp = ramps.get(which)
             if ramp is None:
-                # (A Peek held as a menu opens fades out with the rest, so
-                # nothing jumps; in the menu itself the display is normal.)
-                ramp = self._look_ramp(m, tint)
-                if menu:
-                    ramp = menu_ramp(ramp, m.original or curves.identity_ramp(), menu)
-                ramps[which] = ramp
+                ramp = ramps[which] = self._look_ramp(m, tint)
             if adjusted:
                 result: GammaResult = apply_ramp_with_fallback(
                     self.gamma, m.id, ramp, self._fallback, search=m.id in search)
@@ -664,7 +619,6 @@ class Engine:
         with self._lock:
             self.enabled = False
             self._end_peek()
-            self._end_menu()
             self._end_switch()
             self._restore_gamma()
             self.color.close()
@@ -686,7 +640,6 @@ class Engine:
                 self.enabled = False
                 self.auto_generation += 1
                 self._end_peek()
-                self._end_menu()
                 self._end_switch()
                 self._restore_gamma()
             finally:
@@ -695,7 +648,6 @@ class Engine:
             self.enabled = False
             self.auto_generation += 1
             self._end_peek()
-            self._end_menu()
             self._end_switch()
             refused = [m for m in self._monitors
                        if not self.gamma.set_ramp(m.id, m.original or curves.identity_ramp())]

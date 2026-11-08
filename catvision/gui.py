@@ -86,16 +86,11 @@ AUTO_OWN_HOLD_S = 30.0
 AUTO_KEEP_RECENT_S = 15.0
 AUTO_LAYOUT_S = 2.0   # re-read where the displays are (and their refresh rates) this often
 AUTO_REDRAW_S = 0.1   # while easing back or stalled, redraw the readout at most this often
-# Normal display in menus (beta): look for the game's menus this often, and
-# step a fade to or from normal this often (the fade takes
-# autolevels.MENU_FADE_S, eased in and out, so it never steps visibly).
-MENU_TICK_MS = 50   # (pictures come every 0.1-0.2 s; a menu must last MENU_ON_S anyway)
-MENU_FADE_TICK_MS = 8
-MENU_STEP_MAX_S = 0.034   # one fade step covers at most this much time
-MENU_FRONT_S = 0.25   # re-check which displays a full-screen game fills this often
 # Auto mode on or off: the displays glide from the old look to the new one in
-# this long (eased in and out like a menu's fade, stepped as often).
+# MODE_FADE_S, eased in and out (see mode_ease), stepped this often.
 MODE_FADE_S = 0.4
+MODE_FADE_TICK_MS = 8
+MODE_STEP_MAX_S = 0.034   # one fade step covers at most this much time
 
 
 def auto_number(value, lo: float, hi: float, default):
@@ -124,9 +119,9 @@ def auto_tick_plan(now: float, fresh: bool, last_front: float,
     return recheck, stale
 
 
-def menu_ease(t: float) -> float:
-    """Normal display in menus: how far a fade that has got ``t`` (0-1) of
-    the way shows (eased in and out, so it starts and stops gently)."""
+def mode_ease(t: float) -> float:
+    """Auto mode on or off: how far a glide that has got ``t`` (0-1) of the
+    way shows (eased in and out, so it starts and stops gently)."""
     t = min(1.0, max(0.0, t))
     return t * t * (3.0 - 2.0 * t)
 
@@ -306,19 +301,6 @@ class CatVisionApp:
         self._auto_own_since: float | None = None   # CatVision's own window came to the front
         self._auto_holding = False   # ...so the game's look is held (see AUTO_OWN_HOLD_S)
         self._auto_last_look = None   # (time, key, offset, game) of the last live game picture
-        # Normal display in menus (beta): per display, whether the game shows
-        # one of its menus (see autolevels.MenuWatch), and the fade to normal.
-        self._menu_watches: dict[str, autolevels.MenuWatch] = {}
-        self._menu_on = False         # a menu is showing: the display glides to normal
-        self._menu_progress = 0.0     # how far the fade has got (0 = full look, 1 = normal)
-        self._menu_generation = -1    # the engine's menu generation this run's steps carry
-        self._menu_seq = -1
-        self._menu_job = None
-        self._menu_tick_at = 0.0
-        self._menu_front_at = -1.0
-        self._menu_seq_at = 0.0       # when the last new picture came (time.perf_counter())
-        self._menu_game: set[str] = set()   # displays a full-screen game fills
-        self._menu_back = False       # glided back from a menu (a refused step is retried)
         # Auto mode on or off: the glide from the old look to the new one.
         self._mode_job = None
         self._mode_progress = 0.0     # how far it has got (0 = the old look, 1 = the new)
@@ -565,7 +547,6 @@ class CatVisionApp:
             "auto_dim": tk.BooleanVar(value=o.auto_dim),
             "auto_fast_capture": tk.BooleanVar(value=o.auto_fast_capture),
             "auto_haze": tk.BooleanVar(value=o.auto_haze),
-            "menu_normal": tk.BooleanVar(value=o.menu_normal),
         }
         flags = (
             ("auto_game_only", "Only while a game fills the screen",
@@ -583,13 +564,6 @@ class CatVisionApp:
              "work (HDR or rotated displays, remote desktop, some older PCs) it uses the normal "
              "copy. Like recording apps, it can add a little input lag to some games in "
              "borderless mode: untick it if you notice that, to always use the normal copy."),
-            ("menu_normal", "Normal display in menus (beta)",
-             "Beta. When the game shows one of its own menus or the inventory, the display "
-             "glides back to normal (as if CatVision were off) and returns to your look when "
-             "you go back to playing. It recognises the whole screen as a menu from coarse "
-             "brightness only (a full-width line of hints along the bottom, a menu bar, a "
-             "plain background), never anything inside the game. Works with auto levels on "
-             "or off."),
             ("auto_haze", "Cut through haze (beta)",
              "Beta. When fog, smoke, dust, snow or rain wash out most of the view, it adds "
              "contrast: light haze gets more contrast in the band of washed-out tones (taken "
@@ -626,7 +600,6 @@ class CatVisionApp:
             ctrl.set_haze(o.auto_haze)   # unticked: take it off now, not at the next picture
         self._auto_fader.wake()
         self._schedule_save()
-        self._menu_sync()
         self._render_auto_info(self._auto_shown)
 
     def _on_auto_slider(self) -> None:
@@ -719,7 +692,7 @@ class CatVisionApp:
         self._mode_generation = self.engine.begin_switch()
         self._mode_progress, self._mode_tick_at = 0.0, time.perf_counter()
         if self._mode_job is None:
-            self._mode_job = self.root.after(MENU_FADE_TICK_MS, self._mode_fade)
+            self._mode_job = self.root.after(MODE_FADE_TICK_MS, self._mode_fade)
 
     def _mode_fade(self) -> None:
         """One step of the glide between the old look and the new one."""
@@ -727,15 +700,15 @@ class CatVisionApp:
         if self._closed or self._mode_generation != self.engine.switch_generation:
             return   # CatVision went off (or quit) since: nothing left to glide
         now = time.perf_counter()
-        # (At most MENU_STEP_MAX_S a step: a late timer slows the glide a
+        # (At most MODE_STEP_MAX_S a step: a late timer slows the glide a
         # little instead of jumping.)
-        dt = min(max(now - self._mode_tick_at, 0.0), MENU_STEP_MAX_S)
+        dt = min(max(now - self._mode_tick_at, 0.0), MODE_STEP_MAX_S)
         self._mode_tick_at = now
         self._mode_progress = min(1.0, self._mode_progress + dt / MODE_FADE_S)
-        self.engine.set_switch_amount(1.0 - menu_ease(self._mode_progress),
+        self.engine.set_switch_amount(1.0 - mode_ease(self._mode_progress),
                                       self._mode_generation)
         if self._mode_progress < 1.0:
-            self._mode_job = self.root.after(MENU_FADE_TICK_MS, self._mode_fade)
+            self._mode_job = self.root.after(MODE_FADE_TICK_MS, self._mode_fade)
         else:
             self._auto_check_gamma()   # (the glide may change what Windows holds back)
 
@@ -800,8 +773,7 @@ class CatVisionApp:
             if self._auto_job is None and not self._closed:
                 self._auto_job = self.root.after(AUTO_TICK_MS, self._auto_tick)
         else:
-            if not self._menu_active():   # (else it is still looking for menus)
-                self.auto_watch.stop()
+            self.auto_watch.stop()
             if self._auto_job is not None:
                 self.root.after_cancel(self._auto_job)
                 self._auto_job = None
@@ -824,137 +796,6 @@ class CatVisionApp:
             else:
                 self._auto_finish()
         self._render_auto_info(self._auto_shown)
-
-    # ------------------------------------------------ normal display in menus
-
-    def _menu_active(self) -> bool:
-        return (self.cfg.options.menu_normal is True and self.engine.enabled
-                and self.auto_watch.available and not self._closed)
-
-    def _menu_holds(self, did: str, m) -> bool:
-        """Auto levels mustn't learn from this display's picture ``m``: the
-        game shows a menu, or the picture looks like one (it may be on the
-        way into one)."""
-        if not self._menu_active() or did not in self._menu_game:
-            return False
-        w = self._menu_watches.get(did)
-        return (w is not None and w.active
-                or m is not None and not m.black and m.menu >= autolevels.MENU_SCORE)
-
-    def _menu_sync(self) -> None:
-        """Start or stop looking for menus to match the option and on/off."""
-        if self._menu_active():
-            if self._menu_job is None:
-                self._menu_tick_at = self._menu_seq_at = time.perf_counter()
-                self._menu_front_at = -1.0   # (which displays a game fills: at once)
-                self._menu_job = self.root.after(MENU_TICK_MS, self._menu_tick)
-            return
-        if self._menu_job is not None:
-            self.root.after_cancel(self._menu_job)
-            self._menu_job = None
-        was_on = self._menu_on
-        self._menu_watches.clear()
-        self._menu_on, self._menu_seq = False, -1
-        if self.engine.menu_amount and self.engine.enabled and not self._closed:
-            # The option was unticked in a menu: glide back to the full look.
-            self._menu_tick_at = time.perf_counter()
-            self._menu_job = self.root.after(MENU_FADE_TICK_MS, self._menu_fade_out)
-        else:
-            self._menu_progress = 0.0
-        if not self._auto_active() and self.auto_watch.running and not self._closed:
-            self.auto_watch.stop()   # it was only looking for menus
-        if was_on:
-            self._render_status()
-
-    def _menu_fade_out(self) -> None:
-        """The option was unticked mid-menu: finish gliding back."""
-        self._menu_job = None
-        if self._closed or not self.engine.enabled:
-            self._menu_progress = 0.0
-            return
-        if self._menu_active():
-            self._menu_sync()   # ticked again: the normal tick takes over
-            return
-        if self._menu_step(time.perf_counter(), want=0.0):
-            self._menu_job = self.root.after(MENU_FADE_TICK_MS, self._menu_fade_out)
-
-    def _menu_step(self, now: float, want: float) -> bool:
-        """Move the fade toward ``want`` (0 or 1); True while still moving."""
-        if self._menu_generation != self.engine.menu_generation:
-            # CatVision went off (or quit) since: the engine is back at the
-            # full look and ignores this run's old steps.
-            self._menu_generation = self.engine.menu_generation
-            self._menu_progress = 0.0
-        # (At most about two Windows timer steps at a time: the first step
-        # after a MENU_TICK_MS wait, or a late timer, slows the glide a
-        # little instead of jumping.)
-        dt = min(max(now - self._menu_tick_at, 0.0), MENU_STEP_MAX_S)
-        self._menu_tick_at = now
-        if self._menu_progress == want and self.engine.menu_amount == menu_ease(want):
-            return False
-        step = dt / autolevels.MENU_FADE_S
-        if want > self._menu_progress:
-            self._menu_progress = min(want, self._menu_progress + step)
-        else:
-            self._menu_progress = max(want, self._menu_progress - step)
-        self.engine.set_menu_amount(menu_ease(self._menu_progress), self._menu_generation)
-        return self._menu_progress != want
-
-    def _menu_tick(self) -> None:
-        """Look at the newest pictures for the game's menus and glide the
-        displays to normal and back."""
-        self._menu_job = None
-        if not self._menu_active():
-            self._menu_sync()
-            return
-        now = time.perf_counter()   # (fine-grained on Windows, unlike monotonic)
-        if now - self._menu_front_at >= MENU_FRONT_S or self._menu_front_at > now:
-            # Only a display a full-screen game fills counts (never the
-            # desktop, a video or another program on a second display, even
-            # when auto levels watches those too).
-            self._menu_front_at = now
-            rects = {m.id: m.rect for m in self.engine.target_monitors() if m.rect}
-            in_front, title = autolevels.window_in_front(rects)
-            self._menu_game = (set() if title == autolevels.OWN_WINDOW else
-                               set(rects) if in_front is None else set(rects) & in_front)
-            if not self._auto_active():
-                # Auto levels is off: capture only those displays, for menus alone.
-                self.auto_watch.watch({d: rects[d] for d in self._menu_game})
-        elif not self._auto_active() and not self.auto_watch.running:
-            self._menu_front_at = -1.0   # (re-checked on the next tick)
-        seq, latest = self.auto_watch.latest()
-        if seq != self._menu_seq:
-            self._menu_seq, self._menu_seq_at = seq, now
-            for did in list(self._menu_watches):
-                if did not in latest or did not in self._menu_game:
-                    del self._menu_watches[did]
-            for did, m in latest.items():
-                if did in self._menu_game:
-                    at = m.at if m is not None and m.at else now
-                    self._menu_watches.setdefault(did, autolevels.MenuWatch()).update(m, at)
-        elif now - self._menu_seq_at >= autolevels.MENU_LOST_S:
-            # No new picture at all for a while: when in doubt, the full look.
-            self._menu_watches.clear()
-        on = any(w.active for did, w in self._menu_watches.items() if did in self._menu_game)
-        if on != self._menu_on:
-            self._menu_on = on
-            self._render_status()
-            self._render_auto_info(self._auto_shown)
-        moving = self._menu_step(now, 1.0 if on else 0.0)
-        if moving and not on:
-            self._menu_back = True   # gliding back to the full look
-        if not self.engine.retry_pending():
-            self._menu_back = False
-        elif not moving and (self.engine.menu_amount
-                             or self._menu_back and not self._auto_active()):
-            # Windows refused a step and the glide has stopped (in the menu,
-            # or on the way back with auto levels off, which would otherwise
-            # leave the display part way): the engine offers the look again
-            # when due (see engine._RETRY_S).
-            self.engine.set_menu_amount(self.engine.menu_amount, self._menu_generation)
-        if self._menu_active() and self._menu_job is None:
-            self._menu_job = self.root.after(MENU_FADE_TICK_MS if moving else MENU_TICK_MS,
-                                             self._menu_tick)
 
     def _auto_wind_down(self) -> None:
         if not self._auto_winding_down or self._closed:
@@ -1047,14 +888,6 @@ class CatVisionApp:
             if did not in self._auto_watched:
                 ctrl.release()
                 shown[did] = ("waiting", None)
-            elif did in latest and not stale and self._menu_holds(did, latest[did]):
-                # One of the game's menus: shown normally (see _menu_tick).
-                # Like the own-window hold, it mustn't steer anything, so
-                # the game's look comes back as it was when the menu closes.
-                ctrl.hold(strength, aim, o.auto_dim)
-                w = self._menu_watches.get(did)
-                shown[did] = ("menu" if w is not None and w.active else "watching",
-                              latest[did])
             elif self._auto_holding and not (stale and did in latest):
                 # The picture shows CatVision's own window now, not the game:
                 # it mustn't steer anything, but changed settings still show.
@@ -1281,8 +1114,6 @@ class CatVisionApp:
                 back = "" if abs(now - base) < 0.5 else f"  \u00b7  easing back to {base:.0f}"
                 if state == "waiting":
                     lines.append(f"{name}: waiting for a full-screen game{back}")
-                elif state == "menu":
-                    lines.append(f"{name}: menu: normal display")
                 elif state == "stalled":
                     lines.append(f"{name}: can't see the picture right now{back}")
                 elif state == "starting":
@@ -1937,11 +1768,8 @@ class CatVisionApp:
             text = f"On for {names} - {self._mode_name()}."
         if on and self._auto_active():
             text += " Adjusting to the game."
-        if on and self._menu_on:
-            text += " In a menu: normal display."
         self.set_status(text)
         self._auto_sync()
-        self._menu_sync()
         self._update_strength_ui()
         self.refresh_notices()
         self._update_title()
@@ -2247,8 +2075,7 @@ class CatVisionApp:
     def _cancel_after_jobs(self) -> None:
         """Drop every pending Tk timer (auto levels tick, save, polling...)
         so nothing runs against the destroyed window."""
-        self._auto_job = self._save_job = self._apply_job = self._menu_job = None
-        self._mode_job = None
+        self._auto_job = self._save_job = self._apply_job = self._mode_job = None
         try:
             jobs = self.root.tk.splitlist(self.root.tk.call("after", "info"))
         except tk.TclError:
