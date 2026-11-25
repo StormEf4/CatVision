@@ -142,7 +142,7 @@ combination works, and so do mouse buttons: **Middle mouse**, **Mouse 4**
 | Panic: everything off | Everything back to normal |
 
 Want a ready-made set? **Use suggested keys** fills in Ctrl+Alt+V for on/off,
-Ctrl+Alt+1-8 for the eight presets, Ctrl+Alt+0 for panic and a few more. **Clear
+Ctrl+Alt+1-9 for the nine presets, Ctrl+Alt+0 for panic and a few more. **Clear
 all** removes them again. Everything is also in the tray menu.
 
 <img src="docs/hotkeys.png" width="300" align="right" alt="Hotkeys tab">
