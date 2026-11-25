@@ -1041,7 +1041,8 @@ class AutoLevelsSmoothnessTests(unittest.TestCase):
                     c.observe(m, 30, 0.12)
                 before = c.offset
                 c.advance(frame)
-                frames.append((c.offset - before, c.rush))
+                # (A lasting light's quicker fade keeps the normal steps.)
+                frames.append((c.offset - before, c.rush and not c._rush_light))
         return frames
 
     def test_normal_fades_move_less_than_a_point_per_update(self):

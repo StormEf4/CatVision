@@ -307,9 +307,14 @@ class FaderPerDisplayPaceTest(unittest.TestCase):
     def test_rates(self):
         fader = Fader({}, lambda pos: None)
         fader.set_rates({"a": 60, "b": 144, "c": 75, "d": 0, "e": 30})
-        self.assertAlmostEqual(fader.interval, 1 / autolevels.FADER_MAX_HZ)
-        self.assertEqual(fader.rates, {"a": 60, "b": 120, "c": 75,
+        self.assertAlmostEqual(fader.interval, 1 / 144)
+        self.assertEqual(fader.rates, {"a": 60, "b": 144, "c": 75,
                                        "d": autolevels.FADER_HZ, "e": autolevels.FADER_HZ})
+        # 240 on a 240 Hz screen, never more.
+        fader.set_rates({"a": 60, "b": 240, "c": 360})
+        self.assertAlmostEqual(fader.interval, 1 / autolevels.FADER_MAX_HZ)
+        self.assertEqual(autolevels.FADER_MAX_HZ, 240)
+        self.assertEqual(fader.rates, {"a": 60, "b": 240, "c": 240})
         fader.set_rates({})
         self.assertAlmostEqual(fader.interval, 1 / autolevels.FADER_HZ)
 
@@ -319,7 +324,7 @@ class FaderPerDisplayPaceTest(unittest.TestCase):
                 _f, ctrls, applied, _s = self._fade({"slow": 60, "fast": 144}, jitter=jitter,
                                                     endless=True)
                 self.assertAlmostEqual(self._updates(applied, "slow"), 60, delta=2)
-                self.assertEqual(self._updates(applied, "fast"), 120)
+                self.assertEqual(self._updates(applied, "fast"), 144)
                 # On a steady beat, every other step; with uneven steps only
                 # now and then two in a row.
                 pairs = [b["slow"] != a["slow"] for a, b in zip(applied, applied[1:])]
@@ -340,9 +345,10 @@ class FaderPerDisplayPaceTest(unittest.TestCase):
         ref_ctrls = {did: Controller(offset=0.0, want=40.0 - 10 * i, strength=30.0)
                      for i, did in enumerate(rates)}
         ref = Fader(ref_ctrls, lambda pos: None)
-        ref.set_rate(120)
+        hz = round(1 / fader.interval)
+        ref.set_rate(hz)
         for want in steps:
-            ref.tick(1 / 120)
+            ref.tick(1 / hz)
             self.assertEqual({d: c.offset for d, c in ref_ctrls.items()}, want)
         # Every display came to rest and got its exact final value.
         self.assertTrue(fader.settled())
@@ -395,13 +401,21 @@ class FaderPerDisplayPaceTest(unittest.TestCase):
         # As quick as on its own (the same number of updates, give or take
         # the one its first step lands on the faster beat).
         self.assertAlmostEqual(len(both["slow"]), len(alone), delta=1)
-        # The faster screen keeps its quicker fade.
+        # The faster screen keeps its own fade: as quick as a 120 Hz
+        # screen's, in steps half as big (see CEILING_STEP_HZ).
         fast = fade({"fast": 240})["fast"]
         self.assertEqual(both["fast"], fast)
-        self.assertGreater(max(b - a for a, b in zip(fast, fast[1:])), 1.0)
+        mid = fade({"mid": 120})["mid"]
+        self.assertGreater(max(b - a for a, b in zip(mid, mid[1:])), 1.0)
+        self.assertLessEqual(max(b - a for a, b in zip(fast, fast[1:])),
+                             autolevels.CEILING_STEP * autolevels.CEILING_STEP_HZ / 240 + 1e-9)
+        # (Updates a second: fewer than a step each at the slow end, see
+        # FADER_MIN_STEP, so a little under the time it takes.)
+        self.assertLessEqual(len(fast) / 240, len(mid) / 120 + 0.02)
+        self.assertGreater(len(fast) / 240, 0.8 * len(mid) / 120)
 
     def test_quickest_fade_steps_stay_small_at_in_between_rates(self):
-        """A 75 Hz screen next to a 144 Hz one (the fader at 120) is passed
+        """A 75 Hz screen next to a 144 Hz one (the fader at 144) is passed
         on every one or two steps: the cap counts the longer gap, so no
         update it shows moves more than CEILING_STEP (it was 1.67)."""
         for rate in (75, 90, 100):
@@ -414,8 +428,8 @@ class FaderPerDisplayPaceTest(unittest.TestCase):
                 applied = []
                 fader = Fader(ctrls, applied.append)
                 fader.set_rates({"a": rate, "b": 144})
-                for _ in range(240):
-                    fader.tick(1 / 120)
+                for _ in range(2 * 144):
+                    fader.tick(fader.interval)
                 self.assertTrue(fader.settled())
                 shown = [a["a"] for a in applied]
                 steps = [b - a for a, b in zip(shown, shown[1:])]

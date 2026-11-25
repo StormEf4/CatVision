@@ -398,7 +398,7 @@ _RAMP_XS = tuple(i / (RAMP_SIZE - 1) for i in range(RAMP_SIZE))
 def _tone_table(s: Settings) -> list[float]:
     """``[tone_curve(x, s) for x in _RAMP_XS]`` for clamped settings, fast.
 
-    Auto levels rebuilds the brightness table up to 120 times a second while
+    Auto levels rebuilds the brightness table up to 240 times a second while
     the game needs the CPU, so this works out every constant once instead of
     256 times.  Each value goes through exactly the same arithmetic, in the
     same order, as tone_curve and exposure_curve, so the results are

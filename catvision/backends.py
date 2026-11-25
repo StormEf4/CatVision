@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from . import curves
 
 IS_WINDOWS = sys.platform == "win32"
-# Fading updates (60-120 a second per display) keep each display's device
+# Fading updates (60-240 a second per display) keep each display's device
 # context open for this long instead of opening and closing one every time
 # (two Windows calls fewer per update, each a chance for another thread to
 # take Python from the fader).  A fresh one at least this often, so after a
@@ -288,7 +288,7 @@ def fill_ramp_buffer(buf, ramp: list[list[int]]) -> None:
 
     One slice copy per channel: ctypes stores each value exactly as an
     entry-by-entry copy would, in a quarter of the CPU time (auto levels
-    sets up to 120 ramps a second per display).
+    sets up to 240 ramps a second per display).
     """
     for c in range(3):
         buf[c][:] = ramp[c][:256]
@@ -298,7 +298,7 @@ _TIERS = (127, 120, 96)   # usual Windows limits (8-bit levels from a straight l
 # Fading updates: when the remembered strength stops working, weaker clamps
 # to try, strongest first, as fractions of where the search starts.
 _FADE_TARGETS = (0.8, 0.64, 0.5, 0.4, 0.3, 0.2, 0.12, 0.06, 0.03)
-# Fading updates (60-120 a second): forget a refusal after this many, so
+# Fading updates (60-240 a second): forget a refusal after this many, so
 # a brief burst of refusals (a fullscreen switch) can't weaken the look for good.
 _FORGET_AFTER = 60
 # The 16-bit value where each 8-bit level starts (256 * i), for ramp_deviation.

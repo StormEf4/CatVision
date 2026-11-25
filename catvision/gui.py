@@ -300,7 +300,7 @@ class CatVisionApp:
         self._auto_game_on: set[str] = set()   # the displays that game fills
         self._auto_own_since: float | None = None   # CatVision's own window came to the front
         self._auto_holding = False   # ...so the game's look is held (see AUTO_OWN_HOLD_S)
-        self._auto_last_look = None   # (time, key, offset, game) of the last live game picture
+        self._auto_last_look = None   # (time, key, offset, game, shadows) of the last live game picture
         # Auto mode on or off: the glide from the old look to the new one.
         self._mode_job = None
         self._mode_progress = 0.0     # how far it has got (0 = the old look, 1 = the new)
@@ -827,7 +827,7 @@ class CatVisionApp:
     def _auto_tick(self) -> None:
         """Decide where each display should go as new measurements arrive
         (five to ten a second).  The fader thread does the actual moving,
-        60-120 times a second, so the picture glides instead of stepping."""
+        60-240 times a second, so the picture glides instead of stepping."""
         self._auto_job = None
         if self._closed or not self._auto_active():
             return
@@ -908,7 +908,8 @@ class CatVisionApp:
                     m = latest[did]
                     if (m is not None and not m.black and not ctrl.frozen
                             and (did in self._auto_game_on or not self._auto_game)):
-                        self._auto_last_look = (now, ctrl.key, ctrl.offset, self._auto_game)
+                        self._auto_last_look = (now, ctrl.key, ctrl.offset, self._auto_game,
+                                                ctrl.shadows)
                 shown[did] = ("watching", latest[did])
             else:
                 shown[did] = ("starting", None)
@@ -997,7 +998,9 @@ class CatVisionApp:
                 # The brightness the goal follows (the brightest recent
                 # picture), so a press on a dark frame of a flickering light
                 # keeps the look instead of changing it.
-                found = (ctrl.key or m.key, ctrl.offset, self._auto_game)
+                # (And that picture's darkest quarter: the daylight lift follows it.)
+                found = (ctrl.key or m.key, ctrl.offset, self._auto_game,
+                         ctrl.shadows if ctrl.key else m.shadows)
                 break
             last = self._auto_last_look
             if (found is None and last is not None and self._auto_shown
@@ -1007,12 +1010,12 @@ class CatVisionApp:
                 # the taskbar): keep the look from just before.
                 found = last[1:]
             if found is not None:
-                key, offset, game = found
+                key, offset, game, shadows = found
                 lo, hi = autolevels.TARGET_LIMITS
                 # (Aim for stays as it is if it already gives this look.)
                 exact = autolevels.aim_for_auto_look(key, offset,
                                                      autolevels.auto_cap(self._auto_strength()),
-                                                     self._auto_aim(game), o.auto_dim)
+                                                     self._auto_aim(game), o.auto_dim, shadows)
                 aim = round(min(hi, max(lo, exact)), 3)
                 if game:     # remembered for this game only
                     o.auto_game_looks.pop(game, None)   # newest last

@@ -213,10 +213,13 @@ With CatVision on, that is all: everything is automatic.
   Dark Areas with auto levels was), gradually, so the picture doesn't jump.
   **How much** caps the lift (30 lifts up to Shadow boost 100 and a little
   Exposure; less holds it back, more allows more Exposure). Scenes around
-  *Aim for* get a smaller lift, and daylight scenes a moderate one
-  (Shadow boost about 30 at How much 30) for doorways, cover and bushes:
-  it lifts the shadows most and barely moves the bright parts, which
-  Outside detail keeps from glaring. It fades out for all-bright,
+  *Aim for* get a smaller lift, and daylight scenes a moderate one for
+  doorways, cover and bushes, sized by how dark the darkest quarter of the
+  picture is: deep shade or a dark doorway gets up to Shadow boost 30 (at
+  How much 30), a sunlit view with only light shadows gets just enough to
+  show them at the night look's level, so there is less glare. It lifts
+  the shadows most and barely moves the bright parts, which Outside detail
+  keeps from glaring. It fades out for all-bright,
   washed-out views (snow, sky, thick haze), and while *Cut through haze*
   works on a view it makes way for it (both together would push the
   bright parts to white).
@@ -236,12 +239,15 @@ With CatVision on, that is all: everything is automatic.
   to **dark patches**, so a dark doorway still gets help when the sky is
   bright.
 - **No visible steps:** changes glide in tiny steps (as many a second as
-  your display refreshes, from 60 up to 120) on their own background
+  your display refreshes, from 60 up to 240) on their own background
   thread, easing in and out with a speed limit, so you never see the
-  picture jump. With screens of different speeds, each display gets steps
-  at its own refresh rate (a 60 Hz screen next to a 144 Hz one gets 60 a
-  second, not 120), which saves CPU, and the quickest fade (into a dark
-  view) goes at each screen's own pace, so the slower one never shows
+  picture jump. A 240 Hz screen gets steps half as big as a 120 Hz one at
+  the same speed, so even quick fades glide; if a PC is too slow for
+  that, it drops back to 120 by itself. With screens of different speeds,
+  each display gets steps at its own refresh rate (a 60 Hz screen next to
+  a 144 Hz one gets 60 a second, not 144), which saves CPU, and the
+  quickest fade (into a dark view) goes at each screen's own pace, so the
+  slower one never shows
   bigger steps than it would on its own (also at rates that don't divide
   evenly, a 75 Hz screen next to a 144 Hz one).
   In Auto mode, for half a second right after the whole view changes
@@ -283,6 +289,13 @@ With CatVision on, that is all: everything is automatic.
   fade starts at full speed from the first brighter picture; walking out
   gets the same full-speed start once the view no longer looks like the
   dark one you were in. A light coming on in the same view doesn't count.
+- **Lights that stay on:** a lamp switched on, a light coming into view or
+  lightning that keeps the sky lit starts dimming at the usual gentle pace;
+  once the picture about 0.06 seconds later still calls for the same
+  look, it finishes the fade at the quicker new-view pace, still in small
+  steps (a lamp settles in about 0.4 seconds instead of 0.55). A light that
+  goes straight back off (a lightning stroke, a muzzle flash) keeps the
+  gentle pace.
 - **Flashbangs:** when the whole screen whites out (a flashbang or a blast
   right in front) and then fades back to the room you were in, it follows
   the fade as it goes, so you can see in the room again as soon as the
