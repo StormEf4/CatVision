@@ -9,8 +9,7 @@ test and build workflow are in `CLAUDE.md`; the user manual is `README.md`.
   - All work is on branch **`claude/beautiful-gates-rbuyej`**, which is also
     the repository's default branch. There are no other branches and no open
     PRs.
-- **Latest version: 1.20.2.** The release commit is `43b35e8`; this handoff
-  commit follows it and adds only `CLAUDE.md` and `HANDOFF.md`.
+- **Latest version: 1.21.0** (Gentle Boost softened, Moderate Boost added).
   - Download: the GitHub release `latest-build`
     (`https://github.com/StormEf4/CatVision/releases/download/latest-build/CatVision.exe`).
   - Windows CI is green, and the self-test reports no errors on the source
@@ -35,9 +34,9 @@ test and build workflow are in `CLAUDE.md`; the user manual is `README.md`.
 - **Working style:** short iterations, an exe after every green build, and
   time-boxed agent rounds when they ask for them.
 
-## What the app does now (1.20.2)
+## What the app does now (1.21.0)
 
-- **Presets:** Gentle Boost, Dark Areas, Night Vision, Pitch Black and others.
+- **Presets:** Gentle Boost, Moderate Boost, Dark Areas, Night Vision, Pitch Black and others.
   - Tune sliders: Shadow boost, Exposure, Gamma, Contrast, Brightness and so
     on.
   - Colour filters, plus the user's own filters.
@@ -82,6 +81,7 @@ test and build workflow are in `CLAUDE.md`; the user manual is `README.md`.
 | 1.20.0 | Auto became a standalone mode; haze band for light haze; menu detection added. |
 | 1.20.1 | Auto on/off glide; preset sliders greyed out in Auto. |
 | 1.20.2 | **Menu and inventory detection removed.** The user found the fade to normal in menus too jarring. Do not re-add it unless they ask. |
+| 1.21.0 | New **Moderate Boost** preset (the old Gentle Boost values: SB 40, Exposure 6, Anti-glare 100, Gamma 1.1), right after Gentle Boost. Gentle Boost softened to SB 23, Exposure 3.5, Gamma 1.05: about 40% less shadow lift. |
 
 ## Known limits and possible next steps
 

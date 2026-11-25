@@ -53,8 +53,8 @@ class ExposureNeverCrossesZeroTest(unittest.TestCase):
         self.assertGreater(lowest.exposure, 0)
         self.assertLessEqual(lowest.exposure, EXPOSURE_FLOOR + 0.005)
 
-    def test_gentle_boost_spill_stops_short_of_zero(self):
-        look = presets.builtin_by_name("Gentle Boost").settings   # SB 40, Exposure 6
+    def test_moderate_boost_spill_stops_short_of_zero(self):
+        look = presets.builtin_by_name("Moderate Boost").settings   # SB 40, Exposure 6
         self.assertGreater(biggest_step(look, "shadow_boost", -40, -60, guard=False), 3)
         self.assertLess(biggest_step(look, "shadow_boost", -40, -60), 1.5)
         self.assertGreater(applied(look, "shadow_boost", -60).exposure, 0)

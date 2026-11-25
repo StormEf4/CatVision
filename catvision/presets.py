@@ -28,6 +28,11 @@ class Preset:
 BUILTIN_PRESETS: list[Preset] = [
     Preset(
         "Gentle Boost",
+        "A soft lift for games that are only slightly too dark.",
+        Settings(shadow_boost=23, exposure=3.5, anti_glare=100, gamma=1.05),
+    ),
+    Preset(
+        "Moderate Boost",
         "A light lift for games that are just a bit too dark.",
         Settings(shadow_boost=40, exposure=6, anti_glare=100, gamma=1.1),
     ),

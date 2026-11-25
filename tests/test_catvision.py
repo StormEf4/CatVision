@@ -739,12 +739,30 @@ class ThermalTests(unittest.TestCase):
 class PresetCleanupTests(unittest.TestCase):
     def test_only_the_kept_presets_remain(self):
         self.assertEqual([p.name for p in BUILTIN_PRESETS], [
-            "Gentle Boost", "Dark Areas", "Pitch Black", "Night Vision", "Night Vision (Blue)",
+            "Gentle Boost", "Moderate Boost", "Dark Areas", "Pitch Black", "Night Vision",
+            "Night Vision (Blue)",
             "Fog & Haze Cutter", "Vivid Pop", "Glare Guard"])
         for key in ("deuteranopia", "protanopia", "tritanopia"):
             self.assertNotIn(key, curves.COLOR_FILTERS)
         for key in ("night_vision_red", "night_vision_grey", "thermal", "grayscale", "amber", "ice"):
             self.assertIn(key, curves.COLOR_FILTERS)          # filters kept
+
+    def test_moderate_boost_keeps_the_old_gentle_values(self):
+        """1.21.0: Moderate Boost took Gentle Boost's old values and Gentle
+        Boost now lifts the shadows about 40% less."""
+        from catvision.presets import builtin_by_name
+        moderate = builtin_by_name("Moderate Boost").settings
+        gentle = builtin_by_name("Gentle Boost").settings
+        self.assertEqual(moderate, curves.Settings(shadow_boost=40, exposure=6,
+                                                   anti_glare=100, gamma=1.1))
+
+        def shadow_lift(s):
+            ch = curves.build_ramp(s)[0]
+            half = range(len(ch) // 2)
+            return sum(ch[i] / 65535 - i / (len(ch) - 1) for i in half) / len(half)
+        ratio = shadow_lift(gentle) / shadow_lift(moderate)
+        self.assertGreater(ratio, 0.5)
+        self.assertLess(ratio, 0.7)
 
     def test_removed_presets_and_filters_migrate(self):
         c = config.Config.from_json({

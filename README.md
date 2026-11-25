@@ -468,7 +468,8 @@ screenshot route; otherwise). Neither opens, reads or changes the game.
 
 | Preset | Good for |
 | --- | --- |
-| Gentle Boost | Games that are just a little too dark |
+| Gentle Boost | Games that are only slightly too dark (the softest lift) |
+| Moderate Boost | Games that are just a little too dark |
 | Dark Areas | Everyday choice: dark rooms, caves, night |
 | Pitch Black | Nearly black areas (looks washed out, but you'll see) |
 | Night Vision | Like night-vision goggles: deep green shadows, pale highlights, no blinding bloom |
