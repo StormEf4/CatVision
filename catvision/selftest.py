@@ -343,14 +343,17 @@ def fader_steps_under_load(seconds: float, load: str, hz: float | None = None) -
     return out
 
 
-def fader_cpu_cost(seconds: float = 0.6) -> dict:
+def fader_cpu_cost(seconds: float = 1.5) -> dict:
     """Auto levels (beta): CPU the fader takes while a fade moves, at
     FADER_SAFE_HZ and at FADER_MAX_HZ (what a 240 Hz screen gets): the whole
     of each step (the controller, Auto mode's share-out, the engine building
     the brightness table) on a stand-in display, so nothing on screen
     changes.  The Windows call itself is gamma_calls' set_ramp_quick_cpu_ms
-    for each update on top.  ``cpu_ms_per_s``: CPU milliseconds per second
-    of fading (10 = 1% of one core); ``busy_limited``: the fader went back to
+    for each update on top.  ``step_ms``: the median time of one whole step
+    (timed directly, so it is exact where the CPU totals are not);
+    ``cpu_ms_per_s``: CPU milliseconds per second of fading (10 = 1% of one
+    core; Windows counts it in 15.6 ms ticks, so it is rough); and
+    ``busy_limited``: the fader went back to
     FADER_SAFE_HZ because its steps cost too much here.  Information only:
     never raises, problems go in "error"."""
     import time
@@ -379,14 +382,26 @@ def fader_cpu_cost(seconds: float = 0.6) -> dict:
 
             fader = autolevels.Fader({did: ctrl}, apply, hz=hz)
             fader.set_rates({did: hz})
+            steps: list[float] = []
+
+            def timed(*args, fader=fader, steps=steps, **kwargs):
+                start = time.perf_counter()
+                result = type(fader).tick(fader, *args, **kwargs)
+                steps.append(time.perf_counter() - start)
+                return result
+            fader.tick = timed
             fader.start()
             time.sleep(0.1)                                   # (under way)
             cpu, wall, n = time.process_time(), time.perf_counter(), updates[0]
+            del steps[:]
             time.sleep(seconds)
             cpu, wall = time.process_time() - cpu, time.perf_counter() - wall
             n = updates[0] - n
             fader.stop()
+            took = sorted(steps) or [0.0]
             out[str(hz)] = {"updates_per_s": round(n / wall, 1),
+                            "step_ms": round(took[len(took) // 2] * 1000, 3),
+                            "step_p95_ms": round(took[int(len(took) * 0.95)] * 1000, 3),
                             "cpu_ms_per_s": round(cpu / wall * 1000, 1),
                             "cpu_ms_per_update": round(cpu / max(n, 1) * 1000, 3),
                             "busy_limited": fader.busy_limited,

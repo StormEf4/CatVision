@@ -68,8 +68,15 @@ test and build workflow are in `CLAUDE.md`; the user manual is `README.md`.
     counted at no more than 120 a second (`CEILING_STEP_HZ`), so speeds are
     the same and a 240 Hz screen gets half-size steps. If a step costs over
     30% of its interval (mean over 240 steps, `note_step_cost`), the fader
-    drops to 120 (`FADER_SAFE_HZ`) until restarted. The CI self-test's
-    `fader_cpu` check reports the cost per update on Windows.
+    drops to 120 (`FADER_SAFE_HZ`) until restarted.
+  - **Fader cost on Windows** (CI runner, 1.22.0): one update is about
+    0.15 ms for the engine (`update_cost.engine_update_ms`) plus about
+    0.23 ms CPU for SetDeviceGammaRamp (`gamma_calls.set_ramp_quick_cpu_ms`)
+    per display, so about 10% of one core at 240 a second while a fade
+    moves (5% at 120), and nothing at rest. The fader reached 239.8 Hz
+    (max gap 4.6 ms) and 238 Hz with the Watcher running. The self-test's
+    `fader_cpu` check times each step directly (`step_ms`); its CPU totals
+    are rough because Windows counts thread CPU in 15.6 ms ticks.
   - **Switching:** turning Auto on or off glides over 0.4 s. The preset sliders
     are greyed out while Auto is on.
   - **Options** (all beta):
