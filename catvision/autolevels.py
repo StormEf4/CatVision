@@ -74,6 +74,18 @@ LEAVING_UNDERWAY = 0.5          # (under way: its goal is at least this many poi
 RUSH_VIEW_S = 0.06              # turning or walking out to a brighter view fades at the speed
                                 # limit from the start (the view change hides the fade); a
                                 # light flashing on keeps RUSH_S's gentler start
+# A brighter light that lasts (a lamp come into view, a flare, a light
+# switched on, the sky still lit by lightning) is no flicker: once a picture
+# at least LASTING_S after the fade down for it began still calls for about
+# that goal (within DEAD_ZONE: the light is still on), the rest of the fade
+# goes at the new-view pace (RUSH_VIEW_S) instead of the normal one (FALL_S:
+# about 0.7 s in all) or a flash's gentler start (RUSH_S).  The goal is the
+# one the brighter picture set either way, so a flickering light only gets
+# there sooner, never further, and nothing brightens sooner.  At the quick
+# capture pace the picture that confirms a brighter one (FLASH_CONFIRM_S)
+# already shows it has lasted; at the usual pace it is the next picture.
+LASTING_S = FLASH_CONFIRM_S
+LASTING_UNTIL_S = 1.0           # (a fade down begun longer ago than this is left as it goes)
 # Speed limits in slider points per second: with 60 updates a second (more
 # on faster screens) even the fastest normal fade moves well under one point
 # per update, which the eye can't see as a step.
@@ -88,12 +100,19 @@ MAX_RUSH = 240.0
 CEILING = 80.0
 CEILING_RUSH = 240.0
 FADER_HZ = 60                   # how often the displays are moved (a 60 Hz screen)...
-FADER_MAX_HZ = 120              # ...and on faster screens up to this, so each step is smaller
-# Not 240 on a 240 Hz screen: the eye can't follow brightness changes much
-# faster than 60-90 a second (why flicker above that looks steady), so
-# 120 steps a second already blend into one glide, even in a 0.1 s flash
-# fade.  Every step costs a Windows call per display (and the game needs
-# the CPU), so 240 would double what a fade costs for nothing visible.
+FADER_MAX_HZ = 240              # ...and on faster screens up to this, so each step is smaller
+# On a 240 Hz screen a fade moves 240 times a second, each step half as big
+# as at 120: fast fades (a flash, a turn into the light) glide instead of
+# showing 2 L* steps.  The speeds stay as at 120 Hz (see CEILING_STEP_HZ),
+# so only the steps get smaller.  Each step costs a brightness table and a
+# Windows call per display, about 0.1-0.3 ms here, and only while a fade
+# moves (at rest nothing is updated).  A PC where a step costs more than
+# FADER_BUSY_SHARE of a step's time (averaged over FADER_BUSY_STEPS moving
+# steps, CPU time of the fader thread) goes back to FADER_SAFE_HZ for the
+# rest of that Auto mode session, so a slow PC never gives the game less.
+FADER_SAFE_HZ = 120
+FADER_BUSY_SHARE = 0.3
+FADER_BUSY_STEPS = 240
 IDLE_S = 0.1                    # how often the fader checks for a new goal while at rest
 # The fader passes a move on once some display has gone this far (slider
 # points) since the last move it passed on.  The slow end of a glide moves a
@@ -159,7 +178,9 @@ RISE_VIEW_S = 0.15              # a new darker view is caught up with quicker st
 MAX_RISE_VIEW = 160.0           # ...up to this many points a second (120 updates a second)...
 CEILING_STEP = 4 / 3            # ...but never more than this per update (80 a second at 60 Hz,
                                 # under the 2 points of a flash's fade at 120 Hz; per update
-                                # the display really gets, see Fader.set_rates)
+                                # the display really gets, see Fader.set_rates)...
+CEILING_STEP_HZ = 120           # ...counting at most this many updates a second (faster
+                                # screens fade at the same speed in smaller steps)
 TURN_BRAKE = 8000.0             # still moving away from a goal that turned round (a light
                                 # came up while brightening): slow down by this many points
                                 # a second, every second, so even the quickest rise (160 a
@@ -918,6 +939,15 @@ AUTO_RAMP_STOPS = 1.5
 # haze), and only views brighter still are toned down.
 AUTO_DAY_SHARE = 0.25
 AUTO_DAY_STOPS = 1.0
+# How much of that lift a bright view gets follows its darkest quarter
+# (Measurement.shadows), not how bright the whole picture is: just enough to
+# show the darkest quarter at the night look's level (AUTO_SHOWN x Aim for),
+# up to the daylight lift.  A view whose shadows are already that bright (a
+# sunlit field, the open sky, snow) gets none, so nothing is lifted into
+# glare, and a bright view with deep shadows in it (a doorway, under a roof)
+# keeps the full lift however bright the rest is.  It only fades out over
+# the last AUTO_DAY_TOP_STOPS before the tone-down starts, so the two meet.
+AUTO_DAY_TOP_STOPS = 0.5
 AUTO_DAY_HAZE = 20.0            # haze cut or band points that take the daylight lift off fully
 # Toning a bright scene down: each point takes this much off Brightness
 # (overall gain), down to AUTO_TONE_FLOOR, with just enough Shadow boost to
@@ -1057,39 +1087,54 @@ def auto_day_lift(strength: float) -> float:
     return max(0.0, strength) * AUTO_DAY_SHARE
 
 
-def auto_offset(key: float, strength: float, target: float, dim: bool = True) -> float:
+def day_lift_for_shadows(shadows: float, strength: float, target: float) -> float:
+    """Auto mode: the daylight lift (points, at most auto_day_lift) for a
+    view whose darkest quarter is this bright: just enough to show it at
+    AUTO_SHOWN x Aim for (see AUTO_DAY_TOP_STOPS)."""
+    return _lift_to_show(max(shadows, 1 / 255), target * AUTO_SHOWN, auto_day_lift(strength))
+
+
+def auto_offset(key: float, strength: float, target: float, dim: bool = True,
+                shadows: float | None = None) -> float:
     """Auto mode's goal (points, like target_offset; ``strength`` is already
     auto_cap of How much): a scene darker than Aim for is lifted so it is
     shown at about AUTO_SHOWN x Aim for (in full from AUTO_RAMP_STOPS below
-    it), a brighter one keeps the daylight lift (auto_day_lift, fading out
-    over AUTO_DAY_STOPS), and only one brighter still is toned down (only
-    if dim) like target_offset."""
+    it), a brighter one keeps the daylight lift, and only one brighter still
+    is toned down (only if dim) like target_offset.  The daylight lift
+    follows the darkest quarter, ``shadows`` (day_lift_for_shadows, fading
+    out over the last AUTO_DAY_TOP_STOPS); not known (None), it is the full
+    lift fading out over AUTO_DAY_STOPS by the key, as before."""
     key = max(key, 1 / 255)
     stops = math.log2(target / key) + AUTO_RAMP_STOPS
-    day = auto_day_lift(strength)
+    day = (auto_day_lift(strength) if shadows is None
+           else day_lift_for_shadows(shadows, strength, target))
     if stops > 0:
         full = _lift_to_show(key, target * AUTO_SHOWN, strength)
         return max(day, full * min(1.0, stops / AUTO_RAMP_STOPS))
     stops += AUTO_DAY_STOPS
     if stops > 0:
-        return day * stops / AUTO_DAY_STOPS
+        fade = AUTO_DAY_STOPS if shadows is None else AUTO_DAY_TOP_STOPS
+        return day * min(1.0, stops / fade)
     if not dim:
         return 0.0
     return strength * max(-1.0, stops / STOPS_FOR_FULL)
 
 
 def aim_for_auto_look(key: float, offset: float, strength: float,
-                      current: float | None = None, dim: bool = True) -> float:
+                      current: float | None = None, dim: bool = True,
+                      shadows: float | None = None) -> float:
     """aim_for_current_look for auto mode (``strength``: auto_cap of How
-    much): the Aim for (searched: the goal rises with it) giving this look."""
-    if current is not None and abs(auto_offset(key, strength, current, dim) - offset) < 0.5:
+    much; ``shadows``: see auto_offset): the Aim for (searched: the goal
+    rises with it) giving this look."""
+    if (current is not None
+            and abs(auto_offset(key, strength, current, dim, shadows) - offset) < 0.5):
         return current
     if strength <= 0:
         return key
     lo, hi = 1e-3, 1.0
     for _ in range(40):
         mid = math.sqrt(lo * hi)
-        if auto_offset(key, strength, mid, dim) < offset:
+        if auto_offset(key, strength, mid, dim, shadows) < offset:
             lo = mid
         else:
             hi = mid
@@ -1112,7 +1157,7 @@ class Controller:
     observe() takes each new measurement (five a second, ten while the
     brightness changes a lot, twice that when capturing is cheap: see
     QUICK_CAPTURE_MS) and sets the goal; advance() moves toward it
-    in tiny steps (60-120 a second, on the fader thread).  The motion eases
+    in tiny steps (60-240 a second, on the fader thread).  The motion eases
     in and out like a spring and has a speed limit, so there is never a
     visible jump."""
     offset: float = 0.0
@@ -1122,9 +1167,10 @@ class Controller:
     velocity: float = 0.0
     rush: bool = False                             # a flash (or walking out of the dark): fade down extra fast
     frozen: bool = False                           # the picture has stopped changing
-    key: float = 0.0                               # the brightness the goal follows
+    key: float = 0.0                               # the brightness the goal follows...
+    shadows: float = 0.0                           # ...and that picture's darkest quarter
     _catch_up: bool = False                        # a big brightening: quick pace to the end
-    _recent: list = field(default_factory=list)   # (time, key) of the last SETTLE_S
+    _recent: list = field(default_factory=list)   # (time, key, shadows) of the last SETTLE_S
     _last_key: float = 0.0
     _jump_at: float = -CALM_S                      # when a light last went on (or a flash)
     _missing_since: float | None = None
@@ -1165,11 +1211,16 @@ class Controller:
     _seen: list = field(default_factory=list)     # (time, Measurement): every picture of the last SETTLE_S
     _unconfirmed: tuple | None = None              # (time, Measurement): a brighter picture not yet counted
     _unconfirmed_view: bool = False                # (and it is a different view: see VIEW_CONFIRM_S)
+    _fall_at: float | None = None                  # when the last fade down began (see LASTING_S)
+    _rush_light: bool = False                      # the fast fade is for a lasting light, not a flash
 
-    def _goal(self, key: float, strength: float, target: float, dim: bool) -> float:
-        """target_offset, or auto_offset in auto mode (``standalone``)."""
+    def _goal(self, key: float, strength: float, target: float, dim: bool,
+              shadows: float | None = None) -> float:
+        """target_offset, or auto_offset in auto mode (``standalone``; its
+        daylight lift follows ``shadows``, by default the steered picture's)."""
         if self.standalone:
-            return auto_offset(key, strength, target, dim)
+            return auto_offset(key, strength, target, dim,
+                               self.shadows if shadows is None else shadows)
         return target_offset(key, strength, target, dim)
 
     def observe(self, m: Measurement | None, strength: float, target: float,
@@ -1270,8 +1321,8 @@ class Controller:
     def _count(self, now: float, m: Measurement, strength: float, target: float,
                dim: bool) -> None:
         """observe() for a picture that counts (seen, not black, not lost)."""
-        self._recent = [(t, k) for t, k in self._recent if now - t < SETTLE_S]
-        self._recent.append((now, m.key))
+        self._recent = [e for e in self._recent if now - e[0] < SETTLE_S]
+        self._recent.append((now, m.key, m.shadows))
         if self._last_key and m.key > self._last_key * STEADY_RATIO:
             self._jump_at = now
             if now - self._quick_at < ALTERNATE_S or now < self._alternate_until:
@@ -1289,7 +1340,7 @@ class Controller:
         # (Turning back and forth between a bright and a dark view counts as
         # a light flashing too: see ALTERNATE_HOLD_S.)
         calm = now - self._jump_at >= CALM_S and now >= self._alternate_until
-        lately = [(t, k) for t, k in self._recent if now - t < SETTLE_FAST_S]
+        lately = [(t, k) for t, k, _s in self._recent if now - t < SETTLE_FAST_S]
         steady = [k for _t, k in lately]
         newest = self._darkening()
         early, halfway = None, False
@@ -1297,13 +1348,13 @@ class Controller:
                 and max(steady) <= min(steady) * STEADY_RATIO):
             # Steadily dark with no light flashing lately (walked into a
             # building): only wait SETTLE_FAST_S, so it isn't left too dark.
-            early = max(steady)
+            early, since = max(steady), lately[0][0]
         elif (calm and len(newest) == DARKENING_COUNT
               and all(b < a * DARKER for a, b in zip(newest, newest[1:]))):
             # Getting darker and darker (walking into a cave): start
             # brightening gently on the way, halfway (in stops) to the newest picture.
-            early = math.sqrt(max(k for _t, k in self._recent) * newest[-1])
-            halfway = True
+            early = math.sqrt(max(k for _t, k, _s in self._recent) * newest[-1])
+            halfway, since = True, now
         view_key = self._new_darker_view(now, m)
         new_dark = view_key
         if view_key is None:
@@ -1315,12 +1366,19 @@ class Controller:
             # settled in after a quick look out (or a white-out fading back
             # to it): follow it now.
             early, halfway = view_key, False
-            self._quick_at = self._stretch[0][0]
+            self._quick_at = since = self._stretch[0][0]
         if early is not None:
             # Brightening granted early is kept: the older, brighter pictures
             # can't take it back (that would pump), only a brighter new one can.
-            self._recent = [(t, min(k, early)) for t, k in self._recent]
-        key = self.key = max(k for _t, k in self._recent)
+            # (Their shadows neither: only the pictures that granted it count,
+            # from ``since``, see AUTO_DAY_TOP_STOPS.)
+            shade = max(sh for t, _k, sh in self._recent if t >= since)
+            self._recent = [(t, min(k, early), min(sh, shade)) for t, k, sh in self._recent]
+        key = self.key = max(k for _t, k, _s in self._recent)
+        # The daylight lift follows the shadows the same way: by the
+        # brightest darkest quarter of the recent pictures, so it comes off
+        # at once and only goes back up once they have all called for it.
+        self.shadows = max(sh for _t, _k, sh in self._recent)
         want = self._goal(key, strength, target, dim)
         flash = bool(self._last_key) and m.key >= self._last_key * FLASH_RATIO
         # Coming out of the dark (a cave mouth, a door swinging open onto
@@ -1365,6 +1423,8 @@ class Controller:
             brighter = self.rush and want < self.want
             if want < self.want:
                 self._view_rise = False
+                if self.want >= self.offset - LEAVING_UNDERWAY:
+                    self._fall_at = now          # a fade down begins (see LASTING_S)
             elif (view_key is not None and early == view_key) or (
                     halfway and self._estimate and self._left_settled_view(m)):
                 # A new darker view is caught up with at the quickest pace;
@@ -1381,10 +1441,39 @@ class Controller:
             # before rush, so the fader thread never pairs a new fast fade
             # with the pace of an old one.
             self._rush_view = rush and (new_view or (brighter and self._rush_view))
+            self._rush_light = (rush and brighter and not flash and not new_view
+                                and self._rush_light)
             if rush and new_view and not brighter:
                 self._cut_at = now
             self.rush = rush
             self._estimate = halfway
+        if not (self.rush and self._rush_view) and self._lasting_light(now, m, strength, target,
+                                                                     dim):
+            # A light that came on and stayed: the rest of the fade down at
+            # the new-view pace (see LASTING_S).  A light that isn't a flash
+            # keeps the normal fades' speed ceiling (CEILING: steps as small
+            # as before, only a quicker start and end); a flash keeps its
+            # own.  Never AUTO_CUT_STEP's bigger steps: only a change of view
+            # hides those.  (_rush_view and _rush_light first: the fader
+            # thread never pairs the fast pace with an old fade.)
+            self._rush_light = not self.rush
+            self._rush_view = True
+            self.rush = True
+
+    def _lasting_light(self, now: float, m: Measurement, strength: float, target: float,
+                       dim: bool) -> bool:
+        """Whether m shows that a brighter light the display is fading down
+        for has lasted (see LASTING_S): the fade began at least LASTING_S
+        before m (and no more than LASTING_UNTIL_S), and m on its own still
+        calls for about the goal it is fading to (within the dead zone: the
+        light is still on).  Called after m has set the goal."""
+        began = self._fall_at
+        if began is None or self.want >= self.offset - LEAVING_UNDERWAY:
+            return False
+        if not LASTING_S - 1e-9 <= now - began <= LASTING_UNTIL_S:
+            return False
+        own = self._goal(m.key, strength, target, dim, m.shadows)
+        return own <= self.want + max(0.5, strength * DEAD_ZONE)
 
     def _cut_open(self) -> bool:
         """Auto mode: a fade for a view that changed all over, within
@@ -1402,7 +1491,7 @@ class Controller:
         swelling and fading every second or two fades, at night or in
         drifting fog, and the picture pumps.)"""
         keys, last = [], None
-        for t, k in reversed(self._recent):
+        for t, k, _s in reversed(self._recent):
             if last is None or last - t >= BURST_S - BURST_QUICK_S / 2:
                 keys.append(k)
                 last = t
@@ -1629,10 +1718,11 @@ class Controller:
         self.want = 0.0
         self.room_want, self._room_back, self._highs = 0.0, True, 0.0
         self.haze_want, self.band_want, self._hazes = 0.0, 0.0, []
-        self.rush = self._rush_view = False
+        self.rush = self._rush_view = self._rush_light = False
         self._recent.clear()
         self._last_key = 0.0
         self._seen, self._unconfirmed = [], None
+        self._fall_at = None
         self._black_since = None
         self._jump_at = self.clock - CALM_S
         self._stretch, self._settled, self._estimate = [], None, False
@@ -1831,8 +1921,11 @@ class Controller:
         elif self.rush:
             tau = RUSH_VIEW_S if self._rush_view else RUSH_S
             vmax, per_update = MAX_RUSH, False
+            light = self._rush_light
         else:
             tau, vmax, per_update = FALL_S, MAX_FALL, False
+        if gap > 0 or not self.rush:
+            light = False
         cut = self._cut_open()
         if cut:
             # (Auto mode, a view changed all over: see AUTO_CUT_STEP.  The
@@ -1858,9 +1951,11 @@ class Controller:
             # stalled update can't make a bigger step.  A screen updated
             # only every few steps (a 60 Hz one next to a 144 Hz one) counts
             # its own updates, or it would show steps twice the cap.
-            ceiling = CEILING_STEP / max(dt, frame or 1.0 / FADER_MAX_HZ)
+            ceiling = CEILING_STEP / max(dt, frame or 1.0 / FADER_MAX_HZ, 1.0 / CEILING_STEP_HZ)
         else:
-            ceiling = CEILING_RUSH if vmax == MAX_RUSH else CEILING
+            # (A lasting light that isn't a flash: the normal ceiling, see
+            # LASTING_S.)
+            ceiling = CEILING_RUSH if vmax == MAX_RUSH and not light else CEILING
         if self.standalone:
             # Auto mode: the same share of its (wider) range a second, each
             # step no more visible than a preset's (see AUTO_PACE_POINT).
@@ -1901,6 +1996,9 @@ class Fader:
         self.apply = apply
         self.speed = 1.0
         self.interval = 1.0 / hz     # may be changed while running (set_rate)
+        self._hz = float(hz)         # the rate asked for (set_rate)...
+        self.busy_limited = False    # ...held at FADER_SAFE_HZ: steps cost too much here
+        self._busy = [0.0, 0]        # CPU seconds and steps of the moving steps measured
         # Per display: its own updates a second (see set_rates).  A display
         # not listed is passed on at the fader's own pace.
         self.rates: dict[str, int] = {}
@@ -1929,6 +2027,9 @@ class Fader:
         stop = self._stop = threading.Event()
         self.last_error = ""
         self._ticked_at = None   # (an earlier run's last step says nothing about this one)
+        # (Each run measures what its steps cost afresh: see FADER_BUSY_SHARE.)
+        self.busy_limited, self._busy = False, [0.0, 0]
+        self.set_rate(self._hz)
         self._thread = threading.Thread(target=self._run, args=(stop, self.apply),
                                         name="catvision-auto-fader", daemon=True)
         self._thread.start()
@@ -1945,8 +2046,29 @@ class Fader:
         self._wake.set()
 
     def set_rate(self, hz: float) -> None:
-        """Updates a second (the displays' refresh rate; see fader_rate)."""
+        """Updates a second (the displays' refresh rate; see fader_rate),
+        at most FADER_SAFE_HZ once the steps cost too much (busy_limited)."""
+        self._hz = float(hz)
+        if self.busy_limited:
+            hz = min(hz, FADER_SAFE_HZ)
         self.interval = 1.0 / max(1.0, hz)
+
+    def note_step_cost(self, cpu_s: float) -> None:
+        """One moving step's CPU time (the fader thread's): over
+        FADER_BUSY_STEPS of them above FADER_SAFE_HZ, a PC where they cost
+        more than FADER_BUSY_SHARE of the step's time goes back to
+        FADER_SAFE_HZ (see FADER_MAX_HZ).  Averaged, because Windows counts
+        a thread's CPU time in 15.6 ms ticks."""
+        if self.busy_limited or self.interval >= 1.0 / FADER_SAFE_HZ - 1e-9:
+            return
+        busy = self._busy
+        busy[0] += max(0.0, cpu_s)
+        busy[1] += 1
+        if busy[1] >= FADER_BUSY_STEPS:
+            if busy[0] / busy[1] > FADER_BUSY_SHARE * self.interval:
+                self.busy_limited = True
+                self.set_rate(self._hz)
+            self._busy = [0.0, 0]
 
     def set_rates(self, refresh_rates: dict[str, float]) -> None:
         """Each display's refresh rate ({display id: Hz}).  The fader steps
@@ -2077,7 +2199,10 @@ class Fader:
                 # so a fade starts exactly as it would have anyway.  At rest it
                 # still refreshes apply() a few times a second (cheap, and a
                 # changed preset gets shared out again).
+                cpu = time.thread_time()
                 self.tick(dt, self.interval if idle else None, force=idle, apply=apply)
+                if not idle:
+                    self.note_step_cost(time.thread_time() - cpu)
                 idle = self.settled()
             except Exception as exc:  # keep fading; the window shows nothing breaks
                 self.last_error = repr(exc)

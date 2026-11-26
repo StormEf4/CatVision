@@ -343,6 +343,74 @@ def fader_steps_under_load(seconds: float, load: str, hz: float | None = None) -
     return out
 
 
+def fader_cpu_cost(seconds: float = 1.5) -> dict:
+    """Auto levels (beta): CPU the fader takes while a fade moves, at
+    FADER_SAFE_HZ and at FADER_MAX_HZ (what a 240 Hz screen gets): the whole
+    of each step (the controller, Auto mode's share-out, the engine building
+    the brightness table) on a stand-in display, so nothing on screen
+    changes.  The Windows call itself is gamma_calls' set_ramp_quick_cpu_ms
+    for each update on top.  ``step_ms``: the median time of one whole step
+    (timed directly, so it is exact where the CPU totals are not);
+    ``cpu_ms_per_s``: CPU milliseconds per second of fading (10 = 1% of one
+    core; Windows counts it in 15.6 ms ticks, so it is rough); and
+    ``busy_limited``: the fader went back to
+    FADER_SAFE_HZ because its steps cost too much here.  Information only:
+    never raises, problems go in "error"."""
+    import time
+    from . import autolevels
+    from .backends import NullColorBackend, NullGammaBackend
+    from .engine import Engine
+    out: dict = {}
+    try:
+        engine = Engine(NullGammaBackend(), NullColorBackend())
+        engine.set_settings(autolevels.AUTO_BASE)
+        engine.set_enabled(True)
+        did = engine.monitors()[0].id
+        base = autolevels.look_values(autolevels.AUTO_BASE)
+        for hz in (autolevels.FADER_SAFE_HZ, autolevels.FADER_MAX_HZ):
+            ctrl = autolevels.Controller(standalone=True, strength=autolevels.auto_cap(30.0),
+                                         want=110.0)
+            updates = [0]
+
+            def apply(pos, ctrl=ctrl, updates=updates):
+                updates[0] += 1
+                if abs(ctrl.offset - ctrl.want) < 1.0:     # keep it fading, back and forth
+                    ctrl.want = 110.0 - ctrl.want
+                amounts = {k: round(v, 2) for k, v in autolevels.fader_amounts(
+                    "shadow_boost", pos[did], base, ctrl, standalone=True).items() if v}
+                engine.set_auto_offsets({did: amounts})
+
+            fader = autolevels.Fader({did: ctrl}, apply, hz=hz)
+            fader.set_rates({did: hz})
+            steps: list[float] = []
+
+            def timed(*args, fader=fader, steps=steps, **kwargs):
+                start = time.perf_counter()
+                result = type(fader).tick(fader, *args, **kwargs)
+                steps.append(time.perf_counter() - start)
+                return result
+            fader.tick = timed
+            fader.start()
+            time.sleep(0.1)                                   # (under way)
+            cpu, wall, n = time.process_time(), time.perf_counter(), updates[0]
+            del steps[:]
+            time.sleep(seconds)
+            cpu, wall = time.process_time() - cpu, time.perf_counter() - wall
+            n = updates[0] - n
+            fader.stop()
+            took = sorted(steps) or [0.0]
+            out[str(hz)] = {"updates_per_s": round(n / wall, 1),
+                            "step_ms": round(took[len(took) // 2] * 1000, 3),
+                            "step_p95_ms": round(took[int(len(took) * 0.95)] * 1000, 3),
+                            "cpu_ms_per_s": round(cpu / wall * 1000, 1),
+                            "cpu_ms_per_update": round(cpu / max(n, 1) * 1000, 3),
+                            "busy_limited": fader.busy_limited,
+                            "error": fader.last_error or None}
+    except Exception as exc:
+        out["error"] = repr(exc)
+    return out
+
+
 def gamma_call_cost(gamma, calls: int = 200) -> dict:
     """Auto levels (beta): where one brightness change's time goes on this
     PC (every fade step makes one per display, two when Windows limits the
@@ -1153,7 +1221,7 @@ def run(report_path: str) -> int:
         out["key_before"] = round(before.key, 4)
         original = gamma.get_ramp(m.id)
         if original is not None:
-            # How long one brightness change takes (the fader makes up to 120 a second).
+            # How long one brightness change takes (the fader makes up to 240 a second).
             ramps = [curves.build_ramp(curves.Settings(shadow_boost=40 + i % 2)) for i in range(2)]
             start = time.perf_counter()
             for i in range(20):
@@ -1190,7 +1258,7 @@ def run(report_path: str) -> int:
         from . import autolevels
         out = {"refresh_hz": {m.short or m.id: m.hz for m in gamma.monitors()}}
         try:
-            for hz in (autolevels.FADER_HZ, autolevels.FADER_MAX_HZ):
+            for hz in (autolevels.FADER_HZ, autolevels.FADER_SAFE_HZ, autolevels.FADER_MAX_HZ):
                 stamps = []
                 ctrl = autolevels.Controller(want=1e6, strength=1e6)   # always moving
                 fader = autolevels.Fader({"test": ctrl}, lambda pos: stamps.append(time.perf_counter()))
@@ -1212,7 +1280,7 @@ def run(report_path: str) -> int:
 
     def update_cost():
         """Auto levels (beta): CPU milliseconds for one fade step on this PC
-        (medians; the fader makes up to 120 a second per display).  Uses a
+        (medians; the fader makes up to 240 a second per display).  Uses a
         stand-in display, so nothing on screen changes.  Information only."""
         import statistics
         import time
@@ -1253,7 +1321,7 @@ def run(report_path: str) -> int:
         return out
 
     def fader_load():
-        """Auto levels (beta): how evenly the fader steps at 120 a second
+        """Auto levels (beta): how evenly the fader steps at 240 a second
         while the Watcher measures and the window works, and with a thread
         measuring back to back (the worst case).  Information only: never
         fails the test."""
@@ -1281,6 +1349,7 @@ def run(report_path: str) -> int:
     check("fader", fader_timing)
     check("update_cost", update_cost)
     check("gamma_calls", lambda: gamma_call_cost(gamma))
+    check("fader_cpu", fader_cpu_cost)
     check("capture_cost", capture_cost)
 
     def fast_capture():

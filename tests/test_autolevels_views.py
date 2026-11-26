@@ -563,7 +563,8 @@ class TurningTowardTheLightTests(unittest.TestCase):
                 if c.offset <= start - points:
                     return n / 120
             return None
-        with mock.patch.object(Controller, "_left_for_brighter_view", return_value=False):
+        with mock.patch.object(Controller, "_left_for_brighter_view", return_value=False), \
+                mock.patch.object(Controller, "_lasting_light", return_value=False):
             gentle = walk_out()
         self.assertFalse(gentle._rush_view)       # (what it did before: the gentler start)
         self.assertLess(down_by(c, 8.0), down_by(gentle, 8.0))

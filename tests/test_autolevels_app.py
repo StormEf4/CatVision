@@ -865,11 +865,11 @@ class AutoLevelsAppStress(unittest.TestCase):
         msg = self.app._keep_auto_look(quiet=True)
         lo, hi = autolevels.TARGET_LIMITS
         cap = autolevels.auto_cap(o.auto_strength)
-        want = autolevels.aim_for_auto_look(c2.key, c2.offset, cap)
+        want = autolevels.aim_for_auto_look(c2.key, c2.offset, cap, shadows=c2.shadows)
         kept = o.auto_game_looks.get("Game A")
         # (Several Aim fors can give the same look, the daylight lift's
         # plateau: the one in use is kept then.)
-        if abs(autolevels.auto_offset(c2.key, cap, kept) - c2.offset) >= 0.5:
+        if abs(autolevels.auto_offset(c2.key, cap, kept, shadows=c2.shadows) - c2.offset) >= 0.5:
             self.assertAlmostEqual(kept, min(hi, max(lo, want)), delta=0.01, msg=msg)
         self.assert_clean()
 
